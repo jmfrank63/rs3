@@ -24,27 +24,20 @@ fn app_config(config: &mut web::ServiceConfig) {
     config.route("/", web::get().to(index));
 }
 
-async fn index(_req: HttpRequest) -> impl Responder {
+async fn index(_req: HttpRequest) -> HttpResponse {
     HttpResponse::Ok().json("{'Status' : 'Up'}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{http, test};
-    use std::io::Read;
+    use actix_web::http::StatusCode;
+    use actix_web::test;
 
     #[actix_rt::test]
     async fn test_index_ok() {
         let req = test::TestRequest::with_header("content-type", "text/plain").to_http_request();
         let resp = index(req).await;
-        assert!(resp.status().is_ok());
-    }
-
-    #[actix_rt::test]
-    async fn test_index_not_ok() {
-        let req = test::TestRequest::default().to_http_request();
-        let resp = index(req).await;
-        assert!(resp.status().is_err());
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
