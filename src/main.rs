@@ -2,7 +2,7 @@ mod config;
 
 use crate::config::RS3Config;
 
-use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
 use std::io;
 
 #[actix_rt::main]
