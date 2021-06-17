@@ -10,14 +10,14 @@ pub struct ServerConfig {
 
 #[derive(Deserialize)]
 pub struct RS3Config {
-    pub server: ServerConfig,
+    pub rs3_server: ServerConfig,
 }
 
 impl RS3Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         dotenv().ok();
-        let mut s3_config = Config::new();
-        s3_config.merge(Environment::new()).unwrap();
-        s3_config.try_into()
+        let mut rs3_config = Config::new();
+        rs3_config.merge(Environment::new())?;
+        rs3_config.try_into()
     }
 }
