@@ -1,13 +1,13 @@
 mod config;
 
-use crate::config::RS3Config;
+use crate::config::Config;
 
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
 use std::io;
 
 #[actix_web::main]
 pub async fn main() -> io::Result<()> {
-    let rs3_conf = RS3Config::from_env().unwrap();
+    let rs3_conf = Config::from_env().unwrap();
 
     println!(
         "Starting Http server at host address: {}, with port: {}!",
