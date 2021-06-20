@@ -1,2 +1,2 @@
-# Rust based s3 object store
+# Rust based information nosql object store
 ## Master project jfrank11 DSC Birkbeck
