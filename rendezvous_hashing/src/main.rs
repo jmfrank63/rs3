@@ -14,9 +14,21 @@ fn main() {
         println!("{}", node.node_id());
     }
 
-    nodes.remove(&"foo");
-    nodes.remove(&"qux");
+    // nodes.remove(&"foo");
+    // nodes.remove(&"qux");
     println!("{}", nodes.len());
+
+    let mut counts = HashMap::new();
+    let amount = 121;
+    for item in 0..amount {
+        let node = nodes.calc_candidates(&item).nth(0).unwrap();
+        if node.node_id() == &"qux" {
+            println!("{}, {}", node.node_id(), node.node.to_string());
+        }
+
+        *counts.entry(node.node.to_string()).or_insert(0) += 1;
+    }
+
 }
 
 #[cfg(test)]
