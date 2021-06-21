@@ -4,13 +4,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
 use hashring::{HashRing, DefaultHashBuilder};
-use std::borrow::BorrowMut;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Hash)]
 struct VNode {
     id: usize,
     addr: SocketAddr,
 }
+
 
 impl VNode {
     fn new(ip: &str, port: u16, id: usize) -> Self {
@@ -48,8 +48,9 @@ fn main() {
     for node in nodes {
         ring.add(node);
     }
-    //
-    // println!("{:?}", ring.get("foo"));
-    // println!("{:?}", ring.get("bar"));
-    // println!("{:?}", ring.get("baz"));
+
+    println!("{:?}", ring.get(&"foo"));
+    println!("{:?}", ring.get(&"bar"));
+    println!("{:?}", ring.get(&"baz"));
+    println!("{:?}", ring.get(&"q-bazaar"));
 }
