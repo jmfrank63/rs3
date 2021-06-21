@@ -1,5 +1,5 @@
 [package]
-name = "parseapidocs"
+name = "web_scrape_s3_api"
 version = "0.1.0"
 authors = ["Johannes Frank <jmfrank63@gmail.com>"]
 edition = "2018"

@@ -715,17 +715,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "parseapidocs"
-version = "0.1.0"
-dependencies = [
- "futures",
- "reqwest",
- "scraper",
- "select",
- "tokio",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1514,6 +1503,17 @@ checksum = "e828417b379f3df7111d3a2a9e5753706cae29c41f7c4029ee9fd77f3e09e582"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "web_scrape_s3_api"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "reqwest",
+ "scraper",
+ "select",
+ "tokio",
 ]
 
 [[package]]
