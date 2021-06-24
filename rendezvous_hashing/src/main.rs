@@ -1,6 +1,19 @@
-use rendezvous_hash::{Capacity, DefaultNodeHasher, WeightedNode};
+mod shift_xor_hash;
+
+use crate::shift_xor_hash::{BuildShiftXorHasher, ShiftXorHasher};
+use rendezvous_hash::{Capacity, DefaultNodeHasher, NodeHasher, WeightedNode};
 use rendezvous_hash::{Node, RendezvousNodes};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+
+impl<N: Hash> NodeHasher<N> for ShiftXorHasher {
+    fn hash<T: Hash>(&self, node: &N, item: &T) -> u64 {
+        let mut hasher = ShiftXorHasher::default();
+        node.hash(&mut hasher);
+        item.hash(&mut hasher);
+        hasher.finish()
+    }
+}
 
 fn main() {
     let mut weighted_nodes = RendezvousNodes::default();
@@ -24,12 +37,21 @@ fn main() {
     for key in counts.iter() {
         println!("{}", counts[key.0]);
     }
+
+    let mut hash_map = HashMap::with_hasher(BuildShiftXorHasher);
+
+    hash_map.insert("foo", "some id");
+
+    let mut custom_nodes: RendezvousNodes<&str, ShiftXorHasher> =
+        RendezvousNodes::new(ShiftXorHasher::default());
+
+    custom_nodes.insert("foo");
 }
 
 fn add_map_entries(
     weighted_nodes: &mut RendezvousNodes<WeightedNode<&str>, DefaultNodeHasher>,
-    counts: &mut HashMap<String, i32>,
-    amount: i32,
+    counts: &mut HashMap<String, u32>,
+    amount: u32,
 ) {
     for item in 0..amount {
         let node = weighted_nodes.calc_candidates(&item).nth(0).unwrap();
