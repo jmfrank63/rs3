@@ -1,7 +1,7 @@
 jobs:
   - template: default.yml@templates
     parameters:
-      minrust: <false | rust version> = 1.53.0
+      minrust: FALSE
 
 resources:
   repositories:
