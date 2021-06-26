@@ -1,5 +1,5 @@
 parameters:
-  minrust: 1.32.0 # Rust 2018 with uniform paths
+  minrust: 1.53.0 # Rust 2018 with uniform paths
   setup: []
   services: {}
   env: {}
