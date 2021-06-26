@@ -6,14 +6,6 @@ resources:
       ref: refs/heads/v0.4
       endpoint: rs3
 
-parameters:
-  minrust: 1.53.0 # Rust 2018 with uniform paths
-  setup: []
-  services: {}
-  env: {}
-  cross: true
-  dir: "."
-
 jobs:
   - job: style
     displayName: Style linting
@@ -134,3 +126,10 @@ jobs:
           env: ${{ parameters.env }}
           dir: ${{ parameters.dir }}
 
+parameters:
+  minrust: 1.53.0 # Rust 2018 with uniform paths
+  setup: []
+  services: {}
+  env: {}
+  cross: true
+  dir: "."
