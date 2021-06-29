@@ -1,5 +1,5 @@
 **/target
-**/.env
+.env
 **/.idea
 **/.vscode
 web_scrape_s3_api/apirequests.txt

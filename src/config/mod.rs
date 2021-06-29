@@ -10,7 +10,7 @@ pub struct ServerConfig {
 
 #[derive(Deserialize)]
 pub struct Config {
-    pub rs3_server: ServerConfig,
+    pub server: ServerConfig,
 }
 
 impl Config {

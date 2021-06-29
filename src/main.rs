@@ -11,13 +11,13 @@ pub async fn main() -> io::Result<()> {
 
     println!(
         "Starting Http server at host address: {}, with port: {}!",
-        rs3_conf.rs3_server.host, rs3_conf.rs3_server.port
+        rs3_conf.server.host, rs3_conf.server.port
     );
 
     HttpServer::new(move || App::new().configure(app_config))
         .bind(format!(
             "{}:{}",
-            rs3_conf.rs3_server.host, rs3_conf.rs3_server.port
+            rs3_conf.server.host, rs3_conf.server.port
         ))?
         .run()
         .await
