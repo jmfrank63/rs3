@@ -1,5 +1,0 @@
----
-create_containers: 4
-default_container_name: docker
-default_container_image: jmfrank63/rs3:latest 
-default_container_command: rs3

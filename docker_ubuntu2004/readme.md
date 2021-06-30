@@ -30,7 +30,7 @@ vi vars/default.yml
 ```
 
 ```yml
-#vars/default.yml
+#vars/defaults-aarch64.yml
 ---
 create_containers: 2
 default_container_name: docker

@@ -12,10 +12,15 @@ Vagrant.configure("2") do |config|
 
   # Every Vagrant development environment requires a box. You can search for
   # boxes at https://vagrantcloud.com/search.
+if ENV['VAGRANT_DETECTED_ARCH'] == 'arm64'
+  config.vm.box = "rueian/ubuntu20-m1"
+  config.vm.box_version = "0.0.1"
+else
   config.vm.box = "bento/ubuntu-20.04"
   config.vm.provider :vmware_desktop do |vmware|
     vmware.vmx["ethernet0.pcislotnumber"] = "32"
   end
+end
   # Disable automatic box update checking. If you disable this, then
   # boxes will only be checked for updates when the user runs
   # `vagrant box outdated`. This is not recommended.
