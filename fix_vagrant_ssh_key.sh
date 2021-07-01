@@ -19,7 +19,7 @@ echo "Generating key..."
 cat /dev/zero | ssh-keygen -a 100 -t ed25519 -f ubuntu_vagrant -C vagrant -q -N '' || echo "Using existing key"
 
 echo "Copying public key..."
-ssh-copy-id -o "IdentityFile $file" -f -i ubuntu_vagrant.pub -p 22 vagrant@$host 1>/dev/null
+ssh-copy-id -o StrictHostKeyChecking=no -o "IdentityFile $file" -f -i ubuntu_vagrant.pub -p 22 vagrant@$host 1>/dev/null
 
 echo "Copying private key..."
 mv "$file" "$file.bak"

@@ -8,12 +8,9 @@
     - vars/defaults-{{ansible_architecture}}.yml
 
   tasks:
-    - name: Install aptitude using apt
-      apt: name=aptitude state=latest update_cache=yes force_apt_get=yes
-
     - name: Install required system packages
       apt: name={{ item }} state=latest update_cache=yes
-      loop: [ 'apt-transport-https', 'ca-certificates', 'curl', 'software-properties-common', 'python3-pip', 'virtualenv', 'python3-setuptools']
+      loop: [ 'curl', 'python3-pip' ]
 
     - name: Add Docker GPG apt Key
       apt_key:
@@ -42,7 +39,7 @@
       docker_container:
         name: "{{ default_container_name }}{{ item }}"
         image: "{{ default_container_image }}"
-        command: "{{ default_container_command }}"
+#        command: "{{ default_container_command }}"
         state: started
         container_default_behavior: no_defaults
         published_ports: 8080:8080

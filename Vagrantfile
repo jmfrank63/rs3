@@ -77,7 +77,7 @@ end
   # SHELL
 
   config.vm.provision "ansible" do |ansible|
-    ansible.playbook = "docker_ubuntu2004/playbook.yml"
+    ansible.playbook = "docker_rs3/playbook.yml"
   end
 
 end
