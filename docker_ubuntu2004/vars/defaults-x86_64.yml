@@ -1,0 +1,5 @@
+---
+create_containers: 1
+default_container_name: rs3
+default_container_image: jmfrank63/rs3:v0.1.0amd64
+default_container_command: rs3
