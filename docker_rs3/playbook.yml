@@ -1,6 +1,6 @@
-#################################################
-# DO Community Playbooks: Docker
-#################################################
+###########################################################
+# Infrastructure for environment inside one virtual machine
+###########################################################
 ---
 - hosts: all
   become: true
@@ -36,7 +36,7 @@
         source: pull
 
 
-    - name: frontend_network
+    - name: Create frontend network
       become: yes
       docker_network:
         name: "{{ default_container_frontend_network }}"
@@ -44,6 +44,14 @@
           - iprange: "{{ default_container_ip_range }}"
             subnet: "{{ default_container_frontend_subnet }}"
             gateway: "{{ default_container_frontend_gateway }}"
+
+    - name: Create backend network
+      docker_network:
+        name: "{{ default_container_backend_network }}"
+        ipam_config:
+          - iprange: "{{ default_container_ip_range }}"
+            subnet: "{{ default_container_backend_subnet }}"
+            gateway: "{{ default_container_backend_gateway }}"
 
     # Creates the number of containers defined by the variable create_containers, using values from vars file
     - name: Create default containers
@@ -56,6 +64,5 @@
         network_mode: default
         networks:
           - name: "{{ default_container_frontend_network }}"
-#          - name: "{{ default_container_backend_network }}"
+          - name: "{{ default_container_backend_network }}"
       with_sequence: count={{ create_containers }}
-
