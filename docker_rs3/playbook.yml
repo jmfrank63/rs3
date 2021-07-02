@@ -39,7 +39,7 @@
     - name: Create frontend network
       become: yes
       docker_network:
-        name: "{{ default_container_frontend_network }}"
+        name: "{{ default_container_frontend_network_name }}"
         ipam_config:
           - iprange: "{{ default_container_ip_range }}"
             subnet: "{{ default_container_frontend_subnet }}"
@@ -47,7 +47,7 @@
 
     - name: Create backend network
       docker_network:
-        name: "{{ default_container_backend_network }}"
+        name: "{{ default_container_backend_network_name }}"
         ipam_config:
           - iprange: "{{ default_container_ip_range }}"
             subnet: "{{ default_container_backend_subnet }}"
@@ -60,9 +60,11 @@
         image: "{{ default_container_image }}"
         state: started
         container_default_behavior: no_defaults
-        published_ports: 8080:8080
+        published_ports: "{{ default_container_frontend_prefix }}{{ item }}:8080:8080"
         network_mode: default
         networks:
-          - name: "{{ default_container_frontend_network }}"
-          - name: "{{ default_container_backend_network }}"
+          - name: "{{ default_container_frontend_network_name }}"
+            ipv4_address: "{{ default_container_frontend_prefix }}{{ item }}"
+          - name: "{{ default_container_backend_network_name }}"
+            ipv4_address: "{{ default_container_backend_prefix }}{{ item }}"
       with_sequence: count={{ create_containers }}

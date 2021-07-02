@@ -26,6 +26,7 @@ FROM gcr.io/distroless/cc-debian10
 COPY --from=build /usr/local/cargo/bin/rs3 /usr/local/bin/rs3
 
 EXPOSE 8080
+
 ENV SERVER.HOST=0.0.0.0
 ENV SERVER.PORT=8080
 

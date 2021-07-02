@@ -28,7 +28,8 @@ fn app_config(config: &mut web::ServiceConfig) {
 }
 
 async fn index(_req: HttpRequest) -> HttpResponse {
-    HttpResponse::Ok().json("{'Status' : 'Up'}")
+    let rs3_conf = Config::from_env().unwrap();
+    HttpResponse::Ok().json("{'IP' : '".to_string() + rs3_conf.server.host.as_str() + "'}")
 }
 
 #[cfg(test)]
