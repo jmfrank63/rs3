@@ -1,2 +1,2 @@
 ---
-default_container_image: jmfrank63/rs3:v0.1.0arm64
+image: jmfrank63/rs3:v0.1.0arm64dev

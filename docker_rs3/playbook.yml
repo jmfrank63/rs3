@@ -32,39 +32,58 @@
 
     - name: Pull default Docker image
       docker_image:
-        name: "{{ default_container_image }}"
+        name: "{{ image }}"
         source: pull
 
+    - name: Create public network
+      docker_network:
+        name: "{{ public_network_name }}"
+        driver: bridge
 
     - name: Create frontend network
-      become: yes
       docker_network:
-        name: "{{ default_container_frontend_network_name }}"
+        name: "{{ frontend_network_name }}"
+#        internal: true
         ipam_config:
-          - iprange: "{{ default_container_ip_range }}"
-            subnet: "{{ default_container_frontend_subnet }}"
-            gateway: "{{ default_container_frontend_gateway }}"
+          - iprange: "{{ frontend_prefix }}{{ip_range}}"
+            subnet: "{{ frontend_prefix }}{{ subnet }}"
+            gateway: "{{ frontend_prefix }}{{ gateway }}"
 
     - name: Create backend network
       docker_network:
-        name: "{{ default_container_backend_network_name }}"
+        name: "{{ backend_network_name }}"
+        internal: true
         ipam_config:
-          - iprange: "{{ default_container_ip_range }}"
-            subnet: "{{ default_container_backend_subnet }}"
-            gateway: "{{ default_container_backend_gateway }}"
+          - iprange: "{{ backend_prefix }}{{ ip_range}}"
+            subnet: "{{ backend_prefix }}{{ subnet }}"
+            gateway: "{{ backend_prefix }}{{ gateway }}"
 
-    # Creates the number of containers defined by the variable create_containers, using values from vars file
-    - name: Create default containers
+    - name: Create ha_proxy container
       docker_container:
-        name: "{{ default_container_name }}{{ item }}"
-        image: "{{ default_container_image }}"
+        name: ha_proxy
+        image: haproxy:latest
         state: started
         container_default_behavior: no_defaults
-        published_ports: "{{ default_container_frontend_prefix }}{{ item }}:8080:8080"
         network_mode: default
+        published_ports: 80:80
         networks:
-          - name: "{{ default_container_frontend_network_name }}"
-            ipv4_address: "{{ default_container_frontend_prefix }}{{ item }}"
-          - name: "{{ default_container_backend_network_name }}"
-            ipv4_address: "{{ default_container_backend_prefix }}{{ item }}"
+          - name: "{{ public_network_name }}"
+          - name: "{{ frontend_network_name }}"
+
+    # Creates the number of containers defined by the variable create_containers, using values from vars file
+    - name: Create rs3 containers
+      docker_container:
+        name: "{{ container_name }}{{ item }}"
+        image: "{{ image }}"
+        state: started
+        container_default_behavior: no_defaults
+        network_mode: default
+        env:
+          SERVER.HOST: "{{ frontend_prefix }}{{ item }}"
+          SERVER.PORT: "8080"
+        networks:
+          - name: "{{ frontend_network_name }}"
+            ipv4_address: "{{ frontend_prefix }}{{ item }}"
+          - name: "{{ backend_network_name }}"
+            ipv4_address: "{{ backend_prefix }}{{ item }}"
       with_sequence: count={{ create_containers }}

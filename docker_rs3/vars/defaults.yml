@@ -1,13 +1,11 @@
 ---
-create_containers: 1
-default_container_name: rs3
-default_container_frontend_network_name: rs3_frontend_network
-default_container_backend_network_name: rs3_backend_network
-default_container_external_network_name: haproxy_external_network
-default_container_ip_range: '192.168.0.0/16'
-default_container_frontend_subnet: '192.168.1.0/24'
-default_container_frontend_gateway: '192.168.1.254'
-default_container_backend_subnet: '192.168.100.0/24'
-default_container_backend_gateway: '192.168.100.254'
-default_container_frontend_prefix: '192.168.1.'
-default_container_backend_prefix: '192.168.100.'
+create_containers: 5
+container_name: rs3
+frontend_network_name: rs3_frontend_network
+backend_network_name: rs3_backend_network
+public_network_name: haproxy_external_network
+frontend_prefix: '192.168.10.'
+backend_prefix: '192.168.20.'
+subnet: '0/24'
+ip_range: '0/24'
+gateway: '254'

@@ -15,6 +15,10 @@ Vagrant.configure("2") do |config|
 if ENV['VAGRANT_DETECTED_ARCH'] == 'arm64'
   config.vm.box = "rueian/ubuntu20-m1"
   config.vm.box_version = "0.0.1"
+  config.vm.provider "parallels" do |prl|
+    prl.linked_clone = false
+    prl.update_guest_tools = true
+  end
 else
   config.vm.box = "bento/ubuntu-20.04"
   config.vm.provider :vmware_desktop do |vmware|
