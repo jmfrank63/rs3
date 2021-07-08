@@ -24,7 +24,6 @@ else
   config.vm.provider :vmware_desktop do |vmware|
     vmware.vmx["ethernet0.pcislotnumber"] = "32"
   end
-end
   # Disable automatic box update checking. If you disable this, then
   # boxes will only be checked for updates when the user runs
   # `vagrant box outdated`. This is not recommended.
@@ -79,7 +78,7 @@ end
   #   apt-get update
   #   apt-get install -y apache2
   # SHELL
-
+end
   config.vm.provision "ansible" do |ansible|
     ansible.playbook = "docker_rs3/playbook.yml"
   end

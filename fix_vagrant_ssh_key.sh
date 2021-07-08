@@ -17,16 +17,19 @@ file="$(echo "$config" | grep "^  IdentityFile" | cut -d' ' -f4)"
 
 echo "Generating key..."
 cat /dev/zero | ssh-keygen -a 100 -t ed25519 -f ubuntu_vagrant -C vagrant -q -N '' || echo "Using existing key"
+# cat /dev/zero | ssh-keygen -a 100 -t rsa -b 4096 -f ubuntu_vagrant -C vagrant -q -N '' || echo "Using existing key"
+
+port="$(echo "$config" | grep "^  Port" | cut -d' ' -f4)"
 
 echo "Copying public key..."
-ssh-copy-id -o StrictHostKeyChecking=no -o "IdentityFile $file" -f -i ubuntu_vagrant.pub -p 22 vagrant@$host 1>/dev/null
+ssh-copy-id -o StrictHostKeyChecking=no -o "IdentityFile $file" -f -i ubuntu_vagrant.pub -p $port vagrant@$host 1>/dev/null
 
 echo "Copying private key..."
 mv "$file" "$file.bak"
 cp ubuntu_vagrant "$file"
 
 echo "Testing connection..."
-ssh -o 'BatchMode=yes' -o 'ConnectionAttempts=1' -i "$file" -q -p 22 vagrant@$host exit
+ssh -o 'BatchMode=yes' -o 'ConnectionAttempts=1' -i "$file" -q -p $port vagrant@$host exit
 echo "Connection successful"
 
 echo "Removing temporary keys..."
