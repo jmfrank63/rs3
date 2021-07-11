@@ -8,6 +8,10 @@ on: [push, pull_request]
 
 name: Quickstart
 
+env:
+  SERVER.HOST: 0.0.0.0
+  SERVER.PORT: 8080
+
 jobs:
   check:
     name: Check
