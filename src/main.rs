@@ -15,10 +15,7 @@ pub async fn main() -> io::Result<()> {
     );
 
     HttpServer::new(move || App::new().configure(app_config))
-        .bind(format!(
-            "{}:{}",
-            rs3_conf.server.host, rs3_conf.server.port
-        ))?
+        .bind(format!("{}:{}", rs3_conf.server.host, rs3_conf.server.port))?
         .run()
         .await
 }
