@@ -6,7 +6,7 @@
 
 on: [push, pull_request]
 
-name: Quickstart
+name: Build rs3
 
 env:
   SERVER.HOST: 0.0.0.0
