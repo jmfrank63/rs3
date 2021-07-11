@@ -3,7 +3,8 @@ create_containers: 5
 container_name: rs3
 frontend_network_name: rs3_frontend_network
 backend_network_name: rs3_backend_network
-public_network_name: haproxy_external_network
+public_network_name: rs3_network
+public_prefix: '192.168.5.'
 frontend_prefix: '192.168.10.'
 backend_prefix: '192.168.20.'
 subnet: '0/24'

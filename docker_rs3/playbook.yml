@@ -39,6 +39,10 @@
       docker_network:
         name: "{{ public_network_name }}"
         driver: bridge
+        ipam_config:
+          - iprange: "{{ public_prefix }}{{ip_range}}"
+            subnet: "{{ public_prefix }}{{ subnet }}"
+            gateway: "{{ public_prefix }}{{ gateway }}"
 
     - name: Create frontend network
       docker_network:
@@ -69,6 +73,7 @@
         networks:
           - name: "{{ public_network_name }}"
           - name: "{{ frontend_network_name }}"
+
 
     # Creates the number of containers defined by the variable create_containers, using values from vars file
     - name: Create rs3 containers
