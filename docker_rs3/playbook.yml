@@ -47,7 +47,7 @@
     - name: Create frontend network
       docker_network:
         name: "{{ frontend_network_name }}"
-#        internal: true
+        internal: true
         ipam_config:
           - iprange: "{{ frontend_prefix }}{{ip_range}}"
             subnet: "{{ frontend_prefix }}{{ subnet }}"
@@ -69,11 +69,16 @@
         state: started
         container_default_behavior: no_defaults
         network_mode: default
-        published_ports: 80:80
+        published_ports: ["8080:8080", "8081:8081"]
         networks:
           - name: "{{ public_network_name }}"
+            ipv4_address: "{{ public_prefix }}100"
           - name: "{{ frontend_network_name }}"
-
+            ipv4_address: "{{ frontend_prefix }}100"
+        mounts:
+          - source: /vagrant/docker_rs3/config
+            target: /usr/local/etc
+            type: bind
 
     # Creates the number of containers defined by the variable create_containers, using values from vars file
     - name: Create rs3 containers

@@ -12,17 +12,18 @@ Vagrant.configure("2") do |config|
 
   # Every Vagrant development environment requires a box. You can search for
   # boxes at https://vagrantcloud.com/search.
-if ENV['VAGRANT_DETECTED_ARCH'] == 'arm64'
-  config.vm.box = "rueian/ubuntu20-m1"
-  config.vm.box_version = "0.0.1"
-  config.vm.provider "parallels" do |prl|
-    prl.linked_clone = false
-    prl.update_guest_tools = true
-  end
-else
-  config.vm.box = "bento/ubuntu-20.04"
-  config.vm.provider :vmware_desktop do |vmware|
-    vmware.vmx["ethernet0.pcislotnumber"] = "32"
+  if ENV['VAGRANT_DETECTED_ARCH'] == 'arm64'
+    config.vm.box = "rueian/ubuntu20-m1"
+    config.vm.box_version = "0.0.1"
+    config.vm.provider "parallels" do |prl|
+      prl.linked_clone = false
+      prl.update_guest_tools = true
+    end
+  else
+    config.vm.box = "bento/ubuntu-20.04"
+    config.vm.provider :vmware_desktop do |vmware|
+      vmware.vmx["ethernet0.pcislotnumber"] = "32"
+    end
   end
   # Disable automatic box update checking. If you disable this, then
   # boxes will only be checked for updates when the user runs
@@ -38,8 +39,9 @@ else
   # Create a forwarded port mapping which allows access to a specific port
   # within the machine from a port on the host machine and only allow access
   # via 127.0.0.1 to disable public access
-  # config.vm.network "forwarded_port", guest: 80, host: 8080, host_ip: "127.0.0.1"
-  config.vm.network "forwarded_port", guest: 8080, host: 8080, host_ip: "127.0.0.1"
+#   config.vm.network "forwarded_port", guest: 80, host: 8080, host_ip: "127.0.0.1"
+  config.vm.network "forwarded_port", guest: 8080, guest_ip: "192.168.5.100", host: 8080, host_ip: "127.0.0.1"
+  config.vm.network "forwarded_port", guest: 8081, guest_ip: "192.168.5.100", host: 8081, host_ip: "127.0.0.1"
 
   # Create a private network, which allows host-only access to the machine
   # using a specific IP.
@@ -55,6 +57,7 @@ else
   # the path on the guest to mount the folder. And the optional third
   # argument is a set of non-required options.
   # config.vm.synced_folder "../data", "/vagrant_data"
+  config.vm.synced_folder "docker_rs3/config", "/vagrant/docker_rs3/config"
 
   # Provider-specific configuration so you can fine-tune various
   # backing providers for Vagrant. These expose provider-specific options.
@@ -78,9 +81,9 @@ else
   #   apt-get update
   #   apt-get install -y apache2
   # SHELL
-end
   config.vm.provision "ansible" do |ansible|
     ansible.playbook = "docker_rs3/playbook.yml"
   end
-
+#     config.vm.network "forwarded_port", guest: 8080, guest_ip: "192.168.5.100", host: 8080, host_ip: "127.0.0.1"
+#     config.vm.network "forwarded_port", guest: 8081, guest_ip: "192.168.5.100", host: 8081, host_ip: "127.0.0.1"
 end
