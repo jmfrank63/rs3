@@ -67,6 +67,7 @@
         name: ha_proxy
         image: haproxy:latest
         state: started
+        restart_policy: "always"
         container_default_behavior: no_defaults
         network_mode: default
         published_ports: ["8080:8080", "8081:8081"]
@@ -86,6 +87,7 @@
         name: "{{ container_name }}{{ item }}"
         image: "{{ image }}"
         state: started
+        restart_policy: "always"
         container_default_behavior: no_defaults
         network_mode: default
         env:
