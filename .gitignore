@@ -5,3 +5,6 @@
 web_scrape_s3_api/apirequests.txt
 .DS_Store
 **/.vagrant
+
+/aws/.terraform/
+/aws/terraform*
