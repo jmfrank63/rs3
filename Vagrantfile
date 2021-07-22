@@ -13,7 +13,7 @@ Vagrant.configure("2") do |config|
   # Every Vagrant development environment requires a box. You can search for
   # boxes at https://vagrantcloud.com/search.
   if ENV['VAGRANT_DETECTED_OS'] == 'Darwin'
-    if ENV['VAGRANT_DETECTED_ARCH'] == 'arch64'
+    if ENV['VAGRANT_DETECTED_ARCH'] == 'arm64'
       config.vm.box = "rueian/ubuntu20-m1"
       config.vm.box_version = "0.0.1"
       config.vm.provider "parallels" do |prl|
