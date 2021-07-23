@@ -5,7 +5,7 @@ provider "aws" {
 
 resource "aws_key_pair" "ubuntu" {
   key_name   = "LinuxAMD64Workstation"
-  public_key = file("~/.ssh/id_rsa.pub")
+  public_key = file("~/.ssh/rs3_london.pub")
 }
 
 resource "aws_security_group" "ubuntu" {
@@ -65,7 +65,7 @@ resource "aws_instance" "ubuntu" {
   connection {
     type        = "ssh"
     user        = "ubuntu"
-    private_key = file("~/.ssh/id_rsa")
+    private_key = file("~/.ssh/rs3_london.pem")
     host        = self.public_ip
   }
 
