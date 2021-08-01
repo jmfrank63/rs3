@@ -67,20 +67,33 @@
         path: /usr/local/etc/haproxy
         state: directory
 
+    - name: Create ssl directory structure
+      file:
+        path: /usr/local/etc/ssl/certs
+        state: directory
+
     - name: Copy the haproxy configuration
       copy:
         src: config/haproxy/haproxy.cfg
         dest: /usr/local/etc/haproxy/haproxy.cfg
+
+    - name: Copy the certificate bundle
+      copy:
+        src: .secrets/cwe_bundle.pem
+        dest: /usr/local/etc/ssl/certs/cwe_bundle.pem
+        mode: '0400'
+        owner: '99'
+        group: '99'
 
     - name: Create ha_proxy container
       docker_container:
         name: ha_proxy
         image: haproxy:latest
         state: started
-        restart_policy: "always"
+        restart_policy: "on-failure"
         container_default_behavior: no_defaults
         network_mode: default
-        published_ports: ["80:80", "8081:8081"]
+        published_ports: ["80:80", "443:443", "8080:8080"]
         networks:
           - name: "{{ public_network_name }}"
             ipv4_address: "{{ public_prefix }}100"
@@ -97,7 +110,7 @@
         name: "{{ container_name }}{{ item }}"
         image: "{{ image }}"
         state: started
-        restart_policy: "always"
+        restart_policy: "on-failure"
         container_default_behavior: no_defaults
         network_mode: default
         env:

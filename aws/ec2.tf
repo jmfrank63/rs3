@@ -4,7 +4,7 @@ provider "aws" {
 }
 
 resource "aws_key_pair" "ubuntu" {
-  key_name   = "LinuxAMD64Workstation"
+  key_name   = "rs3_london_terraform"
   public_key = file("~/.ssh/rs3_london.pub")
 }
 
@@ -24,6 +24,14 @@ resource "aws_security_group" "ubuntu" {
     description = "HTTPS"
     from_port   = 443
     to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "STATS"
+    from_port   = 8080
+    to_port     = 8080
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -76,7 +84,7 @@ resource "aws_instance" "ubuntu" {
   }
 }
 
-resource "aws_eip" "ubuntu" {
-  vpc      = true
-  instance = aws_instance.ubuntu.id
-}
+//resource "aws_eip" "ubuntu" {
+//  vpc      = true
+//  instance = aws_instance.ubuntu.id
+//}
