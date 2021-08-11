@@ -1,0 +1,111 @@
+###########################################################
+# Infrastructure for environment inside one virtual machine
+###########################################################
+---
+- hosts: all
+  become: true
+  vars_files:
+    - vars/defaults.yml
+    - vars/defaults-{{ansible_architecture}}.yml
+
+  tasks:
+    - name: Install required system packages
+      apt: name={{ item }} state=latest update_cache=yes
+      loop: [ 'curl', 'python3-pip' ]
+
+    - name: Add Docker GPG apt Key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker Repository
+      apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu bionic stable
+        state: present
+
+    - name: Update apt and install docker-ce
+      apt: update_cache=yes name=docker-ce state=latest
+
+    - name: Install Docker Module for Python
+      pip:
+        name: docker
+
+    - name: Pull default Docker image
+      docker_image:
+        name: "{{ image }}"
+        source: pull
+
+    - name: Create public network
+      docker_network:
+        name: "{{ public_network_name }}"
+        driver: bridge
+        ipam_config:
+          - iprange: "{{ public_prefix }}{{ip_range}}"
+            subnet: "{{ public_prefix }}{{ subnet }}"
+            gateway: "{{ public_prefix }}{{ gateway }}"
+
+    - name: Create frontend network
+      docker_network:
+        name: "{{ frontend_network_name }}"
+        internal: true
+        ipam_config:
+          - iprange: "{{ frontend_prefix }}{{ip_range}}"
+            subnet: "{{ frontend_prefix }}{{ subnet }}"
+            gateway: "{{ frontend_prefix }}{{ gateway }}"
+
+    - name: Create backend network
+      docker_network:
+        name: "{{ backend_network_name }}"
+        internal: true
+        ipam_config:
+          - iprange: "{{ backend_prefix }}{{ ip_range}}"
+            subnet: "{{ backend_prefix }}{{ subnet }}"
+            gateway: "{{ backend_prefix }}{{ gateway }}"
+
+    - name: Create haproxy directory
+      file:
+        path: /usr/local/etc/haproxy
+        state: directory
+
+    - name: Copy the haproxy configuration
+      copy:
+        src: config/haproxy/haproxy_dev.cfg
+        dest: /usr/local/etc/haproxy/haproxy.cfg
+
+    - name: Create ha_proxy container
+      docker_container:
+        name: ha_proxy
+        image: haproxy:latest
+        state: started
+        restart_policy: "on-failure"
+        container_default_behavior: no_defaults
+        network_mode: default
+        published_ports: ["80:80", "8080:8080"]
+        networks:
+          - name: "{{ public_network_name }}"
+            ipv4_address: "{{ public_prefix }}100"
+          - name: "{{ frontend_network_name }}"
+            ipv4_address: "{{ frontend_prefix }}100"
+        mounts:
+          - source: /usr/local/etc
+            target: /usr/local/etc
+            type: bind
+
+    # Creates the number of containers defined by the variable create_containers, using values from vars file
+    - name: Create rs3 containers
+      docker_container:
+        name: "{{ container_name }}{{ item }}"
+        image: "{{ image }}"
+        state: started
+        restart_policy: "on-failure"
+        container_default_behavior: no_defaults
+        network_mode: default
+        env:
+          SERVER.HOST: "{{ frontend_prefix }}{{ item }}"
+          SERVER.PORT: "8080"
+        networks:
+          - name: "{{ frontend_network_name }}"
+            ipv4_address: "{{ frontend_prefix }}{{ item }}"
+          - name: "{{ backend_network_name }}"
+            ipv4_address: "{{ backend_prefix }}{{ item }}"
+      with_sequence: count={{ create_containers }}

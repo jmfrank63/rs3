@@ -74,7 +74,7 @@
 
     - name: Copy the haproxy configuration
       copy:
-        src: config/haproxy/haproxy.cfg
+        src: config/haproxy/haproxy_prod.cfg
         dest: /usr/local/etc/haproxy/haproxy.cfg
 
     - name: Copy the certificate bundle
