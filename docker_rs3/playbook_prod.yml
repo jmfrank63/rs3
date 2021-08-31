@@ -110,7 +110,7 @@
         name: "{{ container_name }}{{ item }}"
         image: "{{ image }}"
         state: started
-        restart_policy: "on-failure"
+        restart_policy: "always"
         container_default_behavior: no_defaults
         network_mode: default
         env:
