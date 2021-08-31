@@ -35,7 +35,7 @@ async fn index(_req: HttpRequest) -> impl Responder {
 mod tests {
     use super::*;
     use actix_web::http::StatusCode;
-    use actix_web::{test, App};
+    use actix_web::{test, App, body::Body};
 
     #[actix_rt::test]
     async fn test_index_ok() {
@@ -45,4 +45,16 @@ mod tests {
         let resp = test::call_service(&mut app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
+
+    #[actix_rt::test]
+    async fn test_body_is_ip() {
+        let mut app = test::init_service(App::new().service(index)).await;
+        let req = test::TestRequest::default().insert_header(("content-type", "text/plain"))
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        let body = resp.into_body();
+        let rs3_conf = Config::from_env().unwrap();
+        assert_eq!(body, Body::from("\"{'IP' : '".to_string() + rs3_conf.server.host.as_str() + "'}\""));
+    }
+
 }
