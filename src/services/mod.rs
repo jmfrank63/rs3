@@ -3,7 +3,7 @@ use crate::config::Config;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 
 pub fn app_service_config(config: &mut web::ServiceConfig) {
-    config.service(index);
+    config.service(index).service(status);
 }
 
 #[get("/")]
