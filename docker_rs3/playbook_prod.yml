@@ -6,7 +6,7 @@
   become: true
   vars_files:
     - vars/defaults.yml
-    - vars/defaults-{{ansible_architecture}}.yml
+    - vars/defaults-x86_64.yml
 
   tasks:
     - name: Install required system packages
