@@ -17,4 +17,3 @@ pub async fn status(_req: HttpRequest) -> impl Responder {
     let rs3_conf = Config::from_env().unwrap();
     HttpResponse::Ok().json("{'IP' : '".to_string() + rs3_conf.server.host.as_str() + "'}")
 }
-
