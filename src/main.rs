@@ -1,8 +1,10 @@
 mod config;
+mod services;
 
 use crate::config::Config;
+use crate::services::app_service_config;
 
-use actix_web::{get, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
+use actix_web::{App, HttpServer};
 use std::io;
 
 #[actix_web::main]
@@ -14,28 +16,21 @@ pub async fn main() -> io::Result<()> {
         rs3_conf.server.host, rs3_conf.server.port
     );
 
-    HttpServer::new(move || App::new().configure(app_config))
+    HttpServer::new(move || App::new().configure( app_service_config))
         .bind(format!("{}:{}", rs3_conf.server.host, rs3_conf.server.port))?
         .run()
         .await
 }
 
 
-fn app_config(config: &mut web::ServiceConfig) {
-    config.service(index);
-}
-
-#[get("/")]
-async fn index(_req: HttpRequest) -> impl Responder {
-    let rs3_conf = Config::from_env().unwrap();
-    HttpResponse::Ok().json("{'IP' : '".to_string() + rs3_conf.server.host.as_str() + "'}")
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use actix_web::http::StatusCode;
     use actix_web::{test, App, body::Body};
+    use crate::services::{index, status};
+
 
     #[actix_rt::test]
     async fn test_index_ok() {
@@ -57,4 +52,25 @@ mod tests {
         assert_eq!(body, Body::from("\"{'IP' : '".to_string() + rs3_conf.server.host.as_str() + "'}\""));
     }
 
+    #[actix_rt::test]
+    async fn test_status_is_ok() {
+        let mut app = test::init_service(App::new().service(status)).await;
+        let req = test::TestRequest::default().insert_header(("content-type", "text/plain"))
+            .uri("/ip")
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_rt::test]
+    async fn test_status_body_is_ip() {
+        let mut app = test::init_service(App::new().service(status)).await;
+        let req = test::TestRequest::default().insert_header(("content-type", "text/plain"))
+            .uri("/ip")
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        let body = resp.into_body();
+        let rs3_conf = Config::from_env().unwrap();
+        assert_eq!(body, Body::from("\"{'IP' : '".to_string() + rs3_conf.server.host.as_str() + "'}\""));
+    }
 }
