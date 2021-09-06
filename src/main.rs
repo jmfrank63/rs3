@@ -3,7 +3,9 @@ mod services;
 
 use crate::config::Config;
 use crate::services::app_service_config;
+use flurry::HashMap;
 
+use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use std::io;
 
@@ -15,11 +17,16 @@ pub async fn main() -> io::Result<()> {
         "Starting Http server at host address: {}, with port: {}!",
         rs3_conf.server.host, rs3_conf.server.port
     );
+    let map: Data<HashMap<String, String>> = Data::new(HashMap::new());
 
-    HttpServer::new(move || App::new().configure(app_service_config))
-        .bind(format!("{}:{}", rs3_conf.server.host, rs3_conf.server.port))?
-        .run()
-        .await
+    HttpServer::new(move || {
+        App::new()
+            .app_data(map.clone())
+            .configure(app_service_config)
+    })
+    .bind(format!("{}:{}", rs3_conf.server.host, rs3_conf.server.port))?
+    .run()
+    .await
 }
 
 #[cfg(test)]
