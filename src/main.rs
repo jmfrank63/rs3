@@ -5,12 +5,17 @@ mod services;
 use crate::config::Config;
 use crate::services::app_service_config;
 use flurry::HashMap;
+use lazy_static::lazy_static;
 
 use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use std::io;
 
 use deno_core::{op_sync, JsRuntime, RuntimeOptions};
+
+lazy_static! {
+    pub static ref MAP: Data<HashMap<String, String>> = Data::new(HashMap::new());
+}
 
 #[actix_web::main]
 pub async fn main() -> io::Result<()> {
@@ -35,16 +40,11 @@ pub async fn main() -> io::Result<()> {
         "Starting Http server at host address: {}, with port: {}!",
         rs3_conf.server.host, rs3_conf.server.port
     );
-    let map: Data<HashMap<String, String>> = Data::new(HashMap::new());
 
-    HttpServer::new(move || {
-        App::new()
-            .app_data(map.clone())
-            .configure(app_service_config)
-    })
-    .bind(format!("{}:{}", rs3_conf.server.host, rs3_conf.server.port))?
-    .run()
-    .await
+    HttpServer::new(move || App::new().configure(app_service_config))
+        .bind(format!("{}:{}", rs3_conf.server.host, rs3_conf.server.port))?
+        .run()
+        .await
 }
 
 fn hello(name: String) -> String {

@@ -17,3 +17,4 @@ serde_json = "1.0.67"
 flurry = "0.3.1"
 deno_core = { git = "https://github.com/denoland/deno", branch = "main" }
 rusty_v8 = "0.27.0"
+lazy_static = "1.4.0"

@@ -1179,6 +1179,7 @@ dependencies = [
  "deno_core",
  "dotenv",
  "flurry",
+ "lazy_static",
  "rusty_v8",
  "serde 1.0.130",
  "serde_json",

@@ -1,6 +1,5 @@
-use actix_web::web::{Data, Path};
+use actix_web::web::Path;
 use actix_web::{delete, get, post, web, HttpRequest, HttpResponse, Responder};
-use flurry::HashMap;
 
 use crate::bindings;
 use crate::config::Config;
@@ -27,25 +26,25 @@ pub async fn status(_req: HttpRequest) -> impl Responder {
 }
 
 #[post("/insert")]
-pub async fn insert(request_body: String, map: Data<HashMap<String, String>>) -> impl Responder {
-    let entry = bindings::insert(request_body, map);
+pub async fn insert(request_body: String) -> impl Responder {
+    let entry = bindings::insert(request_body);
     HttpResponse::Ok().json(entry.to_string())
 }
 
 #[get("/list")]
-pub async fn list(map: Data<HashMap<String, String>>) -> impl Responder {
-    let out = bindings::list(map);
+pub async fn list() -> impl Responder {
+    let out = bindings::list();
     HttpResponse::Ok().json(out.replace(",]", "]"))
 }
 
 #[delete("/key/{key}")]
-pub async fn delete(path: Path<String>, map: Data<HashMap<String, String>>) -> impl Responder {
-    let entry = bindings::delete(path, map);
+pub async fn delete(path: Path<String>) -> impl Responder {
+    let entry = bindings::delete(path.into_inner());
     HttpResponse::Ok().json(entry)
 }
 
 #[get("/key/{key}")]
-pub async fn get(path: Path<String>, map: Data<HashMap<String, String>>) -> impl Responder {
-    let entry = bindings::get(path, map);
+pub async fn get(path: Path<String>) -> impl Responder {
+    let entry = bindings::get(path.into_inner());
     HttpResponse::Ok().json(entry)
 }
