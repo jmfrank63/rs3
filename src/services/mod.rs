@@ -1,7 +1,7 @@
 use crate::config::Config;
 use flurry::HashMap;
 
-use actix_web::web::Data;
+use actix_web::web::{Data, Path};
 use actix_web::{delete, get, post, web, HttpRequest, HttpResponse, Responder};
 
 pub fn app_service_config(config: &mut web::ServiceConfig) {
@@ -10,6 +10,7 @@ pub fn app_service_config(config: &mut web::ServiceConfig) {
         .service(status)
         .service(insert)
         .service(delete)
+        .service(get)
         .service(list);
 }
 
@@ -52,10 +53,19 @@ pub async fn list(map: Data<HashMap<String, String>>) -> impl Responder {
     HttpResponse::Ok().json(out.replace(",]", "]"))
 }
 
-#[delete("/delete")]
-pub async fn delete(request_body: String, map: Data<HashMap<String, String>>) -> impl Responder {
+#[delete("/key/{key}")]
+pub async fn delete(path: Path<String>, map: Data<HashMap<String, String>>) -> impl Responder {
+    let path = path.into_inner();
+    println!("{}", path);
     let guard = map.guard();
-    let name = request_body.as_str();
-    let entry = map.remove(name, &guard).unwrap();
+    let entry = map.remove(path.as_str(), &guard).unwrap();
+    HttpResponse::Ok().json(entry)
+}
+
+#[get("/key/{key}")]
+pub async fn get(path: Path<String>, map: Data<HashMap<String, String>>) -> impl Responder {
+    let path = path.into_inner();
+    let guard = map.guard();
+    let entry = map.get(path.as_str(), &guard).unwrap();
     HttpResponse::Ok().json(entry)
 }
