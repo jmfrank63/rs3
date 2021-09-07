@@ -1,3 +1,4 @@
+mod bindings;
 mod config;
 mod services;
 
@@ -9,9 +10,26 @@ use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use std::io;
 
+use deno_core::{op_sync, JsRuntime, RuntimeOptions};
+
 #[actix_web::main]
 pub async fn main() -> io::Result<()> {
     let rs3_conf = Config::from_env().unwrap();
+
+    let mut runtime = JsRuntime::new(RuntimeOptions {
+        ..Default::default()
+    });
+
+    runtime.register_op(
+        "op_hello",
+        op_sync(|_state, data: String, _: ()| Ok(hello(data))),
+    );
+
+    runtime.sync_ops_cache();
+
+    runtime
+        .execute_script("<usage>", include_str!("./example.js"))
+        .unwrap();
 
     println!(
         "Starting Http server at host address: {}, with port: {}!",
@@ -27,6 +45,10 @@ pub async fn main() -> io::Result<()> {
     .bind(format!("{}:{}", rs3_conf.server.host, rs3_conf.server.port))?
     .run()
     .await
+}
+
+fn hello(name: String) -> String {
+    format!("Hello {} Frank", name)
 }
 
 #[cfg(test)]
