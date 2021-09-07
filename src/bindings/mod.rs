@@ -1,5 +1,4 @@
 use super::MAP;
-use deno_core::serde_json::Value;
 
 pub fn list() -> String {
     let guard = MAP.guard();
@@ -13,7 +12,7 @@ pub fn list() -> String {
     out
 }
 
-pub fn insert(request_body: String) -> Value {
+pub fn insert(request_body: String) -> String {
     let guard = MAP.guard();
     let entry: serde_json::Value = serde_json::from_str(request_body.as_str()).unwrap();
     let obj = entry.as_object().unwrap();
@@ -23,7 +22,7 @@ pub fn insert(request_body: String) -> Value {
     for (k, v) in MAP.iter(&guard) {
         println!("{} {}", k, v);
     }
-    entry
+    entry.to_string()
 }
 
 pub fn delete(path: String) -> String {

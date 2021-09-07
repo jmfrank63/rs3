@@ -27,7 +27,7 @@ pub async fn main() -> io::Result<()> {
 
     runtime.register_op(
         "op_list",
-        op_sync(|_state, data: String, _: ()| Ok(bindings::list())),
+        op_sync(|_state, _data: String, _: ()| Ok(bindings::list())),
     );
     runtime.register_op(
         "op_get",
@@ -49,10 +49,6 @@ pub async fn main() -> io::Result<()> {
         .bind(format!("{}:{}", rs3_conf.server.host, rs3_conf.server.port))?
         .run()
         .await
-}
-
-fn hello(name: String) -> String {
-    format!("Hello {} Frank", name)
 }
 
 #[cfg(test)]
