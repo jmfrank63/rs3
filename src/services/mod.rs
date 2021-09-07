@@ -16,8 +16,7 @@ pub fn app_service_config(config: &mut web::ServiceConfig) {
 
 #[get("/")]
 pub async fn index(_req: HttpRequest) -> impl Responder {
-    let rs3_conf = Config::from_env().unwrap();
-    HttpResponse::Ok().json("{'IP' : '".to_string() + rs3_conf.server.host.as_str() + "'}")
+    HttpResponse::Ok().json("Welcome to rs3")
 }
 
 #[get("/ip")]

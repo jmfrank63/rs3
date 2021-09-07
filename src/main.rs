@@ -47,18 +47,14 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_body_is_ip() {
+    async fn test_index_body_is_welcome() {
         let mut app = test::init_service(App::new().service(index)).await;
         let req = test::TestRequest::default()
             .insert_header(("content-type", "text/plain"))
             .to_request();
         let resp = test::call_service(&mut app, req).await;
         let body = resp.into_body();
-        let rs3_conf = Config::from_env().unwrap();
-        assert_eq!(
-            body,
-            Body::from("\"{'IP' : '".to_string() + rs3_conf.server.host.as_str() + "'}\"")
-        );
+        assert_eq!(body, Body::from("\"Welcome to rs3\""));
     }
 
     #[actix_rt::test]
