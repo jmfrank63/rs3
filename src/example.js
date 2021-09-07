@@ -3,5 +3,5 @@ function print(value) {
 }
 
 Deno.core.ops();
-let res = Deno.core.opSync('op_hello', "Johannes");
+let res = Deno.core.opSync('op_list', '');
 print(res);

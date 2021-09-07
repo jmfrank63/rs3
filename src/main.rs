@@ -26,8 +26,12 @@ pub async fn main() -> io::Result<()> {
     });
 
     runtime.register_op(
-        "op_hello",
-        op_sync(|_state, data: String, _: ()| Ok(hello(data))),
+        "op_list",
+        op_sync(|_state, data: String, _: ()| Ok(bindings::list())),
+    );
+    runtime.register_op(
+        "op_get",
+        op_sync(|_state, data: String, _: ()| Ok(bindings::get(data))),
     );
 
     runtime.sync_ops_cache();

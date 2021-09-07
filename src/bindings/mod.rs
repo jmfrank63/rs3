@@ -34,6 +34,7 @@ pub fn delete(path: String) -> String {
 }
 
 pub fn get(path: String) -> String {
+    println!("{}", path);
     let guard = MAP.guard();
     let entry = MAP.get(path.as_str(), &guard).unwrap();
     let entry = entry.to_owned();
