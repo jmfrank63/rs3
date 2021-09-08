@@ -7,12 +7,11 @@ use crate::services::app_service_config;
 use flurry::HashMap;
 use lazy_static::lazy_static;
 
-use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use std::io;
 
 lazy_static! {
-    pub static ref MAP: Data<HashMap<String, String>> = Data::new(HashMap::new());
+    pub static ref MAP: HashMap<String, String> = HashMap::new();
 }
 
 #[actix_web::main]
