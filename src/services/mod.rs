@@ -1,5 +1,5 @@
 use actix_web::web::Path;
-use actix_web::{delete, get, post, web, HttpRequest, HttpResponse, Responder};
+use actix_web::{delete, get, patch, post, web, HttpRequest, HttpResponse, Responder};
 
 use crate::bindings;
 use crate::config::Config;
@@ -11,6 +11,7 @@ pub fn app_service_config(config: &mut web::ServiceConfig) {
         .service(insert)
         .service(delete)
         .service(get)
+        .service(patch)
         .service(list);
 }
 
@@ -39,12 +40,18 @@ pub async fn list() -> impl Responder {
 
 #[delete("/key/{key}")]
 pub async fn delete(path: Path<String>) -> impl Responder {
-    let entry = bindings::delete(path.into_inner());
-    HttpResponse::Ok().json(entry)
+    let value = bindings::delete(path.into_inner());
+    HttpResponse::Ok().json(value)
 }
 
 #[get("/key/{key}")]
 pub async fn get(path: Path<String>) -> impl Responder {
-    let entry = bindings::get(path.into_inner());
-    HttpResponse::Ok().json(entry)
+    let value = bindings::get(path.into_inner());
+    HttpResponse::Ok().json(value)
+}
+
+#[patch("/key/{key}")]
+pub async fn patch(path: Path<String>) -> impl Responder {
+    let value = bindings::patch(path.into_inner());
+    HttpResponse::Ok().json(value)
 }

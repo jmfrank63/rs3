@@ -11,8 +11,6 @@ use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use std::io;
 
-use deno_core::{op_sync, JsRuntime, RuntimeOptions};
-
 lazy_static! {
     pub static ref MAP: Data<HashMap<String, String>> = Data::new(HashMap::new());
 }
@@ -20,25 +18,6 @@ lazy_static! {
 #[actix_web::main]
 pub async fn main() -> io::Result<()> {
     let rs3_conf = Config::from_env().unwrap();
-
-    let mut runtime = JsRuntime::new(RuntimeOptions {
-        ..Default::default()
-    });
-
-    runtime.register_op(
-        "op_list",
-        op_sync(|_state, _data: String, _: ()| Ok(bindings::list())),
-    );
-    runtime.register_op(
-        "op_get",
-        op_sync(|_state, data: String, _: ()| Ok(bindings::get(data))),
-    );
-
-    runtime.sync_ops_cache();
-
-    runtime
-        .execute_script("<usage>", include_str!("./example.js"))
-        .unwrap();
 
     println!(
         "Starting Http server at host address: {}, with port: {}!",
