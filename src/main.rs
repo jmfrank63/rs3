@@ -37,7 +37,7 @@ mod tests {
     use actix_web::{body::Body, test, App};
 
     #[actix_rt::test]
-    async fn test_index_ok() {
+    async fn test_index_is_ok() {
         let mut app = test::init_service(App::new().service(index)).await;
         let req = test::TestRequest::default()
             .insert_header(("content-type", "text/plain"))
@@ -69,7 +69,7 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_status_body_is_ip() {
+    async fn test_body_is_ip() {
         let mut app = test::init_service(App::new().service(status)).await;
         let req = test::TestRequest::default()
             .insert_header(("content-type", "text/plain"))
@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_status_insert_is_ok() {
+    async fn test_insert_is_ok() {
         let mut app = test::init_service(App::new().service(insert)).await;
         let payload = "{\"insert_test\":\"John Doe\"}";
         let req = test::TestRequest::post()
@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_status_list_is_ok() {
+    async fn test_list_is_ok() {
         let mut app = test::init_service(App::new().service(list)).await;
         let req = test::TestRequest::get().uri("/list").to_request();
         let resp = test::call_service(&mut app, req).await;
@@ -106,7 +106,7 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_status_delete_is_ok() {
+    async fn test_delete_is_ok() {
         let guard = MAP.guard();
         MAP.insert("delete_test".to_string(), "John Doe".to_string(), &guard);
         let mut app = test::init_service(App::new().service(delete)).await;
@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_get_status_is_ok() {
+    async fn test_get_is_ok() {
         let guard = MAP.guard();
         MAP.insert("get_test".to_string(), "John Doe".to_string(), &guard);
         let mut app = test::init_service(App::new().service(get)).await;
@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_status_patch_is_ok() {
+    async fn test_patch_is_ok() {
         let guard = MAP.guard();
         MAP.insert(
             "code".to_string(),
