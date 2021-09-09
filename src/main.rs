@@ -32,10 +32,9 @@ pub async fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::{index, insert, status};
+    use crate::services::{delete, get, index, insert, list, patch, status};
     use actix_web::http::StatusCode;
     use actix_web::{body::Body, test, App};
-    use serde_json::json;
 
     #[actix_rt::test]
     async fn test_index_ok() {
@@ -88,11 +87,62 @@ mod tests {
     #[actix_rt::test]
     async fn test_status_insert_is_ok() {
         let mut app = test::init_service(App::new().service(insert)).await;
-        let payload = json!(r#"{"Doe":"John"}"#);
+        let payload = "{\"insert_test\":\"John Doe\"}";
         let req = test::TestRequest::post()
             .insert_header(("Content-Type", "application/json"))
-            .set_json(&payload)
+            .set_payload(payload)
             .uri("/insert")
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_rt::test]
+    async fn test_status_list_is_ok() {
+        let mut app = test::init_service(App::new().service(list)).await;
+        let req = test::TestRequest::get().uri("/list").to_request();
+        let resp = test::call_service(&mut app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_rt::test]
+    async fn test_status_delete_is_ok() {
+        let guard = MAP.guard();
+        MAP.insert("delete_test".to_string(), "John Doe".to_string(), &guard);
+        let mut app = test::init_service(App::new().service(delete)).await;
+        let req = test::TestRequest::delete()
+            .uri("/key/delete_test")
+            .insert_header(("Content-Type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_rt::test]
+    async fn test_get_status_is_ok() {
+        let guard = MAP.guard();
+        MAP.insert("get_test".to_string(), "John Doe".to_string(), &guard);
+        let mut app = test::init_service(App::new().service(get)).await;
+        let req = test::TestRequest::get()
+            .uri("/key/get_test")
+            .insert_header(("Content-Type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_rt::test]
+    async fn test_status_patch_is_ok() {
+        let guard = MAP.guard();
+        MAP.insert(
+            "code".to_string(),
+            r#"Deno.core.ops();Deno.core.opSync("rs3_list", "").toString();"#.to_string(),
+            &guard,
+        );
+        let mut app = test::init_service(App::new().service(patch)).await;
+        let req = test::TestRequest::patch()
+            .uri("/key/code")
+            .insert_header(("Content-Type", "application/json"))
             .to_request();
         let resp = test::call_service(&mut app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
