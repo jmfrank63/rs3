@@ -15,6 +15,8 @@ pub fn list() -> String {
 }
 
 pub fn insert(request_body: String) -> String {
+    let request_body = unquote_string(&request_body);
+    println!("Request Body: {}", request_body);
     let guard = MAP.guard();
     let entry: serde_json::Value = serde_json::from_str(request_body.as_str()).unwrap();
     let obj = entry.as_object().unwrap();
@@ -34,9 +36,7 @@ pub fn delete(key: String) -> String {
 pub fn get(key: String) -> String {
     let guard = MAP.guard();
     let value = MAP.get(key.as_str(), &guard).unwrap();
-    let value = value.strip_prefix("\"").unwrap();
-    let value = value.strip_suffix("\"").unwrap();
-    let value = value.replace("\\", "");
+    let value = unquote_string(value);
     println!("GET: {}", value);
     value.to_owned().to_string()
 }
@@ -84,4 +84,11 @@ pub fn interpreter() -> JsRuntime {
     );
     runtime.sync_ops_cache();
     runtime
+}
+
+fn unquote_string(value: &String) -> String {
+    let value = value.strip_prefix("\"").unwrap();
+    let value = value.strip_suffix("\"").unwrap();
+    let value = value.replace("\\", "");
+    value
 }
