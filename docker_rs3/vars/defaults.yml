@@ -1,5 +1,5 @@
 ---
-create_containers: 5
+create_containers: 1
 container_name: rs3
 frontend_network_name: rs3_frontend_network
 backend_network_name: rs3_backend_network
