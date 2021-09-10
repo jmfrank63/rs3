@@ -35,6 +35,7 @@ mod tests {
     use crate::services::{delete, get, index, insert, list, patch, status};
     use actix_web::http::StatusCode;
     use actix_web::{body::Body, test, App};
+    use std::{thread, time};
 
     #[actix_rt::test]
     async fn test_index_is_ok() {
@@ -54,7 +55,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&mut app, req).await;
         let body = resp.into_body();
-        assert_eq!(body, Body::from("\"Welcome to rs3\""));
+        assert_eq!(body, Body::from(r#""Welcome to rs3""#));
     }
 
     #[actix_rt::test]
@@ -69,7 +70,7 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_body_is_ip() {
+    async fn test_ip_body_is_ip() {
         let mut app = test::init_service(App::new().service(status)).await;
         let req = test::TestRequest::default()
             .insert_header(("content-type", "text/plain"))
@@ -87,7 +88,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_insert_is_ok() {
         let mut app = test::init_service(App::new().service(insert)).await;
-        let payload = "{\"insert_test\":\"John Doe\"}";
+        let payload = r#"{"insert_test":"John Doe"}"#;
         let req = test::TestRequest::post()
             .insert_header(("Content-Type", "application/json"))
             .set_payload(payload)
@@ -95,6 +96,20 @@ mod tests {
             .to_request();
         let resp = test::call_service(&mut app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_rt::test]
+    async fn test_insert_map_entry_is_ok() {
+        let mut app = test::init_service(App::new().service(insert)).await;
+        let payload = r#"{"insert_test":"John Doe"}"#;
+        let req = test::TestRequest::post()
+            .insert_header(("Content-Type", "application/json"))
+            .set_payload(payload)
+            .uri("/insert")
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        let body = resp.into_body();
+        assert_eq!(body, Body::from(r#""{\"insert_test\":\"John Doe\"}""#));
     }
 
     #[actix_rt::test]
@@ -146,5 +161,31 @@ mod tests {
             .to_request();
         let resp = test::call_service(&mut app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_rt::test]
+    async fn test_patch_body_is_listing() {
+        let guard = MAP.guard();
+        thread::sleep(time::Duration::from_millis(1000));
+        MAP.clear(&guard);
+        thread::sleep(time::Duration::from_millis(1000));
+        MAP.insert(
+            "code_body".to_string(),
+            r#"Deno.core.ops();Deno.core.opSync("rs3_list", "").toString();"#.to_string(),
+            &guard,
+        );
+        let mut app = test::init_service(App::new().service(patch)).await;
+        let req = test::TestRequest::patch()
+            .uri("/key/code_body")
+            .insert_header(("Content-Type", "application/json"))
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        let body = resp.into_body();
+        assert_eq!(
+            body,
+            Body::from(
+                r#""[{\"code_body\" : \"Deno.core.ops();Deno.core.opSync(\"rs3_list\", \"\").toString();\"},]""#
+            )
+        );
     }
 }
