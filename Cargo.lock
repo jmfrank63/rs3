@@ -435,7 +435,7 @@ dependencies = [
 [[package]]
 name = "deno_core"
 version = "0.98.0"
-source = "git+https://github.com/denoland/deno?branch=main#a5bcf7033e66a828dc88a313f4cca11f116c3f83"
+source = "git+https://github.com/denoland/deno?branch=main#87052927afd505ff1c5d42075cd23a3619b29011"
 dependencies = [
  "anyhow",
  "futures",

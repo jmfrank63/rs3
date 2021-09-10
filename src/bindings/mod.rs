@@ -15,17 +15,13 @@ pub fn list() -> String {
 }
 
 pub fn insert(request_body: String) -> String {
-    println!("Insert In: {}", request_body);
     let guard = MAP.guard();
     let entry: serde_json::Value = serde_json::from_str(request_body.as_str()).unwrap();
     let obj = entry.as_object().unwrap();
     for (k, v) in obj.iter() {
         let v: String = serde_json::from_value(v.to_owned()).unwrap();
-        println!("Culprits: {} : {}", k, v);
-
         MAP.insert(k.to_string(), v.to_string(), &guard);
     }
-    println!("Stored: {}", entry.to_string());
     entry.to_string()
 }
 
@@ -44,7 +40,6 @@ pub fn get(key: String) -> String {
 
 pub fn patch(key: String) -> String {
     let value = get(key.clone());
-    println!("Patch: {}", value);
     let mut runtime = interpreter();
     let result = runtime
         .execute_script(key.as_str(), value.as_str())

@@ -9,4 +9,5 @@ Content-Type: application/json
 ### PATCH request
 PATCH http://localhost:5000/key/code
 
-
+### GET request
+GET http://localhost:5000/key/code
