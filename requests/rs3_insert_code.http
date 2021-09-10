@@ -1,0 +1,12 @@
+### POST request
+POST http://localhost:5000/insert
+Content-Type: application/json
+
+{
+  "code": "Deno.core.ops();Deno.core.opSync(\"rs3_list\",\"\").toString();"
+}
+
+### PATCH request
+PATCH http://localhost:5000/key/code
+
+
