@@ -1,0 +1,13 @@
+### POST request
+POST http://rs3.common-work-education.co.uk:8080/insert
+Content-Type: application/json
+
+{
+  "code": "Deno.core.ops();Deno.core.opSync(\"rs3_list\",\"\").toString();"
+}
+
+### PATCH request
+PATCH http://rs3.common-work-education.co.uk:8080/key/code
+
+### GET request
+GET http://rs3.common-work-education.co.uk:8080/key/code
