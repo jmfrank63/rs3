@@ -6,8 +6,11 @@ Content-Type: application/json
   "code": "Deno.core.ops();Deno.core.opSync(\"rs3_list\",\"\").toString();"
 }
 
-### PATCH request
+### PATCH request execute code
 PATCH http://localhost:5000/key/code
 
-### GET request
+### GET request list
+GET http://localhost:5000/list
+
+### GET request get value of key
 GET http://localhost:5000/key/code

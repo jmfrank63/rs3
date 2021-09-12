@@ -10,6 +10,9 @@ pub fn list() -> String {
         out.push_str(format!("{{\"{}\" : \"{}\"}}", k, v).as_str());
         out.push_str(",");
     }
+    if out.ends_with(",") {
+        out = out.strip_suffix(",").unwrap().to_owned();
+    }
     out.push_str("]");
     out
 }
@@ -34,8 +37,12 @@ pub fn delete(key: String) -> String {
 
 pub fn get(key: String) -> String {
     let guard = MAP.guard();
-    let value = MAP.get(key.as_str(), &guard).unwrap();
-    value.to_owned().to_string()
+    if MAP.is_empty() {
+        "[]".to_string()
+    } else {
+        let value = MAP.get(key.as_str(), &guard).unwrap();
+        value.to_owned().to_string()
+    }
 }
 
 pub fn patch(key: String) -> String {
