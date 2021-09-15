@@ -1,3 +1,7 @@
+//! Contains the configuration for the server
+//!
+//! Either reads from the .env file if it exists
+//! or reads from the environment
 use config::{ConfigError, Environment};
 use dotenv::dotenv;
 use serde::Deserialize;

@@ -1,3 +1,7 @@
+//! Handlers which access the hash_map
+//!
+//! The handlers will be either called by the service handlers
+//! or by the JsRuntime of Deno directly (bindings)
 use super::MAP;
 use deno_core::{op_sync, JsRuntime, RuntimeOptions};
 use rusty_v8::{Context, ContextScope, HandleScope};
@@ -45,6 +49,7 @@ pub fn get(key: String) -> String {
     }
 }
 
+// Takes a vaild JavaScript code as a string and executes it
 pub fn patch(key: String) -> String {
     let value = get(key.clone());
     let mut runtime = interpreter();
@@ -61,6 +66,8 @@ pub fn patch(key: String) -> String {
     }
 }
 
+// Creates the V8 engine JavaScript runtime
+// And registers the handlers for use by the engine
 pub fn interpreter() -> JsRuntime {
     let mut runtime = JsRuntime::new(RuntimeOptions {
         ..Default::default()

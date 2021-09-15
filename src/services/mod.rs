@@ -1,3 +1,7 @@
+//! Contains the service handlers
+//!
+//! A service is a combination of route and correct http method
+//! When both match the handler is called
 use actix_web::web::Path;
 use actix_web::{delete, get, patch, post, web, HttpRequest, HttpResponse, Responder};
 
