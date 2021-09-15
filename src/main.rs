@@ -23,10 +23,13 @@ pub async fn main() -> io::Result<()> {
         rs3_conf.server.host, rs3_conf.server.port
     );
 
-    HttpServer::new(move || App::new().configure(app_service_config))
-        .bind(format!("{}:{}", rs3_conf.server.host, rs3_conf.server.port))?
-        .run()
-        .await
+    let app = HttpServer::new(move || {
+        let app = App::new().configure(app_service_config);
+        app
+    })
+    .bind(format!("{}:{}", rs3_conf.server.host, rs3_conf.server.port))?
+    .run();
+    app.await
 }
 
 #[cfg(test)]
@@ -130,6 +133,7 @@ mod tests {
             .insert_header(("Content-Type", "application/json"))
             .to_request();
         let resp = test::call_service(&mut app, req).await;
+        assert!(!MAP.contains_key("delete_test", &guard));
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -174,18 +178,20 @@ mod tests {
             r#"Deno.core.ops();Deno.core.opSync("rs3_list", "").toString();"#.to_string(),
             &guard,
         );
-        let mut app = test::init_service(App::new().service(patch)).await;
-        let req = test::TestRequest::patch()
+        let mut app = test::init_service(App::new().service(patch).service(list)).await;
+        let patch_req = test::TestRequest::patch()
             .uri("/key/code_body")
             .insert_header(("Content-Type", "application/json"))
             .to_request();
-        let resp = test::call_service(&mut app, req).await;
-        let body = resp.into_body();
-        assert_eq!(
-            body,
-            Body::from(
-                r#""[{\"code_body\" : \"Deno.core.ops();Deno.core.opSync(\"rs3_list\", \"\").toString();\"},]""#
-            )
-        );
+        let patch_resp = test::call_service(&mut app, patch_req).await;
+        let patch_body = patch_resp.into_body();
+
+        let list_req = test::TestRequest::get()
+            .uri("/list")
+            .insert_header(("Content-Type", "application/json"))
+            .to_request();
+        let list_resp = test::call_service(&mut app, list_req).await;
+        let list_body = list_resp.into_body();
+        assert_eq!(patch_body, list_body);
     }
 }

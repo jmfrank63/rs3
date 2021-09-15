@@ -1,3 +1,10 @@
+### GET request get value of key
+GET http://localhost:5000/
+
+### GET request get value of key
+GET http://localhost:5000/ip
+
+#--------------------------------
 ### POST request
 POST http://localhost:5000/insert
 Content-Type: application/json
@@ -6,11 +13,75 @@ Content-Type: application/json
   "code": "Deno.core.ops();Deno.core.opSync(\"rs3_list\",\"\").toString();"
 }
 
+### POST request
+POST http://localhost:5000/insert
+Content-Type: application/json
+
+{
+  "numbers": "1 2 3 4 5 6 7 8 9 10"
+}
+
 ### PATCH request execute code
 PATCH http://localhost:5000/key/code
 
 ### GET request list
 GET http://localhost:5000/list
 
+#-----------------------------------
+### POST request
+POST http://localhost:5000/insert
+Content-Type: application/json
+
+< sum.txt
+
+### PATCH request execute code
+PATCH http://localhost:5000/key/sum
+
+#----------------------------------
+### POST request
+POST http://localhost:5000/insert
+Content-Type: application/json
+
+{
+  "num": "5"
+}
+
+### POST request
+POST http://localhost:5000/insert
+Content-Type: application/json
+
+< fac.txt
+
+### PATCH request execute code
+PATCH http://localhost:5000/key/fac
+
+#----------------------------------
+### POST request
+POST http://localhost:5000/insert
+Content-Type: application/json
+
+< store.txt
+
+### PATCH request execute code
+PATCH http://localhost:5000/key/store
+
 ### GET request get value of key
-GET http://localhost:5000/key/code
+GET http://localhost:5000/key/res
+
+#----------------------------------
+### POST request
+POST http://localhost:5000/insert
+Content-Type: application/json
+
+{
+  "tree": "8 10 12 5 3 6"
+}
+
+### POST request
+POST http://localhost:5000/insert
+Content-Type: application/json
+
+< bin.txt
+
+### PATCH request execute code
+PATCH http://localhost:5000/key/bin
