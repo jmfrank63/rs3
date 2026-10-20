@@ -35,6 +35,8 @@ run_guards() {
 
 # expect_fail TAG LABEL SNIPPET [EXTRA]: plant SNIPPET in a fresh copy and require the guards
 # to exit non-zero with `FAIL [TAG]` (and the fixed string EXTRA, when given).
+# The guards run with the env args in GUARD_ENV (default: CI unset).
+GUARD_ENV=(-u CI)
 expect_fail() {
   local tag=$1 label=$2 snippet=$3 extra=${4:-}
   cases=$((cases + 1))
@@ -44,7 +46,7 @@ expect_fail() {
     missed=$((missed + 1))
     return
   fi
-  run_guards -u CI
+  run_guards "${GUARD_ENV[@]}"
   if [[ $RC -ne 0 && "$OUT" == *"FAIL [$tag]"* && ( -z "$extra" || "$OUT" == *"$extra"* ) ]]; then
     echo "caught $tag: $label"
   else
@@ -86,6 +88,16 @@ EOF
 chmod +x shim/python3
 SNIP
 )
+
+# expect_fail_ci TAG LABEL SNIPPET [EXTRA]: expect_fail with CI=true and PyYAML hidden, so in
+# guard (g) only the content grep runs (the structure check is skipped), as on a CI runner
+# without PyYAML.
+expect_fail_ci() {
+  local tag=$1 label=$2 snippet=$3
+  shift 3
+  local -a GUARD_ENV=(CI=true)
+  expect_fail "$tag" "$label (CI, no PyYAML)" "$PY_SHIM"$'\n'"$snippet" "$@"
+}
 
 # --- control: an unmodified copy passes ---------------------------------------------------
 fresh
@@ -264,6 +276,39 @@ expect_wf_fail 'extra pull_request_target trigger' \
   "unexpected triggers ['pull_request_target']"
 expect_fail g 'checkout with: ref: main (through the guards)' \
   "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          ref: main|' $WF && grep -q '^          ref: main' $WF"
+
+
+# --- (g) content grep alone (CI without PyYAML) ---------------------------------------------
+expect_fail_ci g 'lowercase server.host under the workflow env' \
+  "sed -i 's/^  CARGO_TERM_COLOR: always\$/  CARGO_TERM_COLOR: always\n  server.host: 0.0.0.0/' $WF && grep -q '^  server.host' $WF" \
+  'forbidden workflow content'
+expect_fail_ci g 'run line echoes the github.head_ref expression' "$(cat <<'SNIP'
+cat >> .github/workflows/ci.yml <<'EOF'
+
+      - name: Echo branch
+        run: echo "${{ github.head_ref }}"
+EOF
+SNIP
+)" 'expression interpolation outside the concurrency group'
+expect_fail_ci g 'multi-line run block interpolates github.event after a tab' "$(cat <<'SNIP'
+printf '\n      - name: Echo title\n        run: |\n          echo "${{\tgithub.event.pull_request.title }}"\n' >> .github/workflows/ci.yml
+SNIP
+)" 'expression interpolation outside the concurrency group'
+expect_fail_ci g 'working-directory on the cargo test step' \
+  "sed -i 's|^        run: cargo test --locked\$|        run: cargo test --locked\n        working-directory: experiments/hashring|' $WF && grep -q 'working-directory' $WF" \
+  'forbidden workflow content'
+expect_fail_ci g 'job-level permissions: write-all' \
+  "sed -i 's/^    timeout-minutes: 45\$/    timeout-minutes: 45\n    permissions: write-all/' $WF && grep -q 'permissions: write-all' $WF" \
+  'forbidden workflow content'
+expect_fail_ci g 'top-level contents: write' \
+  "sed -i 's/^  contents: read\$/  contents: write/' $WF && grep -q '^  contents: write' $WF" \
+  'forbidden workflow content'
+expect_fail_ci g 'checkout with: ref: main' \
+  "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          ref: main|' $WF && grep -q '^          ref: main' $WF" \
+  'forbidden workflow content'
+expect_fail_ci g "pull_request paths-ignore: ['**']" \
+  "sed -i \"s/^  pull_request:\\\$/  pull_request:\n    paths-ignore: ['**']/\" $WF && grep -q 'paths-ignore' $WF" \
+  'forbidden workflow content'
 
 expect_fail g 'ci.yml deleted (zero workflows)' \
   "rm $WF" 'found: none'

@@ -186,27 +186,55 @@ grep_guard f "no opSync / Deno.core.ops() / un-prefixed rs3_* ops" "legacy op sy
   grep -RnE 'opSync|Deno\.core\.ops\(\)|(^|[^_[:alnum:]])rs3_(list|get|insert|delete|patch)([^_[:alnum:]]|$)' \
   requests src
 
-# (g) exactly one workflow; no error suppression, server env, lint-lowering flags or
-# event-context interpolation in it; and its structure matches check-workflow.py.
+# (g) exactly one workflow; no error suppression, server env, lint-lowering flags, gate
+# redirection or expression interpolation in it; and its structure matches check-workflow.py.
+# The content grep is the only workflow check when PyYAML is missing in CI, so it stands on
+# its own: case-insensitive (the config loader accepts SERVER.HOST in any case), and it
+# rejects working-directory, job-level or write permissions, checkout ref/repository,
+# trigger filters, and every `${{` except the one concurrency group line.
 # PyYAML: in CI ($CI set) a missing PyYAML skips only the structure check, with a
 # printed skip line; locally the structure check is mandatory. Nothing is pip-installed.
+# Every layer runs, so forbidden content does not hide structure errors.
 shopt -s nullglob
 wf=(.github/workflows/*.yml .github/workflows/*.yaml)
 shopt -u nullglob
+g_errs=""
+g_skip=""
 if [[ ${#wf[@]} -ne 1 || ${wf[0]:-} != .github/workflows/ci.yml ]]; then
-  fail g "expected only .github/workflows/ci.yml, found: ${wf[*]:-none}"
-elif hits=$(grep -nE 'continue-on-error|SERVER\.|RUSTFLAGS|cap-lints|\$\{\{ *github\.event\.' "${wf[@]}"); then
-  fail g "forbidden workflow content:"$'\n'"$hits"
-elif ! python3 -c 'import yaml' 2>/dev/null; then
-  if [[ -n "${CI:-}" ]]; then
-    echo "ci-guards: skip [g-structure] PyYAML unavailable"
-    pass g "single ci.yml, no forbidden content (structure check skipped: PyYAML unavailable in CI)"
-  else
-    fail g "PyYAML is required locally for the workflow structure check (python3 -c 'import yaml' failed)"
+  g_errs+=$'\n'"expected only .github/workflows/ci.yml, found: ${wf[*]:-none}"
+else
+  g_pat='continue-on-error|server\.|rustflags|cap-lints|working-directory|write-all'
+  g_pat+='|^[[:space:]]+permissions[[:space:]]*:|^[[:space:]]*[a-z-]+[[:space:]]*:[[:space:]]*write[[:space:]]*(#.*)?$'
+  g_pat+='|^[[:space:]]+(ref|repository)[[:space:]]*:'
+  g_pat+='|^[[:space:]]+(branches|branches-ignore|tags|tags-ignore|paths|paths-ignore|types)[[:space:]]*:'
+  hits=$(grep -inE "$g_pat" "${wf[@]}" 2>&1) && rc=0 || rc=$?
+  case $rc in
+    0) g_errs+=$'\n'"forbidden workflow content:"$'\n'"$hits" ;;
+    1) ;;
+    *) g_errs+=$'\n'"grep failed (exit $rc):"$'\n'"$hits" ;;
+  esac
+  hits=$(grep -nF '${{' "${wf[@]}" 2>&1) && rc=0 || rc=$?
+  case $rc in
+    0) if other=$(grep -vE '^[0-9]+:  group: ci-\$\{\{ github\.ref \}\}$' <<<"$hits"); then
+         g_errs+=$'\n'"expression interpolation outside the concurrency group:"$'\n'"$other"
+       fi ;;
+    1) ;;
+    *) g_errs+=$'\n'"grep failed (exit $rc):"$'\n'"$hits" ;;
+  esac
+  if ! python3 -c 'import yaml' 2>/dev/null; then
+    if [[ -n "${CI:-}" ]]; then
+      echo "ci-guards: skip [g-structure] PyYAML unavailable"
+      g_skip=" (structure check skipped: PyYAML unavailable in CI)"
+    else
+      g_errs+=$'\n'"PyYAML is required locally for the workflow structure check (python3 -c 'import yaml' failed)"
+    fi
+  elif ! msg=$(python3 scripts/check-workflow.py 2>&1); then
+    g_errs+=$'\n'"workflow structure:"$'\n'"$msg"
   fi
-elif ! msg=$(python3 scripts/check-workflow.py 2>&1); then
-  fail g "workflow structure:"$'\n'"$msg"
-else pass g "single ci.yml, structure ok"; fi
+fi
+if [[ -n $g_errs ]]; then fail g "${g_errs#$'\n'}"
+elif [[ -n $g_skip ]]; then pass g "single ci.yml, no forbidden content$g_skip"
+else pass g "single ci.yml, no forbidden content, structure ok"; fi
 
 # (h) no repo-level cargo config that could lower lints (rustflags, cap-lints).
 shopt -s nullglob
