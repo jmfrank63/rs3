@@ -27,16 +27,24 @@ pub struct Settings {
 
 /// Merge dotenv pairs and environment pairs into one configuration map.
 ///
-/// Precedence: inside the dotenv source the first occurrence of a key wins over
-/// later duplicates, and every environment entry overrides the dotenv source.
-/// The first dotenv error is returned before any pair is used, so a malformed
-/// file is never half-applied. Environment entries whose name or value is not
-/// valid UTF-8 are skipped.
+/// Every key is lowercased before precedence is decided, so the map never holds
+/// two spellings of the same config key (`config` lowercases keys itself and
+/// would otherwise resolve such collisions in random `HashMap` order).
+///
+/// Precedence: inside the dotenv source the first occurrence of a key (in any
+/// case) wins over later duplicates, and every environment entry overrides the
+/// dotenv source whatever the case of either spelling. If the environment holds
+/// the same key in two spellings (`SERVER.HOST` and `server.host`), the one that
+/// comes later in the environment list wins; for `std::env::vars_os()` that
+/// order is fixed for a given process environment. The first dotenv error is
+/// returned before any pair is used, so a malformed file is never half-applied.
+/// Environment entries whose name or value is not valid UTF-8 are skipped.
 ///
 /// Only keys whose lowercased name starts with `server.` are kept, so unrelated
 /// variables (`SERVER`, `PATH`, ...) cannot collide with the server table. The
 /// accepted names are still the dotted `SERVER.HOST` / `SERVER.PORT` (in any
-/// case); there are no defaults and no double-underscore alias.
+/// case); there are no defaults and no double-underscore alias. The returned
+/// keys are lowercase.
 ///
 /// This function is pure: it touches neither the process environment nor the
 /// filesystem.
@@ -52,15 +60,15 @@ where
     if let Some(items) = dotenv {
         for item in items {
             let (key, value) = item.map_err(dotenv_error)?;
-            vars.entry(key).or_insert(value);
+            vars.entry(key.to_ascii_lowercase()).or_insert(value);
         }
     }
     for (key, value) in env {
         if let (Ok(key), Ok(value)) = (key.into_string(), value.into_string()) {
-            vars.insert(key, value);
+            vars.insert(key.to_ascii_lowercase(), value);
         }
     }
-    vars.retain(|key, _| key.to_ascii_lowercase().starts_with("server."));
+    vars.retain(|key, _| key.starts_with("server."));
     Ok(vars)
 }
 
@@ -228,7 +236,7 @@ mod tests {
         .expect("valid dotenv content merges");
         let mut keys: Vec<&str> = merged.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["SERVER.HOST", "SERVER.PORT"]);
+        assert_eq!(keys, ["server.host", "server.port"]);
     }
 
     #[test]
@@ -263,7 +271,35 @@ mod tests {
             env(&[("SERVER.HOST", "env")]),
         )
         .expect("valid dotenv content merges");
-        assert_eq!(merged.get("SERVER.HOST").map(String::as_str), Some("env"));
+        assert_eq!(merged.get("server.host").map(String::as_str), Some("env"));
+    }
+
+    #[test]
+    fn env_overrides_dotenv_across_case() {
+        // The env must win however either source spells the key. Before keys were
+        // lowercased in the merge, both spellings survived and `config` picked one
+        // in HashMap order, so check the merged map directly and repeat the full load.
+        for (file_key, env_key) in [
+            ("SERVER.HOST", "server.host"),
+            ("server.host", "SERVER.HOST"),
+        ] {
+            let content = format!("{file_key}=file\nSERVER.PORT=1\n");
+            let merged = merge_dotenv_env(
+                Some(dotenvy::from_read_iter(content.as_bytes())),
+                env(&[(env_key, "env")]),
+            )
+            .expect("valid dotenv content merges");
+            assert_eq!(merged.len(), 2, "two spellings survived: {merged:?}");
+            assert_eq!(merged.get("server.host").map(String::as_str), Some("env"));
+            for _ in 0..64 {
+                let s = Settings::from_sources(
+                    Ok(dotenvy::from_read_iter(content.as_bytes())),
+                    env(&[(env_key, "env")]),
+                )
+                .expect("valid sources configure");
+                assert_eq!(s.server.host, "env");
+            }
+        }
     }
 
     #[test]
@@ -271,7 +307,16 @@ mod tests {
         let content = "SERVER.HOST=first\nSERVER.HOST=second\n";
         let merged = merge_dotenv_env(Some(dotenvy::from_read_iter(content.as_bytes())), env(&[]))
             .expect("valid dotenv content merges");
-        assert_eq!(merged.get("SERVER.HOST").map(String::as_str), Some("first"));
+        assert_eq!(merged.get("server.host").map(String::as_str), Some("first"));
+    }
+
+    #[test]
+    fn dotenv_first_occurrence_wins_across_case() {
+        let content = "SERVER.HOST=first\nserver.host=second\nSERVER.PORT=1\n";
+        let merged = merge_dotenv_env(Some(dotenvy::from_read_iter(content.as_bytes())), env(&[]))
+            .expect("valid dotenv content merges");
+        assert_eq!(merged.len(), 2, "two spellings survived: {merged:?}");
+        assert_eq!(merged.get("server.host").map(String::as_str), Some("first"));
     }
 
     #[cfg(unix)]
@@ -288,7 +333,7 @@ mod tests {
         let merged = merge_dotenv_env(None::<dotenvy::Iter<&[u8]>>, list.clone())
             .expect("non-UTF-8 entries are skipped, not an error");
         assert!(
-            !merged.contains_key("SERVER.BAD"),
+            !merged.contains_key("server.bad"),
             "non-UTF-8 value kept: {merged:?}"
         );
         assert_eq!(merged.len(), 2, "unexpected entries: {merged:?}");
