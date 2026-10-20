@@ -44,14 +44,26 @@ pub fn format_insert_echo(entries: &[(String, String)]) -> String {
     Value::Object(map).to_string()
 }
 
-/// Format entries as the rs3 v0 `/list` text `[{"k" : "v"},...]`; Phase 2 replaces this shape.
+/// Format entries as the rs3 v0 `/list` text: `[{"k" : "v"},{"k2" : "v2"}]`.
+///
+/// Keeps the legacy `" : "` spacing and `,` separators, but every key and value
+/// is JSON-escaped by serde_json, so the text is always valid JSON that parses
+/// back to exactly the given pairs, and a value can never forge an extra entry.
+/// For data that needs no escaping the output is byte-identical to legacy. An
+/// empty slice gives `[]`. Entries arrive sorted from `Store::list`. This one
+/// codec is shared by `GET /list` and, from Phase 3, the `op_rs3_list` JS op.
 pub fn format_list(entries: &[(String, String)]) -> String {
     let items: Vec<String> = entries
         .iter()
-        .map(|(k, v)| format!("{{\"{k}\" : \"{v}\"}}"))
+        .map(|(k, v)| {
+            format!(
+                "{{{} : {}}}",
+                Value::from(k.as_str()),
+                Value::from(v.as_str())
+            )
+        })
         .collect();
-    // The legacy handler applied this replacement last; keep it for byte parity.
-    format!("[{}]", items.join(",")).replace(",]", "]")
+    format!("[{}]", items.join(","))
 }
 
 #[cfg(test)]
