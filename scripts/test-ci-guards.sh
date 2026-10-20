@@ -87,6 +87,16 @@ expect_fail a '#[expect(unused)]' \
   'echo "#[expect(unused)]" >> src/lib.rs'
 expect_fail a '#[allow(unused)] in a new tests/t.rs' \
   'mkdir -p tests && echo "#[allow(unused)] fn t() {}" > tests/t.rs'
+expect_fail a 'multi-line #[cfg_attr(..., allow(...))] (rustfmt layout)' \
+  'printf "#[cfg_attr(\n    all(test, feature = \"a_rather_long_feature_name\"),\n    allow(clippy::unwrap_used, dead_code)\n)]\nfn planted() {}\n" >> src/lib.rs'
+expect_fail a 'whitespace-split # [allow(dead_code)]' \
+  'echo "# [allow(dead_code)] fn planted() {}" >> src/lib.rs'
+expect_fail a 'whitespace-split # ! [allow(unused)]' \
+  'echo "# ! [allow(unused)]" >> src/main.rs'
+expect_fail a '#[allow(dead_code)] in a symlinked module file' \
+  'mkdir -p outside && echo "#[allow(dead_code)] fn z() {}" > outside/z.rs && ln -s ../outside/z.rs src/z.rs'
+expect_fail a '#[allow(dead_code)] in a symlinked module directory' \
+  'mkdir -p outside && echo "#[allow(dead_code)] fn z() {}" > outside/z.rs && ln -s ../outside src/linked'
 
 # --- (b) ignored tests ----------------------------------------------------------------------
 expect_fail b '#[ignore] on a test' \

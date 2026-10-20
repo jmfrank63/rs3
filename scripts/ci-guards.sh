@@ -11,32 +11,78 @@ failures=0
 fail() { echo "ci-guards: FAIL [$1] $2" >&2; failures=$((failures + 1)); }
 pass() { echo "ci-guards: ok   [$1] $2"; }
 
-# grep_guard TAG OK-MSG FAIL-MSG GREP-ARGS...: grep exit 0 (hits) fails the guard, 1 (no hits)
-# passes it, and anything else (a grep error such as a missing directory) fails it too.
+# grep_guard TAG OK-MSG FAIL-MSG CMD...: CMD is `grep ...` or `ml_grep ...`. Exit 0 (hits)
+# fails the guard, 1 (no hits) passes it, and anything else (an error such as a missing
+# directory) fails it too.
 grep_guard() {
   local tag=$1 ok=$2 bad=$3 hits rc
   shift 3
-  hits=$(grep "$@" 2>&1) && rc=0 || rc=$?
+  hits=$("$@" 2>&1) && rc=0 || rc=$?
   case $rc in
     0) fail "$tag" "$bad"$'\n'"$hits" ;;
     1) pass "$tag" "$ok" ;;
-    *) fail "$tag" "grep failed (exit $rc):"$'\n'"$hits" ;;
+    *) fail "$tag" "$1 failed (exit $rc):"$'\n'"$hits" ;;
   esac
+}
+
+# ml_grep PYTHON-REGEX PATH...: multi-line search over every file under PATH (grep -R
+# semantics: symlinked files and directories are followed, loops are skipped). The regex
+# sees whole files, so \s also matches newlines and an attribute split over several lines
+# (rustfmt's layout for long attributes) still matches. Prints `file:line: match` per hit,
+# with whitespace collapsed; exits 0 on hits, 1 on none, 2 on an error such as a missing
+# path or a dangling symlink (grep_guard fails closed on that).
+ml_grep() {
+  python3 - "$@" <<'PY'
+import os, re, sys
+pat = re.compile(sys.argv[1])
+def walk_error(e):
+    raise e
+def files(root):
+    if not os.path.isdir(root):
+        yield root
+        return
+    seen = set()
+    for d, dirs, names in os.walk(root, followlinks=True, onerror=walk_error):
+        real = os.path.realpath(d)
+        if real in seen:
+            dirs[:] = []
+            continue
+        seen.add(real)
+        dirs.sort()
+        for n in sorted(names):
+            yield os.path.join(d, n)
+hits = 0
+try:
+    for root in sys.argv[2:]:
+        for p in files(root):
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            for m in pat.finditer(text):
+                line = text.count("\n", 0, m.start()) + 1
+                print(f"{p}:{line}: {' '.join(m.group(0).split())}")
+                hits += 1
+except OSError as e:
+    print(f"ml_grep: {e}", file=sys.stderr)
+    sys.exit(2)
+sys.exit(0 if hits else 1)
+PY
 }
 
 # Rust source roots to scan (src/ always; future dirs if they appear).
 rs_roots=(src)
 for d in tests benches examples build.rs; do [[ -e $d ]] && rs_roots+=("$d"); done
 
-# (a) no lint-suppression attributes: #[allow(, #![allow(, #[expect(, cfg_attr(.. allow/expect(..)).
+# (a) no lint-suppression attributes: #[allow(, #![allow(, #[expect(, cfg_attr(.. allow/expect(..)),
+# with any token spacing (`# ! [allow(`) and across lines (a multi-line cfg_attr is rustfmt's
+# own layout, so the fmt gate keeps it). Symlinked files are scanned too.
 grep_guard a "no #[allow]/#![allow]/#[expect]/cfg_attr(..allow..)" "lint-suppression attribute found:" \
-  -rnE '#!?\[[[:space:]]*(allow|expect)[[:space:]]*\(|cfg_attr[[:space:]]*\(.*\b(allow|expect)[[:space:]]*\(' \
+  ml_grep '#\s*!?\s*\[\s*(?:allow|expect)\s*\(|cfg_attr\s*\([^\]]*?\b(?:allow|expect)\s*\(' \
   "${rs_roots[@]}"
 
 # (b) no ignored tests. A source grep, never `cargo test` output: deno_core's extension!
 # macro generates a doctest that cargo test reports as `1 ignored`.
 grep_guard b "no #[ignore] / ignored doc blocks" "#[ignore] or ignored doc block found:" \
-  -rnE '#\[[[:space:]]*ignore|```[[:alnum:]_,]*ignore' "${rs_roots[@]}"
+  grep -RnE '#\[[[:space:]]*ignore|```[[:alnum:]_,]*ignore' "${rs_roots[@]}"
 
 # (c) Cargo.toml lint levels: unwrap_used/expect_used at deny (or forbid), nothing at allow
 # (string or `{ level = ... }` table form), parsed with tomllib rather than grepped.
@@ -90,7 +136,7 @@ fi
 # (f) no legacy JS op syntax in requests/ and src/: opSync, Deno.core.ops(), and the five
 # store ops without the op_ prefix. The extension name rs3_ext stays allowed.
 grep_guard f "no opSync / Deno.core.ops() / un-prefixed rs3_* ops" "legacy op syntax found:" \
-  -rnE 'opSync|Deno\.core\.ops\(\)|(^|[^_[:alnum:]])rs3_(list|get|insert|delete|patch)([^_[:alnum:]]|$)' \
+  grep -RnE 'opSync|Deno\.core\.ops\(\)|(^|[^_[:alnum:]])rs3_(list|get|insert|delete|patch)([^_[:alnum:]]|$)' \
   requests src
 
 # (g) exactly one workflow; no error suppression, server env, lint-lowering flags or
