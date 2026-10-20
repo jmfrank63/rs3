@@ -3,7 +3,7 @@ POST http://rs3.common-work-education.co.uk:8080/insert
 Content-Type: application/json
 
 {
-  "code": "Deno.core.ops();Deno.core.opSync(\"rs3_list\",\"\").toString();"
+  "code": "Deno.core.ops.op_rs3_list().toString();"
 }
 
 ### PATCH request
