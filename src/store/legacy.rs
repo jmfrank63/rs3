@@ -3,16 +3,37 @@
 //! Shared by the HTTP layer and, from Phase 3, the JS ops, so both speak one codec.
 use super::StoreError;
 
-// RED stubs: signatures only, replaced by the GREEN implementation.
+use serde_json::{Map, Value};
 
 /// Parse an insert body: a JSON object whose values are all strings.
-pub fn parse_insert_body(_body: &str) -> Result<Vec<(String, String)>, StoreError> {
-    Ok(Vec::new())
+///
+/// Returns the pairs in body order (serde_json `preserve_order` is enabled).
+pub fn parse_insert_body(body: &str) -> Result<Vec<(String, String)>, StoreError> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|e| StoreError::InvalidInput(e.to_string()))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| StoreError::InvalidInput("insert body must be a JSON object".into()))?;
+    object
+        .iter()
+        .map(|(k, v)| match v.as_str() {
+            Some(s) => Ok((k.clone(), s.to_owned())),
+            None => Err(StoreError::InvalidInput(format!(
+                "value for key {k} must be a string"
+            ))),
+        })
+        .collect()
 }
 
 /// Format inserted entries as the compact JSON object text the legacy route echoed.
-pub fn format_insert_echo(_entries: &[(String, String)]) -> String {
-    String::new()
+///
+/// Byte-identical to the legacy `entry.to_string()` for every all-string object.
+pub fn format_insert_echo(entries: &[(String, String)]) -> String {
+    let map: Map<String, Value> = entries
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect();
+    Value::Object(map).to_string()
 }
 
 #[cfg(test)]

@@ -22,33 +22,51 @@ pub struct Store {
     map: Arc<papaya::HashMap<String, String>>,
 }
 
-// RED stubs: signatures only, replaced by the GREEN implementation.
+// Every method takes its own `pin()` guard and drops it before returning, so a
+// guard never escapes and a re-entrant caller (a future JS op) cannot deadlock.
 impl Store {
+    /// An empty store.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// The value stored under `key`, or `NotFound`.
     pub fn get(&self, key: &str) -> Result<String, StoreError> {
-        Err(StoreError::NotFound(key.to_owned()))
+        self.map
+            .pin()
+            .get(key)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(key.to_owned()))
     }
 
-    pub fn insert(&self, _key: String, _value: String) -> Option<String> {
-        None
+    /// Store `value` under `key`, returning the value it replaced, if any.
+    pub fn insert(&self, key: String, value: String) -> Option<String> {
+        self.map.pin().insert(key, value).cloned()
     }
 
-    pub fn insert_many<I>(&self, _entries: I) -> Result<usize, StoreError>
+    /// Validate every entry first, then write them all and return the count.
+    /// Nothing is written when any entry is an error.
+    pub fn insert_many<I>(&self, entries: I) -> Result<usize, StoreError>
     where
         I: IntoIterator<Item = Result<(String, String), StoreError>>,
     {
-        Ok(0)
+        let validated: Vec<(String, String)> = entries.into_iter().collect::<Result<_, _>>()?;
+        let count = validated.len();
+        let map = self.map.pin();
+        for (key, value) in validated {
+            map.insert(key, value);
+        }
+        Ok(count)
     }
 
+    /// Number of stored entries.
     pub fn len(&self) -> usize {
-        0
+        self.map.len()
     }
 
+    /// Whether the store holds no entries.
     pub fn is_empty(&self) -> bool {
-        true
+        self.map.is_empty()
     }
 }
 
