@@ -4,8 +4,9 @@
 //! its ancestors) overlaid by the process environment, which wins. The process
 //! environment is only read, never modified. A missing dotenv file is ignored;
 //! any other dotenv problem (a line that does not parse, an unreadable file) is
-//! a configuration error. `SERVER.HOST` and `SERVER.PORT` are required: there
-//! are no defaults, and missing or invalid values are an error.
+//! a configuration error. Only `server.*` keys (case-insensitive) are used.
+//! `SERVER.HOST` and `SERVER.PORT` are required: there are no defaults, and
+//! missing or invalid values are an error.
 use std::ffi::OsString;
 
 use config::{Config, ConfigError, Environment};
@@ -32,6 +33,11 @@ pub struct Settings {
 /// file is never half-applied. Environment entries whose name or value is not
 /// valid UTF-8 are skipped.
 ///
+/// Only keys whose lowercased name starts with `server.` are kept, so unrelated
+/// variables (`SERVER`, `PATH`, ...) cannot collide with the server table. The
+/// accepted names are still the dotted `SERVER.HOST` / `SERVER.PORT` (in any
+/// case); there are no defaults and no double-underscore alias.
+///
 /// This function is pure: it touches neither the process environment nor the
 /// filesystem.
 pub fn merge_dotenv_env<I, E>(
@@ -54,6 +60,7 @@ where
             vars.insert(key, value);
         }
     }
+    vars.retain(|key, _| key.to_ascii_lowercase().starts_with("server."));
     Ok(vars)
 }
 
