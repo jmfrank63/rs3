@@ -4,8 +4,7 @@ function sumNumbers(array) {
     });
 }
 
-Deno.core.ops();
-let numbers = Deno.core.opSync("rs3_get", "numbers").toString();
+let numbers = Deno.core.ops.op_rs3_get("numbers").toString();
 let arr = numbers.split(" ");
 arr = arr.map(i => Number(i));
 sumNumbers(arr);
