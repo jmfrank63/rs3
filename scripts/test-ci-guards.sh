@@ -5,11 +5,22 @@
 # violation per case, runs the copied guard script there and requires a non-zero exit plus
 # `FAIL [<tag>]`. An unmodified copy must pass first (the control); a dirty control would
 # make every planted case meaningless, so it aborts the run.
-# Env: CI_GUARDS_SCRATCH (default target/tmp/guard-selftest under the repo).
+# Env: CI_GUARDS_SCRATCH (default target/tmp/guard-selftest under the repo). It is deleted
+# with rm -rf, so it must resolve (relative to the repo root, with symlinks and .. resolved)
+# to a directory strictly below <repo>/target/tmp/; anything else aborts before any deletion.
 set -uo pipefail  # deliberately no -e: cases are expected to fail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
-SCRATCH="${CI_GUARDS_SCRATCH:-$ROOT/target/tmp/guard-selftest}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$ROOT" || exit 2
+SCRATCH="$(realpath -m -- "${CI_GUARDS_SCRATCH:-$ROOT/target/tmp/guard-selftest}")" || exit 2
+case "$SCRATCH" in
+  "$ROOT"/target/tmp/?*) ;;
+  *) echo "test-ci-guards: CI_GUARDS_SCRATCH must resolve to a directory under $ROOT/target/tmp/ (got: $SCRATCH)" >&2
+     exit 2 ;;
+esac
+# SCRATCH is absolute from here on, so the shim directory on PATH is absolute too.
+trap 'rm -rf "$SCRATCH"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 REAL_CARGO="$(command -v cargo)"
 REAL_PY="$(command -v python3)"
 export REAL_CARGO REAL_PY
@@ -19,17 +30,24 @@ missed=0
 OUT=""
 RC=0
 
-# fresh: empty SCRATCH and copy the files the guards read into it.
+# fresh: empty SCRATCH and copy the files the guards read into it (plus the optional Rust
+# roots the guards scan, when they exist). A failed copy aborts the run.
 fresh() {
+  local -a opt=()
+  local d
+  for d in tests benches examples build.rs; do [[ -e $d ]] && opt+=("$d"); done
   rm -rf "$SCRATCH"
-  mkdir -p "$SCRATCH"
-  cp -r Cargo.toml Cargo.lock rust-toolchain.toml clippy.toml src requests .github scripts "$SCRATCH"/
+  mkdir -p "$SCRATCH" \
+    && cp -r Cargo.toml Cargo.lock rust-toolchain.toml clippy.toml src requests .github scripts \
+      ${opt[@]+"${opt[@]}"} "$SCRATCH"/ \
+    || { echo "test-ci-guards: copying the tree into $SCRATCH failed" >&2; exit 1; }
 }
 
 # run_guards ENV-ARGS...: run the copied guards inside SCRATCH; sets OUT and RC.
 # Callers pass the CI handling: `-u CI` for normal cases, `CI=true` for the skip case.
+# An inherited CI_GUARDS_ROOT would point the copied guards at the real tree, so drop it.
 run_guards() {
-  OUT=$(cd "$SCRATCH" && env "$@" PATH="$SCRATCH/shim:$PATH" bash scripts/ci-guards.sh 2>&1)
+  OUT=$(cd "$SCRATCH" && env -u CI_GUARDS_ROOT "$@" PATH="$SCRATCH/shim:$PATH" bash scripts/ci-guards.sh 2>&1)
   RC=$?
 }
 
