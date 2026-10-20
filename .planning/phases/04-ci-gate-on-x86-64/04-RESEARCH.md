@@ -552,12 +552,12 @@ The asserted values come from the source and a live run:
 | A3 | A cold run (two V8 downloads, debug + release compile on 4 vCPU) fits well inside 45 minutes | Pitfall 4 | Timeout. Raise `timeout-minutes` |
 | A4 | The rust-cache entry compresses to roughly 1–1.5 GB | Pitfall 4/5 | Only cache churn. The 10 GB repository limit is far away |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Is PyYAML on the runner's system python3?**
+1. **Is PyYAML on the runner's system python3?** — RESOLVED (orchestrator, Recommended): in CI (`$CI` set) skip only the structure check with a printed `skip [g-structure] PyYAML unavailable` line when `import yaml` fails; the structure check stays mandatory locally; no pip install step.
    - What we know: the ubuntu-24.04 image has Python 3.12.3 and `python-is-python3`. The README fetch did not list pip packages. PyYAML is a dependency of many preinstalled tools (for example the AWS CLI / cloud-init stack), but I could not confirm that here.
    - Recommendation: make `check-workflow.py` degrade to a clear failure instead of a traceback. Better, guard it in `ci-guards.sh`: if `python3 -c 'import yaml'` fails **and** `$CI` is set, skip the structure check with a printed `skip [g-structure] PyYAML unavailable` line. The grep part of (g) and the single-file rule still run, and the structure check stays mandatory locally (D-08 is a local-validation decision). Alternatively, add a step `python3 -m pip install --user pyyaml==6.0.1` before the guards. That adds a network install, so prefer the skip. **The orchestrator should pick one. Recommended: the CI skip, structure check mandatory locally.**
-2. **Should the guards also forbid `${{ github.event.` inside `run:`** (script injection)?
+2. **Should the guards also forbid `${{ github.event.` inside `run:`** (script injection)? — RESOLVED (orchestrator, Recommended): yes, add the alternative to guard (g)'s regex.
    - The current workflow has none. Adding it to the grep in (g) costs one regex alternative. Recommendation: add it (`'continue-on-error|SERVER\.|RUSTFLAGS|cap-lints|\$\{\{ *github\.event\.'`).
 
 ## Environment Availability
