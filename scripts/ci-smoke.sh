@@ -25,8 +25,15 @@ BASE="http://127.0.0.1:${PORT}"
 LOG="$(mktemp)"
 PID=""
 
+# cleanup: SIGTERM, then SIGKILL after 5 s, so a hung graceful shutdown cannot block the job.
 cleanup() {
-  if [[ -n "$PID" ]]; then kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; fi
+  local i
+  if [[ -n "$PID" ]]; then
+    kill "$PID" 2>/dev/null || true
+    for i in $(seq 1 50); do kill -0 "$PID" 2>/dev/null || break; sleep 0.1; done
+    kill -9 "$PID" 2>/dev/null || true
+    wait "$PID" 2>/dev/null || true
+  fi
   rm -f "$LOG"
 }
 trap cleanup EXIT
@@ -74,7 +81,8 @@ PID=$!
 # server_exit_note, which every failure runs).
 ready=0
 body=""
-for _ in $(seq 1 60); do
+deadline=$((SECONDS + 30))
+while (( SECONDS < deadline )); do
   if ! kill -0 "$PID" 2>/dev/null; then
     status=0; wait "$PID" || status=$?
     PID=""
