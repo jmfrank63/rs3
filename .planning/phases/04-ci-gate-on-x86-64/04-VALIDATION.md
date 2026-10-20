@@ -5,7 +5,7 @@ slug: "ci-gate-on-x86-64"
 # audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: false) (#2117)
 status: draft
 nyquist_compliant: false
-wave_0_complete: false
+wave_0_complete: true
 created: "2026-10-20"
 ---
 
@@ -43,10 +43,10 @@ Rows filled by the planner. Plan 04-02 Task 2 flips each Status cell to green on
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 04-01-01 | 01 | 1 | CI-01, CI-02, CI-03 | T-04-02, T-04-03 | single workflow, read-only token, no event-context interpolation | static + local workflow replay | `python3 -I scripts/check-workflow.py` and a replay of every ci.yml `run:` line in order | ❌ W0 | ⬜ pending |
-| 04-01-02 | 01 | 1 | CI-02 | T-04-04, T-04-05 | the gate cannot be greened by suppression; the unprotected platform stays dev-only | planted-violation self-test | `bash scripts/test-ci-guards.sh` and `bash scripts/ci-guards.sh` | ❌ W0 | ⬜ pending |
-| 04-02-01 | 02 | 2 | CI-03 | T-04-08, T-04-09, T-04-11 | loopback-only smoke with trap cleanup; a crash is reported as status 139 | live smoke + failure modes | `cargo build --release --locked && bash scripts/ci-smoke.sh` | ❌ W0 | ⬜ pending |
-| 04-02-02 | 02 | 2 | CI-01, CI-02, CI-03 | T-04-10 | no fabricated remote result; no push | full local suite | the full suite command above, plus TOOL-03 | ✅ | ⬜ pending |
+| 04-01-01 | 01 | 1 | CI-01, CI-02, CI-03 | T-04-02, T-04-03 | single workflow, read-only token, no event-context interpolation | static + local workflow replay | `python3 -I scripts/check-workflow.py` and a replay of every ci.yml `run:` line in order | ✅ | ✅ green |
+| 04-01-02 | 01 | 1 | CI-02 | T-04-04, T-04-05 | the gate cannot be greened by suppression; the unprotected platform stays dev-only | planted-violation self-test | `bash scripts/test-ci-guards.sh` and `bash scripts/ci-guards.sh` | ✅ | ✅ green |
+| 04-02-01 | 02 | 2 | CI-03 | T-04-08, T-04-09, T-04-11 | loopback-only smoke with trap cleanup; a crash is reported as status 139 | live smoke + failure modes | `cargo build --release --locked && bash scripts/ci-smoke.sh` | ✅ | ✅ green |
+| 04-02-02 | 02 | 2 | CI-01, CI-02, CI-03 | T-04-10 | no fabricated remote result; no push | full local suite | the full suite command above, plus TOOL-03 | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -54,9 +54,9 @@ Rows filled by the planner. Plan 04-02 Task 2 flips each Status cell to green on
 
 ## Wave 0 Requirements
 
-- [ ] `scripts/ci-guards.sh`, `scripts/check-workflow.py`, `scripts/ci-smoke.sh`
-- [ ] `.github/workflows/ci.yml` (new); `.github/workflows/actions-rs.yml` deleted
-- [ ] `04-UAT.md` pending item for the remote x86_64 run (D-09) incl. the D-07 fallback
+- [x] `scripts/ci-guards.sh`, `scripts/check-workflow.py`, `scripts/ci-smoke.sh`
+- [x] `.github/workflows/ci.yml` (new); `.github/workflows/actions-rs.yml` deleted
+- [ ] `04-UAT.md` pending item for the remote x86_64 run (D-09) incl. the D-07 fallback (handed off in 04-02-SUMMARY.md; persisted by the orchestrator)
 
 ---
 
