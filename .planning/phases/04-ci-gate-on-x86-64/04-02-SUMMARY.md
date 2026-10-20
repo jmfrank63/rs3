@@ -192,7 +192,14 @@ Evidence the verifier can re-run: `bash scripts/ci-guards.sh` (prints ok lines a
 
 ## Deviations from Plan
 
-None. The plan was executed as written. (The array-based `req` body handling is an implementation detail inside the specified helper, not a behaviour change.)
+The plan was executed as written. (The array-based `req` body handling is an implementation detail inside the specified helper, not a behaviour change.) One planning-record adjustment was made at close-out:
+
+**1. [Rule 2 - Transparency] CI-03 requirement line annotated as remote-pending**
+- **Found during:** state updates (`requirements.mark-complete CI-02 CI-03`)
+- **Issue:** the CI-03 checkbox text reads "CI runs on an x86_64 Linux runner and passes". Ticking it with no note would imply the remote run is green, which the plan's CI-03 transparency prohibition forbids.
+- **Fix:** the checkbox and the traceability `Complete` stay as the tool set them, and the CI-03 line in REQUIREMENTS.md gets the suffix "(implemented and locally evidenced; the remote x86_64 run is not yet observed and is a pending human UAT item, see 04-02-SUMMARY.md, D-09)".
+- **Files modified:** .planning/REQUIREMENTS.md
+- **Committed in:** the plan metadata commit
 
 ## Issues Encountered
 

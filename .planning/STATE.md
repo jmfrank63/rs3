@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 04
 current_phase_name: CI Gate on x86_64
-status: executing
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-10-20T21:53:45.748Z"
+status: verifying
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-10-20T21:57:39.049Z"
 last_activity: 2026-10-20
 last_activity_desc: Phase 04 execution started
-state_head: c4145f001d4879f9921e86456c57ebb1de372678
+state_head: 3487b6eddf7955d0dbbc1bfeb18145eddf60d091
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 11
-  completed_plans: 10
+  completed_plans: 11
   percent: 17
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-20)
 
 Phase: 04 (CI Gate on x86_64) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-20 — Phase 04 execution started
 
 Progress: [██░░░░░░░░] 17%
@@ -63,6 +63,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P02 | 3 min | 3 tasks | 12 files |
 | Phase 03 P03 | 6 min | 3 tasks | 8 files |
 | Phase 04 P01 | 5 min | 2 tasks | 6 files |
+| Phase 04 P02 | 2 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,8 @@ Recent decisions affecting current work:
 - [Phase 03]: [03-03] main: init_platform -> JsExecutor::start(&JsSettings::default()) -> AppState::new(settings, js) -> HttpServer::new; pool start failure exits 1
 - [Phase 04]: [04-01] Single ci.yml on ubuntu-24.04 sequences scripts that also run locally (guards, fmt, clippy, test, release build, release smoke); check-workflow.py requires the exact ordered uses/run lists and forbids continue-on-error/env/if/shell/defaults
 - [Phase 04]: [04-01] ci-guards.sh enforces D-05 (a)-(h); grep/cargo-tree errors fail the guard; PyYAML skipped only in CI (structure check mandatory locally, never pip-installed); event-context interpolation rejected; test-ci-guards.sh proves 31 planted cases + CI skip
+- [Phase 04]: [04-02] Release smoke drives JS through the protected V8 platform on the release binary: PATCH 6*20 -> "120", throwing script -> exact 422 js_error body, server alive; startup crash reported as exit status (139 = x86_64 PKU symptom, D-07 fallback)
+- [Phase 04]: [04-02] Remote x86_64 CI run NOT observed (no push); handed off as pending human UAT in 04-02-SUMMARY.md for 04-UAT.md, with the D-07 fallback; CI-03 remote confirmation open
 
 ### Pending Todos
 
@@ -139,6 +142,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T21:53:45.612Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-10-20T21:57:38.922Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None
