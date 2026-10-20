@@ -4,13 +4,16 @@
 //! its ancestors) overlaid by the process environment, which wins. The process
 //! environment is only read, never modified. A missing dotenv file is ignored;
 //! any other dotenv problem (a line that does not parse, an unreadable file) is
-//! a configuration error. Only `server.*` keys (case-insensitive) are used.
-//! `SERVER.HOST` and `SERVER.PORT` are required: there are no defaults, and
-//! missing or invalid values are an error.
+//! a configuration error. Only the keys `SERVER.HOST` and `SERVER.PORT`
+//! (case-insensitive) are used, and both are required: there are no defaults,
+//! and missing or invalid values are an error.
 use std::ffi::OsString;
 
 use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
+
+/// The only configuration keys read from the dotenv file and the environment.
+const SERVER_KEYS: [&str; 2] = ["server.host", "server.port"];
 
 /// Address the HTTP server binds to.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -40,11 +43,12 @@ pub struct Settings {
 /// returned before any pair is used, so a malformed file is never half-applied.
 /// Environment entries whose name or value is not valid UTF-8 are skipped.
 ///
-/// Only keys whose lowercased name starts with `server.` are kept, so unrelated
-/// variables (`SERVER`, `PATH`, ...) cannot collide with the server table. The
-/// accepted names are still the dotted `SERVER.HOST` / `SERVER.PORT` (in any
-/// case); there are no defaults and no double-underscore alias. The returned
-/// keys are lowercase.
+/// Only the exact keys `server.host` and `server.port` (after lowercasing) are
+/// kept, so unrelated variables (`SERVER`, `PATH`, ...) and deeper or unknown
+/// `server.*` names (`SERVER.HOST.X`, `SERVER.OTHER`) cannot collide with the
+/// server table. The accepted names are the dotted `SERVER.HOST` /
+/// `SERVER.PORT` (in any case); there are no defaults and no double-underscore
+/// alias. The returned keys are lowercase.
 ///
 /// This function is pure: it touches neither the process environment nor the
 /// filesystem.
@@ -68,7 +72,7 @@ where
             vars.insert(key.to_ascii_lowercase(), value);
         }
     }
-    vars.retain(|key, _| key.starts_with("server."));
+    vars.retain(|key, _| SERVER_KEYS.contains(&key.as_str()));
     Ok(vars)
 }
 
@@ -231,7 +235,13 @@ mod tests {
         let content = "SERVER.HOST=a\nSERVER.PORT=1\n";
         let merged = merge_dotenv_env(
             Some(dotenvy::from_read_iter(content.as_bytes())),
-            env(&[("SERVER", "x"), ("OTHER", "1"), ("PATH", "/bin")]),
+            env(&[
+                ("SERVER", "x"),
+                ("OTHER", "1"),
+                ("PATH", "/bin"),
+                ("SERVER.HOST.X", "y"),
+                ("SERVER.OTHER", "z"),
+            ]),
         )
         .expect("valid dotenv content merges");
         let mut keys: Vec<&str> = merged.keys().map(String::as_str).collect();
@@ -248,6 +258,25 @@ mod tests {
                 env(&[("SERVER", "x"), ("SERVER.HOST", "h"), ("SERVER.PORT", "3")]),
             )
             .expect("a bare SERVER variable must not collide with the server table");
+            assert_eq!(s.server.host, "h");
+            assert_eq!(s.server.port, 3);
+        }
+    }
+
+    #[test]
+    fn nested_server_keys_do_not_break_settings() {
+        // config applies keys in HashMap order, so repeat to catch an order-dependent collision.
+        for _ in 0..32 {
+            let s = Settings::from_sources(
+                not_found(),
+                env(&[
+                    ("SERVER.HOST", "h"),
+                    ("SERVER.HOST.X", "y"),
+                    ("SERVER.PORT", "3"),
+                    ("SERVER.PORT.ANYTHING", "z"),
+                ]),
+            )
+            .expect("a deeper server.* variable must not collide with the server table");
             assert_eq!(s.server.host, "h");
             assert_eq!(s.server.port, 3);
         }
@@ -326,15 +355,16 @@ mod tests {
         let bad = || OsString::from_vec(vec![0xff]);
         let list = vec![
             (bad(), OsString::from("v")),
-            (OsString::from("SERVER.BAD"), bad()),
             (OsString::from("SERVER.HOST"), OsString::from("h")),
             (OsString::from("SERVER.PORT"), OsString::from("4")),
+            (OsString::from("SERVER.HOST"), bad()),
         ];
         let merged = merge_dotenv_env(None::<dotenvy::Iter<&[u8]>>, list.clone())
             .expect("non-UTF-8 entries are skipped, not an error");
-        assert!(
-            !merged.contains_key("server.bad"),
-            "non-UTF-8 value kept: {merged:?}"
+        assert_eq!(
+            merged.get("server.host").map(String::as_str),
+            Some("h"),
+            "non-UTF-8 value replaced a valid one: {merged:?}"
         );
         assert_eq!(merged.len(), 2, "unexpected entries: {merged:?}");
         let s = Settings::from_sources(not_found(), list).expect("valid entries still configure");
