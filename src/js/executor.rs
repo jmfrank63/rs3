@@ -144,7 +144,14 @@ fn worker_loop(rx: &Mutex<mpsc::Receiver<Envelope>>, rt: &tokio::runtime::Runtim
 
 #[cfg(test)]
 mod tests {
-    use super::JsExecutor;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use tokio::sync::mpsc::error::TrySendError;
+    use tokio::sync::oneshot;
+
+    use super::{Envelope, JsExecutor};
     use crate::js::{ExecError, JsSettings, block_on, init_platform, test_executor};
     use crate::store::Store;
 
@@ -232,9 +239,12 @@ mod tests {
     #[test]
     fn full_queue_makes_callers_wait() {
         let exec = dedicated(1, 1);
-        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
-        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
-        let results: Vec<Result<String, ExecError>> = std::thread::scope(|s| {
+        std::thread::scope(|s| {
+            // Created inside the scope so a failed assertion drops gate_tx,
+            // which unblocks job 0 and lets the scope finish instead of hanging.
+            let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            // Job 0 occupies the only worker until the gate opens.
             let first = {
                 let exec = exec.clone();
                 s.spawn(move || {
@@ -246,20 +256,61 @@ mod tests {
                 })
             };
             started_rx.recv().expect("job 0 started");
-            let rest: Vec<_> = (1..8)
-                .map(|i| {
-                    let exec = exec.clone();
-                    s.spawn(move || block_on(exec.run(move || Ok(format!("job {i}")))))
-                })
-                .collect();
+            // Job 1 takes the single queue slot.
+            let (reply1, reply1_rx) = oneshot::channel();
+            let queued = exec.tx.try_send(Envelope {
+                run: Box::new(|| Ok("job 1".to_owned())),
+                reply: reply1,
+            });
+            assert!(queued.is_ok(), "the queue slot was not free");
+            // The queue is now full: a send that cannot wait is refused.
+            let (probe, _probe_rx) = oneshot::channel();
+            let refused = exec.tx.try_send(Envelope {
+                run: Box::new(|| Ok(String::new())),
+                reply: probe,
+            });
+            assert!(
+                matches!(refused, Err(TrySendError::Full(_))),
+                "queue accepted more than its capacity"
+            );
+            // A run() caller waits for room instead of enqueueing. Abandoning
+            // it after a short wait must therefore leave its job unqueued.
+            let ran = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&ran);
+            let abandoned = block_on(async {
+                let job = exec.run(move || {
+                    flag.store(true, Ordering::SeqCst);
+                    Ok("abandoned".to_owned())
+                });
+                tokio::time::timeout(Duration::from_millis(50), job).await
+            });
+            assert!(
+                abandoned.is_err(),
+                "run() returned while the worker was blocked"
+            );
+            // A caller that keeps waiting is admitted once the worker frees up.
+            let waiter = {
+                let exec = exec.clone();
+                s.spawn(move || block_on(exec.run(|| Ok("job 2".to_owned()))))
+            };
             gate_tx.send(()).expect("release gate");
-            std::iter::once(first)
-                .chain(rest)
-                .map(|h| h.join().expect("submitter thread"))
-                .collect()
+            assert_eq!(first.join().expect("job 0 thread"), Ok("job 0".to_owned()));
+            assert_eq!(
+                block_on(reply1_rx).expect("job 1 reply"),
+                Ok("job 1".to_owned())
+            );
+            assert_eq!(waiter.join().expect("job 2 thread"), Ok("job 2".to_owned()));
+            // One worker runs jobs in queue order, so had the abandoned job been
+            // queued it would have run before this one.
+            assert_eq!(
+                block_on(exec.run(|| Ok("job 3".to_owned()))),
+                Ok("job 3".to_owned())
+            );
+            assert!(
+                !ran.load(Ordering::SeqCst),
+                "the abandoned job was queued although the queue was full"
+            );
         });
-        let want: Vec<Result<String, ExecError>> = (0..8).map(|i| Ok(format!("job {i}"))).collect();
-        assert_eq!(results, want);
     }
 
     #[test]
