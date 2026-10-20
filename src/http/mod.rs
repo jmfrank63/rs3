@@ -1,9 +1,11 @@
 //! HTTP layer: the route table and its handlers.
 use actix_web::{HttpResponse, Responder, get, web};
 
+pub mod kv;
+
 /// Register every rs3 route on an actix `App`.
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(index);
+    cfg.service(index).configure(kv::configure);
 }
 
 /// `GET /` answers with the JSON welcome string.
