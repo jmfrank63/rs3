@@ -56,9 +56,14 @@ ARCH-02/03), new HTTP error codes (Phase 2), deno_core ops and JS execution (Pha
 ### Commit sequencing
 - **D-20:** Suggested commit order: (1) toolchain file swap + manifest + lock regen, (2) module restructure/ports, (3) store & config with tests, (4) a standalone `cargo fmt` commit if formatting churn is large. Every commit on `modernize-toolchain`.
 
+### Resolved after phase research (auto mode, recommended options)
+- **D-21:** DEPS-01 ("no git/beta/pre-release") is verified against `Cargo.toml` plus the active build graph (`cargo tree -e all --target all` shows zero pre-release packages; no `git+` sources in `Cargo.lock`). The inert `v8x 149.4.0-rc.4` entry that Cargo records in `Cargo.lock` as an optional, never-built dependency of `deno_v8 0.4.0` (`quickjs` feature only) is an accepted artifact; record it in the phase SUMMARY. — **Reversibility:** reversible
+- **D-22:** `GET /ip` receives `Settings` through `web::Data<Settings>` already in Phase 1 (registered by `main` and by tests in code), so the ported `/ip` tests pass on a clean checkout without process env. All other handlers keep the temporary store bridge (D-09) until Phase 2.
+- **D-23:** `main` calls the `js` stub's `init_platform()` (wrapping `deno_core::JsRuntime::init_platform(None)`) on the main thread before `HttpServer` starts, which makes the V8 init path real in Phase 1.
+- **D-24:** The legacy `.github/workflows/actions-rs.yml` is left untouched in Phase 1 (its steps are `continue-on-error`); Phase 4 replaces it. Mention this in the phase SUMMARY.
+
 ### Claude's Discretion
 - Exact file layout inside modules (`store/mod.rs` vs `store.rs`), helper names, error message wording, whether `js` stub is `js/mod.rs` with a single `init_platform()` placeholder.
-- Whether `JsRuntime::init_platform` is already called in `main` in Phase 1 (allowed but not required).
 
 </decisions>
 
