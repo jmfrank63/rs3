@@ -67,7 +67,7 @@ Requirements for the modernization milestone. Each maps to roadmap phases.
 
 ### CI
 
-- [ ] **CI-01**: GitHub Actions workflow uses `actions/checkout` v4+, `dtolnay/rust-toolchain` and `Swatinem/rust-cache`; the archived `actions-rs/*` workflow is removed
+- [x] **CI-01**: GitHub Actions workflow uses `actions/checkout` v4+, `dtolnay/rust-toolchain` and `Swatinem/rust-cache`; the archived `actions-rs/*` workflow is removed
 - [ ] **CI-02**: CI runs fmt check, clippy (`--all-targets -D warnings`) and tests with `--locked`, and any failure fails the build (no `continue-on-error`)
 - [ ] **CI-03**: CI runs on an x86_64 Linux runner and passes (catches V8 platform/PKU issues not visible on aarch64)
 
@@ -170,7 +170,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-04 | Phase 5 | Pending |
 | TEST-05 | Phase 3 | Complete |
 | TEST-06 | Phase 3 | Complete |
-| CI-01 | Phase 4 | Pending |
+| CI-01 | Phase 4 | Complete |
 | CI-02 | Phase 4 | Pending |
 | CI-03 | Phase 4 | Pending |
 | DOCK-01 | Phase 6 | Pending |

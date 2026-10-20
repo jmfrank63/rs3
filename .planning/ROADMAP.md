@@ -131,11 +131,11 @@ Plans:
   2. The workflow runs `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and a failure in any of them fails the build (no `continue-on-error`, no `SERVER.*` env in the workflow)
   3. The archived `actions-rs` workflow is deleted, and the new workflow is the only one in `.github/workflows`
 
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 
 Plans:
 **Wave 1**
-- [ ] 04-01-PLAN.md: Gate slice (wave 1). The tracer adds ci.yml, a single x86_64 job with checkout@v7, rust-toolchain@1.99.1 and rust-cache@v2 plus guards, fmt, clippy, test, the release build and the release smoke; it replaces actions-rs.yml and adds check-workflow.py, workflow guard (g) and the smoke frame, with every run: line replayed locally. Then guards (a)-(h) with a planted-violation self-test
+- [x] 04-01-PLAN.md: Gate slice (wave 1). The tracer adds ci.yml, a single x86_64 job with checkout@v7, rust-toolchain@1.99.1 and rust-cache@v2 plus guards, fmt, clippy, test, the release build and the release smoke; it replaces actions-rs.yml and adds check-workflow.py, workflow guard (g) and the smoke frame, with every run: line replayed locally. Then guards (a)-(h) with a planted-violation self-test
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 04-02-PLAN.md: x86_64 V8 evidence slice (wave 2). The release smoke drives PATCH "120" and the 422 js_error path through the protected V8 platform and fails fast on a crash (status 139), a dead binary or a busy port. Then the full local phase gate, the validation map, and the D-09 handoff of the remote run as pending UAT with the D-07 fallback (no push)
@@ -185,6 +185,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 1. Toolchain, Dependencies & Foundation | 3/3 | Complete    | 2026-10-20 |
 | 2. HTTP API Port & Error Handling | 3/3 | In Progress | - |
 | 3. JavaScript Runtime Port | 3/3 | In Progress | - |
-| 4. CI Gate on x86_64 | 0/2 | Planned | - |
+| 4. CI Gate on x86_64 | 1/2 | In Progress | - |
 | 5. JS Execution Limits | 0/TBD | Not started | - |
 | 6. Docker Image & Documentation | 0/TBD | Not started | - |

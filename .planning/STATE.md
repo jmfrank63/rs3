@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 04
 current_phase_name: CI Gate on x86_64
 status: executing
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-10-20T21:46:07.155Z"
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-10-20T21:53:45.748Z"
 last_activity: 2026-10-20
-last_activity_desc: Phase 03 execution started
-state_head: fe5f97b87df20f1e50342c2db084f5a4e8b05b47
+last_activity_desc: Phase 04 execution started
+state_head: c4145f001d4879f9921e86456c57ebb1de372678
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 11
-  completed_plans: 9
+  completed_plans: 10
   percent: 17
 ---
 
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-20)
 
 **Core value:** rs3 builds, tests and lints cleanly on current stable Rust (edition 2024) with only released dependencies, while every existing HTTP route and the JS-executes-against-the-store behaviour keep working with the same semantics.
-**Current focus:** Phase 03 — JavaScript Runtime Port
+**Current focus:** Phase 04 — CI Gate on x86_64
 
 ## Current Position
 
-Phase: 04 (CI Gate on x86_64) — READY TO EXECUTE
-Plan: 3 of 3
+Phase: 04 (CI Gate on x86_64) — EXECUTING
+Plan: 2 of 2
 Status: Ready to execute
-Last activity: 2026-10-20 — Phase 03 execution started
+Last activity: 2026-10-20 — Phase 04 execution started
 
 Progress: [██░░░░░░░░] 17%
 
@@ -62,6 +62,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P01 | 9 min | 3 tasks | 10 files |
 | Phase 03 P02 | 3 min | 3 tasks | 12 files |
 | Phase 03 P03 | 6 min | 3 tasks | 8 files |
+| Phase 04 P01 | 5 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,8 @@ Recent decisions affecting current work:
 - [Phase 03]: [03-03] PATCH /key/{key}: 404 before queueing, then await state.js.execute; 200 JSON string of String(completion value); actix workers never run V8
 - [Phase 03]: [03-03] ApiError::JsError -> js_error/422 with only the JS message; ExecError Unavailable/Internal -> fixed 500 internal body, detail to stderr; NotImplemented removed
 - [Phase 03]: [03-03] main: init_platform -> JsExecutor::start(&JsSettings::default()) -> AppState::new(settings, js) -> HttpServer::new; pool start failure exits 1
+- [Phase 04]: [04-01] Single ci.yml on ubuntu-24.04 sequences scripts that also run locally (guards, fmt, clippy, test, release build, release smoke); check-workflow.py requires the exact ordered uses/run lists and forbids continue-on-error/env/if/shell/defaults
+- [Phase 04]: [04-01] ci-guards.sh enforces D-05 (a)-(h); grep/cargo-tree errors fail the guard; PyYAML skipped only in CI (structure check mandatory locally, never pip-installed); event-context interpolation rejected; test-ci-guards.sh proves 31 planted cases + CI skip
 
 ### Pending Todos
 
@@ -136,6 +139,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T20:25:20.443Z
-Stopped at: Completed 03-03-PLAN.md
+Last session: 2026-10-20T21:53:45.612Z
+Stopped at: Completed 04-01-PLAN.md
 Resume file: None
