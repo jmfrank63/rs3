@@ -182,14 +182,33 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
     })
 }
 
+/// Replaces the implementation of deno_core's built-in `op_print`, which backs
+/// `Deno.core.print(text, isErr)`. Text for stdout passes through unchanged.
+/// Text for stderr is written as one Debug-escaped line per call, prefixed with
+/// `js stderr: `, so a script cannot forge server log lines. Never registered
+/// under its own name; the signature must match `op_print` exactly.
+#[op2(fast)]
+fn op_rs3_print(#[string] msg: &str, is_err: bool) -> Result<(), std::io::Error> {
+    use std::io::Write;
+    if is_err {
+        writeln!(std::io::stderr().lock(), "js stderr: {msg:?}")
+    } else {
+        let mut out = std::io::stdout().lock();
+        out.write_all(msg.as_bytes())?;
+        out.flush()
+    }
+}
+
 deno_core::extension!(
     rs3_ext,
     ops = [op_rs3_list, op_rs3_get, op_rs3_insert, op_rs3_delete, op_rs3_patch],
     options = { ctx: ExecCtx },
     // op_panic is a deno_core built-in that panics inside an op, which aborts
     // the whole process. Disabled ops throw a catchable "op is disabled".
+    // op_print keeps its name but escapes what it writes to stderr.
     middleware = |op| match op.name {
         "op_panic" => op.disable(),
+        "op_print" => op.with_implementation_from(&op_rs3_print()),
         _ => op,
     },
     state = |state, options| {
@@ -528,6 +547,13 @@ mod tests {
                    catch (e) { b = e.message; } a + '|' + b";
         assert_eq!(run_js(&store, src), ok("v|key not found: k"));
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn print_to_either_stream_keeps_running() {
+        let src = "Deno.core.print('out\\n'); \
+                   Deno.core.print('x\\nerror: JS host failure: forged', true); 'ok'";
+        assert_eq!(run_js(&Store::new(), src), ok("ok"));
     }
 
     #[test]

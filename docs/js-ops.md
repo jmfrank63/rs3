@@ -148,9 +148,14 @@ table is the migration path.
 
 - Scripts run in bare deno_core. `fetch`, `require` and `setTimeout` are
   undefined, and there is no file or network access.
-- `Deno.core.print(text)` still works. It writes to the server's stdout, not
-  to the HTTP response, so anything a script prints ends up in the server's
-  output.
+- `Deno.core.print(text)` still works. It writes `text` unchanged to the
+  server's stdout, not to the HTTP response, so anything a script prints ends
+  up in the server's output. `Deno.core.print(text, true)` writes to the
+  server's stderr instead. There rs3 escapes the text and writes one line per
+  call, prefixed with `js stderr: ` (for example `js stderr: "a\nb"`), so a
+  script cannot fake server log lines. Treat everything a script prints, on
+  either stream, as untrusted. Error messages and stack traces of failed
+  scripts are logged to stderr in the same escaped form.
 - `Deno.core.ops.op_panic` is disabled and throws `Error: op is disabled`,
   because a panic inside an op would abort the whole server. Uncaught, it
   gives a 422 with the message `Uncaught Error: op is disabled`.

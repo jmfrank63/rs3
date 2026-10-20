@@ -46,8 +46,9 @@ fn run_fresh(ctx: ExecCtx, name: &str, source: String) -> Result<String, ExecErr
     })
     .map_err(|e| ExecError::Internal(format!("cannot create JS runtime: {e}")))?;
     let global = rt.execute_script(name.to_owned(), source).map_err(|e| {
-        // Debug-format the name so a key with control characters cannot forge log lines.
-        eprintln!("js error in {name:?}: {e}");
+        // Debug-format the script-controlled name and error text (message and
+        // stack) so control characters and newlines cannot forge log lines.
+        eprintln!("js error in {name:?}: {:?}", e.to_string());
         ExecError::Script {
             message: e.exception_message.clone(),
         }
@@ -56,7 +57,10 @@ fn run_fresh(ctx: ExecCtx, name: &str, source: String) -> Result<String, ExecErr
     deno_core::scope!(scope, &mut rt);
     let local = v8::Local::new(scope, global);
     stringify(scope, local).map_err(|e| {
-        eprintln!("js error in {name:?} while converting the result to a string: {e}");
+        eprintln!(
+            "js error in {name:?} while converting the result to a string: {:?}",
+            e.to_string()
+        );
         ExecError::Script {
             message: e.exception_message.clone(),
         }
