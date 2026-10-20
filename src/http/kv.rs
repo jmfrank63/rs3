@@ -456,6 +456,51 @@ mod tests {
         assert!(state.store.is_empty());
     }
 
+    async fn list_body(state: &crate::state::AppState) -> web::Bytes {
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp =
+            atest::call_service(&app, atest::TestRequest::get().uri("/list").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        atest::read_body(resp).await
+    }
+
+    #[actix_web::test]
+    async fn list_escapes_quotes_and_backslashes() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp = atest::call_service(&app, raw_insert(r#"{"q":"a\"b\\c"}"#).to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body =
+            atest::call_and_read_body(&app, atest::TestRequest::get().uri("/list").to_request())
+                .await;
+        let inner: String = serde_json::from_slice(&body).expect("JSON string body");
+        let parsed: Vec<serde_json::Map<String, serde_json::Value>> =
+            serde_json::from_str(&inner).expect("inner text is valid JSON");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].len(), 1);
+        assert_eq!(parsed[0]["q"], r#"a"b\c"#);
+    }
+
+    #[actix_web::test]
+    async fn list_golden_sorted() {
+        let state = test_state();
+        state.store.insert("b".into(), "2".into());
+        state.store.insert("a".into(), "1".into());
+        state.store.insert("B".into(), "3".into());
+        assert_eq!(
+            list_body(&state).await,
+            web::Bytes::from_static(br#""[{\"B\" : \"3\"},{\"a\" : \"1\"},{\"b\" : \"2\"}]""#)
+        );
+    }
+
+    #[actix_web::test]
+    async fn list_empty_is_brackets_json() {
+        let state = test_state();
+        assert_eq!(list_body(&state).await, web::Bytes::from_static(br#""[]""#));
+    }
+
     #[actix_web::test]
     async fn test_insert_echo_preserves_body_order() {
         let state = test_state();

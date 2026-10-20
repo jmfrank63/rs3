@@ -79,8 +79,51 @@ mod tests {
     }
 
     #[test]
-    fn format_list_keeps_legacy_replace_quirk() {
-        assert_eq!(format_list(&pairs(&[("k", "x,]")])), r#"[{"k" : "x]"}]"#);
+    fn format_list_single_entry() {
+        assert_eq!(format_list(&pairs(&[("k", "v")])), r#"[{"k" : "v"}]"#);
+    }
+
+    #[test]
+    fn format_list_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            format_list(&pairs(&[("q", r#"a"b\c"#)])),
+            r#"[{"q" : "a\"b\\c"}]"#
+        );
+    }
+
+    /// Parse the inner `/list` text back into its pairs, in order.
+    fn parse_list(text: &str) -> Vec<(String, String)> {
+        let parsed: Vec<Map<String, Value>> = serde_json::from_str(text).expect("valid JSON");
+        parsed
+            .into_iter()
+            .flat_map(|m| {
+                m.into_iter()
+                    .map(|(k, v)| (k, v.as_str().expect("string value").to_owned()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn format_list_round_trips() {
+        let input = pairs(&[
+            ("a", "1"),
+            ("b", r#"he said "hi""#),
+            ("c", r"back\slash"),
+            ("d", "x,]"),
+            ("e", "},{"),
+            ("f", "line\nbreak"),
+            ("g", "tab\there"),
+            ("h", "ü /"),
+        ]);
+        assert_eq!(parse_list(&format_list(&input)), input);
+    }
+
+    #[test]
+    fn format_list_cannot_forge_entries() {
+        let input = pairs(&[("f", r#"x"},{"admin" : "true"#)]);
+        let back = parse_list(&format_list(&input));
+        assert_eq!(back.len(), 1);
+        assert_eq!(back, input);
     }
 
     fn is_invalid_input(r: Result<Vec<(String, String)>, StoreError>) -> bool {

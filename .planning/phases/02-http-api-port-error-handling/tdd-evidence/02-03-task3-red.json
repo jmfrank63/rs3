@@ -1,0 +1,13 @@
+{
+  "command": "RUSTC_BOOTSTRAP=1 target/debug/deps/rs3-d5bd492b7c3dd84a store::legacy::tests::format_list_round_trips --exact -Z unstable-options --format junit",
+  "exitCode": 101,
+  "output": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"test\" package=\"test\" id=\"0\" errors=\"0\" failures=\"1\" tests=\"1\" skipped=\"0\" ><testcase classname=\"store::legacy::tests\" name=\"format_list_round_trips\" time=\"0\"><failure type=\"assert\"/><system-out><![CDATA[]]>&#xA;<![CDATA[thread 'store::legacy::tests::format_list_round_trips' (3473093) panicked at src/store/legacy.rs:96:74:]]>&#xA;<![CDATA[valid JSON: Error(\"expected `,` or `}`\", line: 1, column: 31)]]>&#xA;<![CDATA[note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace]]>&#xA;<![CDATA[]]></system-out></testcase><system-out/><system-err/></testsuite></testsuites>\n",
+  "targetTest": "store::legacy::tests#format_list_round_trips",
+  "targetFile": "src/store/legacy.rs",
+  "expected": "format_list output for pairs containing a double quote, a backslash, ,], },{, a newline, a tab, u-umlaut and a slash parses back with serde_json into exactly the input pairs, in order",
+  "actual": "the legacy unescaped format_list emits invalid JSON: serde_json reports expected `,` or `}` at line 1 column 31 (the raw double quote inside the value b closes the string early)",
+  "reportPath": ".planning/phases/02-http-api-port-error-handling/tdd-evidence/02-03-task3-red.junit.xml",
+  "runStartedAt": "2026-10-20T18:32:19Z",
+  "reportModifiedAt": "2026-10-20T18:32:19.238Z",
+  "semanticAssessment": "Target store::legacy::tests::format_list_round_trips compiled and executed (tests=1, failures=1, errors=0, skipped=0). It failed inside its round-trip parse, which is the planned assertion: the inner /list text must be valid JSON that parses back to the stored pairs. The cause is the intended one, the legacy format_list writing values unescaped, so a value with a double quote breaks the JSON. Not a build, load, fixture or unrelated failure. Sibling RED tests fail for the same reason: format_list_escapes_quotes_and_backslashes (raw quote and backslash emitted), format_list_cannot_forge_entries (forging value parses as 2 entries, expected 1), and http::kv::tests::list_escapes_quotes_and_backslashes (inner text invalid JSON)."
+}
