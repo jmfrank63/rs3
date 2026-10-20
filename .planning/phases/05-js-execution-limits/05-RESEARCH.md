@@ -558,18 +558,18 @@ wait; [[ "$(cat "$TMPD/loop.code")" == "504" ]] || fail "PATCH /key/loop -> $(ca
 | A4 | Stack per level on x86 is in the same range as aarch64 (no deep native frame differences) | Spike S9/S10 | The 2 MiB floor margin shrinks. The 16 MiB default is unaffected |
 | A5 | The intended meaning of "depth limit 4" is the D-03 example message (5 keys including the refused one, i.e. at most 4 levels including the top-level PATCH) | Pattern 4 / Open Question 1 | The off-by-one changes the chain length in exact-body tests |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Exact off-by-one of `max_patch_depth`.**
+1. **Exact off-by-one of `max_patch_depth`.** — RESOLVED (orchestrator, Recommended): follow the CONTEXT example — the limit counts PATCH levels including the top-level request; refuse when `chain.len() + 1 > max_patch_depth`; the message chain includes the refused key.
    - What we know: D-03's example `a -> b -> a -> b -> a` for limit 4 has 5 keys. Milestone ARCHITECTURE Pattern 4 said "if depth >= max", where depth is the caller's 0-based depth, which would allow 5 levels and show 6 keys.
    - Recommendation: **follow the CONTEXT example.** The limit counts PATCH levels including the top-level request. Refuse when `chain.len() + 1 > max_patch_depth`. The chain in the message includes the refused key: `me -> me -> me -> me -> me` and `a -> b -> a -> b -> a`. Existing nested tests reach at most depth 3 (`failing_at(&store, 3)` with test→a→b→c), so they still pass. Document it in docs/js-ops.md ("at most 4 scripts deep, counting the PATCHed key").
-2. **Clamp range for `max_patch_depth` and `timeout_ms`.**
+2. **Clamp range for `max_patch_depth` and `timeout_ms`.** — RESOLVED (orchestrator, Recommended): `max_patch_depth.clamp(1, 64)`, `timeout_ms.max(1)`, tested as pure functions.
    - Recommendation: `max_patch_depth.clamp(1, 64)`. 1 means no nested PATCH. 64 was verified on the 2 MiB stack floor in S10, and above ~200 nested runtimes V8's stack guard turns the limit into a 500. Use `timeout_ms.max(1)`, consistent with the existing `.max(1)` clamps. Test both as pure functions.
-3. **Backstop grace as a constant or a setting.**
+3. **Backstop grace as a constant or a setting.** — RESOLVED (orchestrator, Recommended): private constant `BACKSTOP_GRACE = 2 s`.
    - Recommendation: a private constant `BACKSTOP_GRACE = 2 s` (discretion per CONTEXT). The single backstop test (a Rust closure sleeping past `timeout + grace` on a dedicated 100 ms executor) then takes ~2.1 s, which is acceptable. A public knob nobody asked for is avoided.
-4. **Should every `run()` job be armed, or only `execute()` jobs?**
+4. **Should every `run()` job be armed, or only `execute()` jobs?** — RESOLVED (orchestrator, Recommended): arm every job.
    - Recommendation: arm every job (the Envelope always carries a `JobState`). A plain Rust closure that overruns is then classified `Timeout`, which is uniform and harmless for the existing tests (all finish in milliseconds; job 0 in `full_queue_makes_callers_wait` waits on a gate the test releases quickly). The alternative `Option<Arc<JobState>>` is also acceptable.
-5. **Should the release smoke cover depth and timeout?**
+5. **Should the release smoke cover depth and timeout?** — RESOLVED (orchestrator, Recommended): yes, extend `scripts/ci-smoke.sh`; ci.yml unchanged (guard (g) canonical lines).
    - Recommendation: yes, extend `scripts/ci-smoke.sh`. It is the only place the watchdog runs under the protected platform on x86 (A1). It costs ~5 s (default timeout). ci.yml stays untouched (guard g).
 
 ## Environment Availability
