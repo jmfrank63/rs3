@@ -50,10 +50,43 @@ fn op_rs3_get(state: &mut OpState, #[string] key: String) -> Result<String, JsEr
     state.borrow::<ExecCtx>().store.get(&key).map_err(to_js)
 }
 
+/// Runs the script stored under `key` in a fresh nested runtime on the same
+/// thread and returns `String(completion value)`. Throws
+/// `Error: key not found: <key>` when the key is missing, and an `Error` with
+/// the nested exception message (one leading "Uncaught " removed) when the
+/// nested script fails.
+//
+// `reentrant` is mandatory: the nested runtime calls ops while this op is on
+// the stack, and debug builds abort without the flag. The depth is carried for
+// the Phase 5 limit. Until then a self-patching script is a known Phase 5 DoS
+// item and is never tested here.
+#[op2(reentrant)]
+#[string]
+fn op_rs3_patch(state: &mut OpState, #[string] key: String) -> Result<String, JsErrorBox> {
+    // Clone the context out so no OpState borrow is held across the nested run.
+    let ctx = state.borrow::<ExecCtx>().clone();
+    let source = ctx.store.get(&key).map_err(to_js)?;
+    super::runtime::run_script(ctx.nested(), &key, source).map_err(|e| match e {
+        super::ExecError::Script { message } => JsErrorBox::generic(
+            message
+                .strip_prefix("Uncaught ")
+                .unwrap_or(&message)
+                .to_owned(),
+        ),
+        other => JsErrorBox::generic(other.to_string()),
+    })
+}
+
 deno_core::extension!(
     rs3_ext,
-    ops = [op_rs3_get],
+    ops = [op_rs3_get, op_rs3_patch],
     options = { ctx: ExecCtx },
+    // op_panic is a deno_core built-in that panics inside an op, which aborts
+    // the whole process. Disabled ops throw a catchable "op is disabled".
+    middleware = |op| match op.name {
+        "op_panic" => op.disable(),
+        _ => op,
+    },
     state = |state, options| {
         state.put(options.ctx);
     },
