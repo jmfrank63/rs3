@@ -19,6 +19,13 @@ dotenvy = "0.15.7"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 thiserror = "2.0.21"
+# JS worker runtimes and the job queue; the same tokio deno_core already pulls in.
+tokio = { version = "1.54.0", features = ["rt", "sync"] }
+
+[dev-dependencies]
+# Unprotected V8 platform for test builds only, so libtest's threads can create isolates.
+# Phase 4 fallback (research question 1): move this feature to [dependencies] if x86 CI crashes.
+deno_core = { version = "0.412.0", features = ["unsafe_use_unprotected_platform"] }
 
 [lints.rust]
 unsafe_code = "forbid"
