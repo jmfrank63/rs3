@@ -86,6 +86,7 @@ Recent decisions affecting current work:
 - [Phase 02]: [02-03] Store::insert_all (infallible, one guard, returns count) replaces insert_many; partial-batch visibility documented; Phase 3 op_rs3_insert reuses parse-then-insert_all
 - [Phase 02]: [02-03] /list escapes keys and values via serde_json Value Display in the legacy envelope; ,] quirk dropped; codec shared with op_rs3_list
 - [Phase 02]: [02-03] [lints.clippy] unwrap_used/expect_used = deny with clippy.toml test allowances; no suppression attributes
+- [Phase 03]: JS on a bounded `rs3-js-N` pool (16 MiB stacks, tokio current_thread, fresh JsRuntime per job via try_new, catch_unwind); five #[op2] ops in rs3_ext with op_panic disabled; missing key → generic Error, bad input → TypeError; PATCH 200 String(result) / 422 js_error / 500 internal; nested host fault → 500 and store ops refuse afterwards; dev-only unprotected V8 platform
 - [Phase 02 review-fix]: config keys lowercased before precedence (env always wins over .env); config map restricted to exactly server.host/server.port; /insert: syntax/EOF/invalid-UTF-8/unpaired-surrogate-escape → 400, out-of-range number / valid over-deep nesting → 422 naming the key
 - [Phase 03]: [03-01] D-04 holds on deno_core 0.412: nested JsRuntime inside #[op2(reentrant)] op_rs3_patch works on the same thread (debug profile); op_panic disabled via rs3_ext middleware
 - [Phase 03]: [03-01] String op args use FromV8 newtype StrArg: strings unchanged, primitives via String(..) (no arg -> undefined, 5 -> 5), objects/symbols throw TypeError; deno_core #[string] maps non-strings to empty string
@@ -98,13 +99,14 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-- [Phase 3]: Review housekeeping from 02-REVIEW-DISPOSITION: IN-01 give `ApiError::Internal` a real path (JS host faults → 500) plus a test; IN-04 fix the "first problem in body order decides" doc sentence in `parse_insert_body`; IN-05 rename `parse_rejects_deep_nesting` / `insert_deeply_nested_is_400_json` to truncated-input names.
+- [Phase 4]: CI must also wire the Phase 3 test-tier prohibitions as grep gates (no #[ignore]; unsafe_use_unprotected_platform only on dev edges; no opSync/Deno.core.ops() in artefacts). If x86 CI crashes on V8 platform init, move `unsafe_use_unprotected_platform` from [dev-dependencies] to [dependencies] (03-RESEARCH resolved Q1).
+- [Phase 5]: Depth limit + timeout (ROBU-05/06); also 03-REVIEW-DISPOSITION carry-overs: op_print WouldBlock retry, catch_unwind comment, clamp stack_bytes, .txt payload parity test.
+- [Phase 6]: docs wording — stdout prints are raw (03 review IN-03); README must document BOM/malformed .env startup failures, 400/422 inserts, escaped /list, 404s, op mapping (docs/js-ops.md).
 - [Phase 4]: Add a CI grep check that fails on new `#[allow(..)]` / `#[cfg_attr(.., allow(..))]` suppression attributes — operator directive (01-UAT test 4).
 - [Phase 4]: Do NOT push; validate the workflow locally (actionlint/YAML lint) and record the remote x86_64 CI run as a pending human UAT item.
 
 ### Blockers/Concerns
 
-- [Phase 3]: A nested `JsRuntime` inside a `#[op2(reentrant)]` op hasn't been compiled on deno_core 0.412 yet. Spike it early.
 - [Phase 3/4]: V8 platform init can segfault on PKU-capable x86 runners. Verify in CI; the fallback (`new_unprotected_default_platform`) is ready.
 - [Phase 4]: Verifying CI requires pushing `modernize-toolchain` to origin (github.com/jmfrank63/rs3).
 - [Phase 6]: Docker isn't installed on the dev host, so the image build and smoke test need a CI job or another machine.
@@ -116,10 +118,13 @@ Recent decisions affecting current work:
 | Phase | State | Resume |
 |-------|-------|--------|
 | 02 | verification_deferred_human | /gsd-verify-work 02 |
+| 03 | verification_deferred_human | /gsd-verify-work 03 |
 
 Phase 01 (roadmap-complete): VERIFICATION.md reads `stale` because Phase 02 intentionally evolved files it covered (STORE bridge → injected AppState, `dotenv()` → `dotenv_iter()`, legacy codec). Re-verification of every stale earlier phase is scheduled once, against the final tree, immediately before the milestone audit (`/gsd-execute-phase N` resumes at the verification gates).
 
 Phase 02: all automated must-haves verified (18/18, 13/13 requirements). 4 human items are in `02-UAT.md`: three live dotenv-file binary checks (a project hook blocks agents from creating the file) and the no-suppression prohibition (Phase 4 CI grep will wire it). Per operator directive the autonomous run continues to Phase 3.
+
+Phase 03: all automated must-haves verified (22/22, 12/12 requirements; live smokes plus a probe of all 98 other built-in ops clean). 3 policy-driven human items are in `03-UAT.md`: unwired test-tier prohibitions (Phase 4 CI grep), the judgment-tier "no self-patching script" rule, and docs/js-ops.md readability. The autonomous run continues to Phase 4.
 
 ## Deferred Items
 
