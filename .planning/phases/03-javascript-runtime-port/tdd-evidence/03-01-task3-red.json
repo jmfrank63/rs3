@@ -1,0 +1,13 @@
+{
+  "command": "RUSTC_BOOTSTRAP=1 target/debug/deps/rs3-99cb7436f4311bd2 js::ops::tests::list_matches_shared_codec_sorted --exact -Z unstable-options --format junit",
+  "exitCode": 101,
+  "output": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"test\" package=\"test\" id=\"0\" errors=\"0\" failures=\"1\" tests=\"1\" skipped=\"0\" ><testcase classname=\"js::ops::tests\" name=\"list_matches_shared_codec_sorted\" time=\"0\"><failure type=\"assert\"/><system-out><![CDATA[js error in \"test\": TypeError: Deno.core.ops.op_rs3_list is not a function]]>&#xA;<![CDATA[    at test:1:15]]>&#xA;&#xA;<![CDATA[thread 'js::ops::tests::list_matches_shared_codec_sorted' (3532428) panicked at src/js/ops.rs:179:9:]]>&#xA;<![CDATA[assertion `left == right` failed]]>&#xA;<![CDATA[  left: Err(Script { message: \"Uncaught TypeError: Deno.core.ops.op_rs3_list is not a function\" })]]>&#xA;<![CDATA[ right: Ok(\"[{\\\"B\\\" : \\\"3\\\"},{\\\"a\\\" : \\\"1\\\"},{\\\"b\\\" : \\\"2\\\"}]\")]]>&#xA;<![CDATA[note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace]]>&#xA;<![CDATA[]]></system-out></testcase><system-out/><system-err/></testsuite></testsuites>\n",
+  "targetTest": "js::ops::tests#list_matches_shared_codec_sorted",
+  "targetFile": "src/js/ops.rs",
+  "expected": "With b=2, a=1, B=3 stored, Deno.core.ops.op_rs3_list() returns exactly [{\"B\" : \"3\"},{\"a\" : \"1\"},{\"b\" : \"2\"}], equal to legacy::format_list(&store.list())",
+  "actual": "assertion `left == right` failed at the run_js assertion (src/js/ops.rs:179): left Err(Script { message: \"Uncaught TypeError: Deno.core.ops.op_rs3_list is not a function\" }), right Ok(\"[{\\\"B\\\" : \\\"3\\\"},{\\\"a\\\" : \\\"1\\\"},{\\\"b\\\" : \\\"2\\\"}]\"); the preceding legacy::format_list assertion passed",
+  "reportPath": ".planning/phases/03-javascript-runtime-port/tdd-evidence/03-01-task3-red.junit.xml",
+  "runStartedAt": "2026-10-20T20:09:45Z",
+  "reportModifiedAt": "2026-10-20T20:09:46.473Z",
+  "semanticAssessment": "Target js::ops::tests::list_matches_shared_codec_sorted compiled, executed and failed on its planned op_rs3_list output assertion because op_rs3_list is not registered in rs3_ext yet (JS TypeError \"is not a function\" surfaced as ExecError::Script). Its first assertion, that the expected text equals legacy::format_list(&store.list()), passed, so the fixture and codec are correct. No build, load, fixture or unrelated failure."
+}
