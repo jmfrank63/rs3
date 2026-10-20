@@ -3,50 +3,55 @@ phase: 02
 review: 02-REVIEW.md
 titles: json
 findings:
-  - id: CR-01
-    severity: critical
-    disposition: open
-    title: "Env-over-dotenv precedence is non-deterministic when key case differs"
-  - id: WR-01
-    severity: warning
-    disposition: open
-    title: "`server.` prefix filter still admits keys that collide with the server table"
-  - id: WR-02
-    severity: warning
-    disposition: open
-    title: "Valid JSON with an out-of-range number answers 400 `malformed_json` instead of 422"
   - id: IN-01
     severity: info
     disposition: open
-    title: "`ApiError::Internal` is never constructed and the `internal` code is untested"
+    title: "`ApiError::Internal` is never constructed and the `internal` code is untested (carried over)"
   - id: IN-02
     severity: info
     disposition: open
-    title: "Startup banner prints the configured address, not the bound one"
+    title: "Startup banner prints the configured address, not the bound one (carried over)"
   - id: IN-03
     severity: info
     disposition: open
-    title: "`/insert` accepts keys that can never be read or deleted over HTTP"
+    title: "`/insert` accepts keys that can never be read or deleted over HTTP (carried over)"
   - id: IN-04
     severity: info
     disposition: open
-    title: "Non-string values are discarded silently when a later duplicate key is a string"
-open: 7
-total: 7
-recorded: 2026-10-20T18:41:59.762Z
+    title: "Doc claim \"the first one in body order decides\" is false when a non-string value precedes an unrepresentable one"
+  - id: IN-05
+    severity: info
+    disposition: open
+    title: "Tests named \"deep nesting is 400\" exercise a truncated body, which contradicts the 422 decision for valid deep nesting"
+  - id: CR-01
+    severity: critical
+    disposition: fixed
+    title: "Env-over-dotenv precedence is non-deterministic when key case differs"
+  - id: WR-01
+    severity: warning
+    disposition: fixed
+    title: "Lone-surrogate escapes now answer 422 with false error messages (regression from the WR-02 fix)"
+  - id: WR-02
+    severity: warning
+    disposition: fixed
+    title: "Valid JSON with an out-of-range number answers 400 `malformed_json` instead of 422"
+open: 5
+total: 8
+recorded: 2026-10-20T18:58:52.555Z
 ---
 
 # Phase 02: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | - |
-| WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
 | IN-04 | info | open | - |
+| IN-05 | info | open | - |
+| CR-01 | critical | fixed | 02-REVIEW-FIX.iter2.md (not in the current review) |
+| WR-01 | warning | fixed | 02-REVIEW-FIX.md (not in the current review) |
+| WR-02 | warning | fixed | 02-REVIEW-FIX.iter2.md (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
