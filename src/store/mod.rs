@@ -59,6 +59,15 @@ impl Store {
         Ok(count)
     }
 
+    /// Remove `key` and return the value it held, or `NotFound`.
+    pub fn remove(&self, key: &str) -> Result<String, StoreError> {
+        self.map
+            .pin()
+            .remove(key)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(key.to_owned()))
+    }
+
     /// Number of stored entries.
     pub fn len(&self) -> usize {
         self.map.len()
@@ -124,6 +133,28 @@ mod tests {
         assert_eq!(store.get("y"), Err(StoreError::NotFound("y".into())));
         assert_eq!(store.len(), before);
         assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn remove_returns_value() {
+        let store = Store::new();
+        store.insert("a".into(), "1".into());
+        store.insert("b".into(), "2".into());
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.remove("a"), Ok("1".to_owned()));
+        assert_eq!(store.get("a"), Err(StoreError::NotFound("a".into())));
+        assert_eq!(store.get("b"), Ok("2".to_owned()));
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn remove_missing_is_not_found() {
+        let store = Store::new();
+        assert_eq!(
+            store.remove("missing"),
+            Err(StoreError::NotFound("missing".into()))
+        );
+        assert!(store.is_empty());
     }
 
     #[test]
