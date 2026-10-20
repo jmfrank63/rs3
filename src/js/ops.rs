@@ -3,6 +3,8 @@
 //! actix-web. Once any level of a job has hit a host fault, every op of that
 //! job throws `Error: internal error` instead of touching the store.
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use deno_core::{FromV8, OpState, op2, v8};
@@ -28,6 +30,10 @@ pub struct ExecCtx {
     /// (the key `op_rs3_patch` runs), at any depth.
     #[cfg(test)]
     pub(crate) fail_runtime_for_key: Option<&'static str>,
+    /// Test hook: counts the error lines the JS layer wrote for this job.
+    /// Shared by every level, like `host_fault`.
+    #[cfg(test)]
+    pub(crate) error_logs: Arc<AtomicU32>,
 }
 
 impl ExecCtx {
@@ -41,6 +47,8 @@ impl ExecCtx {
             fail_runtime_at_depth: None,
             #[cfg(test)]
             fail_runtime_for_key: None,
+            #[cfg(test)]
+            error_logs: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -55,6 +63,8 @@ impl ExecCtx {
             fail_runtime_at_depth: self.fail_runtime_at_depth,
             #[cfg(test)]
             fail_runtime_for_key: self.fail_runtime_for_key,
+            #[cfg(test)]
+            error_logs: Arc::clone(&self.error_logs),
         }
     }
 
@@ -66,6 +76,14 @@ impl ExecCtx {
     /// Whether any level of this job hit a host fault.
     pub(crate) fn host_fault(&self) -> bool {
         self.host_fault.load(Ordering::SeqCst)
+    }
+
+    /// Write one error line for this job to stderr. The caller escapes any
+    /// script-controlled text in it.
+    pub(crate) fn log_error(&self, line: std::fmt::Arguments<'_>) {
+        eprintln!("{line}");
+        #[cfg(test)]
+        self.error_logs.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -172,10 +190,10 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 /// `Error: key not found: <key>` when the key is missing, and an `Error` with
 /// the nested exception message (one leading "Uncaught " removed) when the
 /// nested script fails. A host fault in the nested runtime (such as a runtime
-/// creation failure) is logged, recorded in the job context and thrown as a
-/// plain `Error: internal error`; the top-level run then answers
-/// `ExecError::Internal` even if the script caught it, and every later op of
-/// the job throws the same error.
+/// creation failure) is logged once, by the level where it happened, recorded
+/// in the job context and thrown as a plain `Error: internal error`; the
+/// top-level run then answers `ExecError::Internal` even if the script caught
+/// it, and every later op of the job throws the same error.
 //
 // `reentrant` is mandatory: the nested runtime calls ops while this op is on
 // the stack, and debug builds abort without the flag. The depth is carried for
@@ -196,18 +214,25 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
                 .to_owned(),
         ),
         other => {
-            // Host details go to stderr only, escaped so they cannot forge log
-            // lines. `Internal` already displays with a "JS host failure"
-            // prefix, so log its bare detail.
-            let detail = match other {
-                super::ExecError::Internal(m) => m,
-                e => e.to_string(),
-            };
-            eprintln!(
-                "error: nested JS host failure in {key:?} at depth {}: {detail:?}",
-                ctx.depth + 1
-            );
-            ctx.note_host_fault();
+            // `live_ctx` saw the flag clear when this op started, so if it is
+            // set now, a deeper level already logged and recorded the fault,
+            // and this error only reports that the nested run saw it. Logging
+            // again would blame a key whose runtime ran normally, once per
+            // ancestor level.
+            if !ctx.host_fault() {
+                // Host details go to stderr only, escaped so they cannot forge
+                // log lines. `Internal` already displays with a "JS host
+                // failure" prefix, so log its bare detail.
+                let detail = match other {
+                    super::ExecError::Internal(m) => m,
+                    e => e.to_string(),
+                };
+                ctx.log_error(format_args!(
+                    "error: nested JS host failure in {key:?} at depth {}: {detail:?}",
+                    ctx.depth + 1
+                ));
+                ctx.note_host_fault();
+            }
             internal_error()
         }
     })
@@ -351,6 +376,14 @@ mod tests {
         matches!(r, Err(ExecError::Internal(_)))
     }
 
+    /// Run `source` against `ctx` and also return how many error lines the JS
+    /// layer logged for the job.
+    fn run_counting(ctx: ExecCtx, source: &str) -> (Result<String, ExecError>, u32) {
+        let logs = std::sync::Arc::clone(&ctx.error_logs);
+        let r = run_ctx(ctx, source);
+        (r, logs.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
     #[test]
     fn top_level_runtime_failure_is_internal() {
         let r = run_ctx(failing_at(&Store::new(), 0), "1");
@@ -450,6 +483,40 @@ mod tests {
             ),
             ok("1")
         );
+    }
+
+    #[test]
+    fn one_nested_host_fault_is_logged_once_at_any_depth() {
+        let store = Store::new();
+        store.insert("a".into(), "Deno.core.ops.op_rs3_patch('b')".into());
+        store.insert("b".into(), "Deno.core.ops.op_rs3_patch('c')".into());
+        store.insert("c".into(), "1".into());
+        // Uncaught at every level: each ancestor fails with the internal error.
+        let (r, logs) = run_counting(failing_at(&store, 3), "Deno.core.ops.op_rs3_patch('a')");
+        assert!(is_internal(&r), "{r:?}");
+        assert_eq!(logs, 1);
+        // Caught at the top: still one line, and still Internal.
+        let src = "try { Deno.core.ops.op_rs3_patch('a') } catch (e) { 'caught' }";
+        let (r, logs) = run_counting(failing_at(&store, 3), src);
+        assert!(is_internal(&r), "{r:?}");
+        assert_eq!(logs, 1);
+        // A direct nested failure logs its one line too.
+        let (r, logs) = run_counting(failing_at(&store, 1), "Deno.core.ops.op_rs3_patch('c')");
+        assert!(is_internal(&r), "{r:?}");
+        assert_eq!(logs, 1);
+    }
+
+    #[test]
+    fn script_errors_without_a_host_fault_are_still_logged() {
+        let store = Store::new();
+        store.insert("inner".into(), "throw new Error('boom')".into());
+        // The inner script error and the uncaught rethrow at the top.
+        let (r, logs) = run_counting(
+            ExecCtx::new(store.clone()),
+            "Deno.core.ops.op_rs3_patch('inner')",
+        );
+        assert!(matches!(r, Err(ExecError::Script { .. })), "{r:?}");
+        assert_eq!(logs, 2);
     }
 
     #[test]

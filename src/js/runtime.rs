@@ -27,7 +27,7 @@ use super::ops::{ExecCtx, rs3_ext};
 pub fn run_script(ctx: ExecCtx, name: &str, source: String) -> Result<String, ExecError> {
     let watch = ctx.clone();
     let faulted_before = watch.host_fault();
-    let result = run_fresh(ctx, name, source);
+    let result = run_fresh(ctx, &watch, name, source);
     match result {
         Err(ExecError::Internal(_)) => result,
         _ if !faulted_before && watch.host_fault() => Err(ExecError::Internal(format!(
@@ -38,7 +38,18 @@ pub fn run_script(ctx: ExecCtx, name: &str, source: String) -> Result<String, Ex
 }
 
 /// Create a runtime, run the script and stringify its completion value.
-fn run_fresh(ctx: ExecCtx, name: &str, source: String) -> Result<String, ExecError> {
+///
+/// `watch` shares the job's host fault flag with `ctx`, which moves into the
+/// runtime. A script error is logged only while the job has no host fault:
+/// after one, the error is almost always the `Error: internal error` the fault
+/// caused, the fault itself was already logged where it happened, and the
+/// request answers 500 either way.
+fn run_fresh(
+    ctx: ExecCtx,
+    watch: &ExecCtx,
+    name: &str,
+    source: String,
+) -> Result<String, ExecError> {
     #[cfg(test)]
     if ctx.fail_runtime_at_depth == Some(ctx.depth) || ctx.fail_runtime_for_key == Some(name) {
         return Err(ExecError::Internal(
@@ -53,7 +64,9 @@ fn run_fresh(ctx: ExecCtx, name: &str, source: String) -> Result<String, ExecErr
     let global = rt.execute_script(name.to_owned(), source).map_err(|e| {
         // Debug-format the script-controlled name and error text (message and
         // stack) so control characters and newlines cannot forge log lines.
-        eprintln!("js error in {name:?}: {:?}", e.to_string());
+        if !watch.host_fault() {
+            watch.log_error(format_args!("js error in {name:?}: {:?}", e.to_string()));
+        }
         ExecError::Script {
             message: e.exception_message.clone(),
         }
@@ -62,10 +75,12 @@ fn run_fresh(ctx: ExecCtx, name: &str, source: String) -> Result<String, ExecErr
     deno_core::scope!(scope, &mut rt);
     let local = v8::Local::new(scope, global);
     stringify(scope, local).map_err(|e| {
-        eprintln!(
-            "js error in {name:?} while converting the result to a string: {:?}",
-            e.to_string()
-        );
+        if !watch.host_fault() {
+            watch.log_error(format_args!(
+                "js error in {name:?} while converting the result to a string: {:?}",
+                e.to_string()
+            ));
+        }
         ExecError::Script {
             message: e.exception_message.clone(),
         }
