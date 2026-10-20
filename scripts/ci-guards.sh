@@ -147,13 +147,28 @@ else fail c "Cargo.toml lints:"$'\n'"$msg"; fi
 # reports status 139), deno_core's unsafe_use_unprotected_platform feature moves from
 # [dev-dependencies] to [dependencies] in Cargo.toml, and this guard is relaxed in that same
 # change. Never apply it pre-emptively (03-RESEARCH resolved Q1).
+# Source code could select the unprotected platform without the feature (the v8 constructors
+# are safe fns, so unsafe_code = "forbid" does not stop them), so (d) also scans the Rust
+# roots: no unprotected/custom platform constructor, no direct V8 platform initialisation,
+# and init_platform only ever gets None (deno_core then picks the protected platform in the
+# release build). The D-07 fallback does not need any of these, so the scan stays as is then.
+d_errs=""
 if tree=$(cargo tree --locked --target all -e features,normal -i deno_core 2>/dev/null); then
   if grep -q unsafe_use_unprotected_platform <<<"$tree"; then
-    fail d "deno_core feature unsafe_use_unprotected_platform reaches the normal (release) edge"
-  else pass d "unsafe_use_unprotected_platform not on the normal edge"; fi
+    d_errs+=$'\n'"deno_core feature unsafe_use_unprotected_platform reaches the normal (release) edge"
+  fi
 else
-  fail d "cargo tree failed:"$'\n'"$(cargo tree --locked --target all -e features,normal -i deno_core 2>&1 >/dev/null)"
+  d_errs+=$'\n'"cargo tree failed:"$'\n'"$(cargo tree --locked --target all -e features,normal -i deno_core 2>&1 >/dev/null)"
 fi
+d_src=$(ml_grep '\bnew_unprotected\w*|\bnew_custom_platform\b|\binitialize_platform\b|\binit_platform\s*\(\s*(?!None\s*\)|\))' \
+  "${rs_roots[@]}" 2>&1) && d_rc=0 || d_rc=$?
+case $d_rc in
+  0) d_errs+=$'\n'"unprotected V8 platform selected in source:"$'\n'"$d_src" ;;
+  1) ;;
+  *) d_errs+=$'\n'"ml_grep failed (exit $d_rc):"$'\n'"$d_src" ;;
+esac
+if [[ -z $d_errs ]]; then pass d "unsafe_use_unprotected_platform not on the normal edge; protected platform in source"
+else fail d "${d_errs#$'\n'}"; fi
 
 # (e) exactly one v8 in the graph. Filter on v8 only: cargo tree -d already lists
 # same-version duplicates of libc, serde, syn and others.

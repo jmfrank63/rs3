@@ -135,6 +135,24 @@ expect_fail c 'missing_docs = "allow" under [lints.rust]' \
 # --- (d) unprotected V8 platform on the normal edge -----------------------------------------
 expect_fail d 'unsafe_use_unprotected_platform on the [dependencies] deno_core entry' \
   'sed -i "s/^deno_core = \"0.412.0\"\$/deno_core = { version = \"0.412.0\", features = [\"unsafe_use_unprotected_platform\"] }/" Cargo.toml && grep -q "^deno_core = { version = \"0.412.0\", features" Cargo.toml'
+expect_fail d 'init_platform(Some(new_unprotected_default_platform(..))) in src/js/mod.rs' \
+  'sed -i "s/JsRuntime::init_platform(None);/JsRuntime::init_platform(Some(deno_core::v8::new_unprotected_default_platform(0, false).make_shared()));/" src/js/mod.rs && grep -q new_unprotected_default_platform src/js/mod.rs' \
+  'unprotected V8 platform selected in source'
+expect_fail d 'init_platform(Some(..)) split over lines in src/js/mod.rs' \
+  'sed -i "s/JsRuntime::init_platform(None);/JsRuntime::init_platform(\n        Some(deno_core::v8::new_default_platform(0, false).make_shared()),\n    );/" src/js/mod.rs && grep -q new_default_platform src/js/mod.rs' \
+  'unprotected V8 platform selected in source'
+expect_fail d 'init_platform(platform) with a variable' \
+  'sed -i "s/JsRuntime::init_platform(None);/let platform = None;\n    JsRuntime::init_platform(platform);/" src/js/mod.rs && grep -q "init_platform(platform)" src/js/mod.rs' \
+  'unprotected V8 platform selected in source'
+expect_fail d 'v8::Platform::new_unprotected in src/lib.rs' \
+  'echo "fn planted() { let _ = deno_core::v8::Platform::new_unprotected(0, false); }" >> src/lib.rs' \
+  'unprotected V8 platform selected in source'
+expect_fail d 'v8::new_custom_platform in src/lib.rs' \
+  'echo "fn planted() { let _ = deno_core::v8::new_custom_platform(0, false, true); }" >> src/lib.rs' \
+  'unprotected V8 platform selected in source'
+expect_fail d 'direct v8::V8::initialize_platform in src/lib.rs' \
+  'echo "fn planted(p: deno_core::v8::SharedRef<deno_core::v8::Platform>) { deno_core::v8::V8::initialize_platform(p); }" >> src/lib.rs' \
+  'unprotected V8 platform selected in source'
 
 # --- (e) duplicate v8 -----------------------------------------------------------------------
 expect_fail e 'cargo shim adds v8 v152.2.0 to cargo tree -d' "$(cat <<'SNIP'
