@@ -1,7 +1,8 @@
 ---
 phase: 04-ci-gate-on-x86-64
-reviewed: 2026-10-20T22:06:15Z
+reviewed: 2026-10-20T22:49:38Z
 depth: standard
+iteration: 3
 files_reviewed: 5
 files_reviewed_list:
   - .github/workflows/ci.yml
@@ -11,325 +12,197 @@ files_reviewed_list:
   - scripts/test-ci-guards.sh
 findings:
   critical: 0
-  warning: 8
-  info: 8
-  total: 16
+  warning: 1
+  info: 10
+  total: 11
 status: issues_found
 ---
 
-# Phase 4: Code Review Report
+# Phase 4: Code Review Report (re-review after fix iteration 2)
 
-**Reviewed:** 2026-10-20T22:06:15Z
+**Reviewed:** 2026-10-20T22:49:38Z
 **Depth:** standard
 **Files Reviewed:** 5
 **Status:** issues_found
 
 ## Summary
 
-I reviewed the CI workflow, the guard script and its planted-violation self-test, the
-workflow structure checker, and the release smoke. I ran all of them locally on aarch64.
-The scripts get GNU grep 3.11 and bash 5.2, which is what ubuntu-24.04 has. Results:
-`ci-guards.sh` printed "all guards passed", `test-ci-guards.sh` reported "32 cases, 0 missed",
-and `ci-smoke.sh` printed OK. The workflow as it stands runs the right gates, in the right
-order, without suppressing any errors. I found no defect that makes the current CI wrong.
+This re-review covers the tree after fix commits c25a66a (`ml_grep` fails closed), 7ada864
+(flow mappings and the brace ban in guard (g)'s grep layer) and 16d6739 (concurrency group
+pinned). The following were stated as deliberate in the brief and are not reported:
 
-I then planted more violations in a scratch copy under `target/tmp` (since deleted). Many of
-them get past the guards with exit 0 and no FAIL line. Each one below was confirmed by
-running the copied `ci-guards.sh`. Where it mattered, I also confirmed with `rustc`,
-`rustdoc` or `rustfmt` that the planted code compiles, is honoured, and survives formatting:
+- the ubuntu-26.04 runner (D-01 amendment)
+- tag and branch action refs
+- no push
+- no pip install and no actionlint download
+- the ban on braces in the workflow text
 
-- A multi-line `#[cfg_attr(..., allow(...))]`. This is rustfmt's own layout for long
-  attributes, so `cargo fmt --check` keeps it as is.
-- `#[cfg_attr(..., ignore)]` on a test, a `~~~ignore` doc fence, and a ```` ```rust ignore ````
-  doc fence. rustdoc reports each one as "ignored".
-- `[lib] test = false` / `doctest = false` in Cargo.toml.
-- A lint suppression in a symlinked module file. `grep -r` does not follow symlinks.
-- `rustfmt.toml` with `disable_all_formatting = true`. rustfmt 1.99 then exits 0 on
-  unformatted code.
-- In ci.yml: `actions/checkout` with `with: ref: main`, `working-directory: experiments/hashring`
-  on the cargo test step (that crate has its own Cargo.lock, so `--locked` passes), job-level
-  `permissions: write-all`, `pull_request: paths-ignore: ['**']`, and `types: [closed]`.
-- In the CI path without PyYAML: a lowercase `server.host` workflow env (the config loader
-  accepts any case) and `${{ github.head_ref }}` interpolation.
+Local runs (the scripts use GNU grep 3.11 at `/usr/bin/grep`, bash 5.2.21, Python 3 with PyYAML 6.0.1):
 
-There is also a diagnostics problem in the smoke. V8 isolates are created lazily on the
-`rs3-js-*` workers, so a PKU crash would show up at the first `PATCH`, not at startup. The
-script would report a bare "transport error" and never print the documented "status 139"
-trigger for D-07.
+- `bash -n` passed on all three shell scripts.
+- `bash scripts/ci-guards.sh` and `CI=true bash scripts/ci-guards.sh` both printed "all guards passed".
+- `python3 scripts/check-workflow.py` exited 0.
+- `scripts/test-ci-guards.sh` reported 86 cases, 0 missed, in 48 s.
 
-The deliberate items from the brief are not reported: tag refs instead of SHA pins, no push,
-skipping the structure check when PyYAML is missing in CI, and the deleted actions-rs.yml.
-WR-05 covers only how weak the grep layer that remains in that skip path is.
+All three fixes from the last round hold:
+
+- **WR-01.** `re.compile` now runs inside the `try`, and the handler catches `BaseException` and exits 2. All four consumers (`grep_guard`, (b), (d), (h)) treat exit 2 or higher as a failure. The new self-test case breaks guard (a)'s regex and expects `ml_grep failed (exit 2)`.
+- **WR-02.** Keys now match after indentation, `{`, `[` or `,`, quoted or not. Any brace left after the `${{ }}` strip fails. `sed` runs on its own, so a `sed` failure cannot be masked.
+- **IN-02.** `check-workflow.py` and the grep layer both pin `ci-${{ github.ref }}` exactly.
+
+The workflow runs the right gates in the right order and suppresses no errors. Nothing found
+makes the current CI wrong.
+
+There is one warning. It is reproduced, not hypothetical. The grep layer is the only workflow check in CI when PyYAML is missing. That layer is a block-list, and a block-list still lets through the most likely ways to weaken a gate:
+
+- `if: false` on a step
+- `|| true` appended to a run line
+- `-D warnings` dropped from clippy
+- a deleted smoke step
+- a deleted `permissions:` block
+
+`check-workflow.py` rejects every one of these, so the gap only matters on the path where PyYAML is missing. Whether the ubuntu-26.04 image ships PyYAML is still unverified.
+
+There are 10 info items. Two are new (IN-01, IN-02); IN-02 includes one false positive I confirmed. The other eight carry over from the last review. IN-02 of iteration 2 is fixed and dropped.
+
+Scratch work went under `target/tmp/review-iter4`, which has been deleted. No tracked file was modified.
+
+Hypotheses I checked and rejected:
+
+- **The `ml_grep` handler catching `BaseException`.** `SystemExit` is never raised inside the `try`. A `KeyboardInterrupt` or a failed stdout flush at shutdown still ends with an exit status of 2 or higher, so the guard fails closed.
+- **The brace strip `sed 's/\${{[^}]*}}//g'`.** In BRE, `{` is a literal, so the command does what it says. An expression that contains `}` leaves braces behind and fails, which is the safe direction.
+- **The key-position bracket `[[:space:]{,[]`.** GNU grep parses it correctly. The `  group: ci-${{ github.ref }}` line does not trip the `ref` pattern, because there is no colon after `ref`.
+- **The self-test's `local -a GUARD_ENV=(CI=true)` in `expect_fail_ci`.** It reaches `expect_fail` through bash's dynamic scoping, as intended. The WR-01 case's `sed` really produces `(?:allow|expect\s*\(|cfg_attr`, and the case's own `grep -qF` checks that.
 
 ## Warnings
 
-### WR-01: Guard (a) misses multi-line `cfg_attr` suppression, symlinked files and whitespace-split attributes
+### WR-01: In CI without PyYAML, the grep layer of guard (g) does not stand on its own
 
-**File:** `scripts/ci-guards.sh:31-34` (also `:38-39`, `:92-94`, which use the same `-r` scan)
-**Issue:** The regex is applied one line at a time, so this gets through:
-```rust
-#[cfg_attr(
-    all(test, feature = "a_rather_long_feature_name_for_this_example"),
-    allow(clippy::unwrap_used, clippy::expect_used, dead_code, unused_variables)
-)]
-fn y() {}
-```
-This is rustfmt's canonical output for an attribute longer than 100 columns, so the later
-`cargo fmt --check` step does not reject it. I verified it: guards rc=0, and rustfmt left the
-attribute unchanged. Separately, `grep -r` skips symlinks it finds while recursing.
-`src/z.rs -> ../outside/z.rs` holding `#[allow(dead_code)]` is compiled by rustc but never
-scanned (verified: rc=0). The pattern `#!?\[` also rejects valid token spacing such as
-`# [allow(..)]` / `# ! [allow(..)]`. rustfmt normalises most of these, but not inside
-`#[rustfmt::skip]` items or macro bodies it cannot parse.
-**Fix:** Scan with `grep -R` (follow symlinks). Match whole files in multi-line mode and allow
-whitespace between the tokens, for example with `grep -Pzo` or a small Python pass over every
-`*.rs` file:
-```bash
-grep_guard a "..." "lint-suppression attribute found:" \
-  -RnzP '#\s*!?\s*\[\s*(allow|expect)\s*\(|cfg_attr\s*\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\b(allow|expect)\s*\(' \
-  "${rs_roots[@]}"
-```
-Alternatively, strip newlines inside `#[...]` groups with Python before matching.
+**File:** `scripts/ci-guards.sh:192-202` (comment), `:215-252` (grep layer), `:253-259` (skip branch); `scripts/test-ci-guards.sh:310-366`
+**Issue:** The header says the content grep "is the only workflow check when PyYAML is missing in CI, so it stands on its own". It doesn't. The grep layer rejects a fixed list of substrings and keys. It checks nothing positively except the concurrency group line. Each edit below was planted in a scratch copy and then checked two ways:
 
-### WR-02: Guard (b) misses common ways to ignore or disable tests
+- `ci-guards.sh` with `CI=true` and PyYAML hidden (the same `python3 -S` shim the self-test uses) exited 0 with `ok [g] ... (structure check skipped: PyYAML unavailable in CI)` every time.
+- `check-workflow.py` exited 1 on every edit.
 
-**File:** `scripts/ci-guards.sh:36-39`
-**Issue:** `#\[[[:space:]]*ignore|```[[:alnum:]_,]*ignore` misses all of the following. Each
-was verified with guards rc=0 and rustdoc/libtest reporting "ignored":
-- `#[cfg_attr(not(feature = "never"), ignore)]` on a `#[test]`
-- a `~~~ignore` doc fence (CommonMark tilde fence)
-- ```` ```rust ignore ```` (rustdoc splits lang strings on spaces as well as commas)
-- `[lib] test = false`, `doctest = false`, `autotests = false` or `harness = false` in
-  Cargo.toml, which silently drop whole test targets (verified: rc=0)
-- `#[cfg(any())]` / `#[cfg(FALSE)]` on a test module
+| Planted edit | Effect on the gate |
+|---|---|
+| `if: false` on the `cargo clippy` step | clippy never runs (CI-03) |
+| `run: cargo clippy --all-targets --locked`, with `-- -D warnings` dropped | clippy warnings no longer fail CI |
+| `run: cargo test --locked \|\| true` | test failures are swallowed |
+| `run: cargo test --locked -- --test-threads=1` | defeats the parallel-test gate (the case RESEARCH used to justify exact run strings) |
+| `shell: sh` on the fmt step | changes the shell the step runs in (also rejected in PyYAML mode) |
+| the `Release smoke` step deleted | the protected-platform smoke (D-06) is gone |
+| the top-level `permissions:` / `contents: read` lines deleted | the token falls back to the repo default (D-03) |
+| `with:` / `? ref` / `: main` (YAML explicit-key syntax) on checkout | gates run against `main` (obscure, but valid YAML) |
 
-CI-03 relies on `cargo test --locked` running the V8-backed tests, so each of these quietly
-weakens that gate.
-**Fix:** Extend the regex and add a Cargo.toml check to the existing tomllib block (c):
-```bash
--RnE '#\[[[:space:]]*ignore|cfg_attr[[:space:]]*\(.*\bignore\b|(```|~~~)[^`~]*\bignore\b|#\[[[:space:]]*cfg[[:space:]]*\([[:space:]]*(any[[:space:]]*\([[:space:]]*\)|FALSE)'
-```
+The guards step itself must stay intact for any of these to be checked. That holds in every row, because only other lines were edited. On a runner without PyYAML, these edits therefore turn the CI gate green while gutting it.
+
+The self-test's `expect_fail_ci` cases cover only the block-list entries. The `if: false`, `shell: sh`, run-string and deleted-step cases exist only in PyYAML mode (`expect_fail` with `-u CI`, `:254-265`), so the gap stays invisible.
+
+The last two review rounds each found a new hole in this block-list, and each was closed one pattern at a time. A positive check would end that cycle.
+
+**Fix:** Keep the operator's decision (no pip install, skip only when PyYAML is missing), but give the PyYAML-less path a stdlib-only allow-list instead of more block patterns. ci.yml is block style and fully pinned, so a canonical-lines comparison is cheap. One way is a fallback in `check-workflow.py` that imports PyYAML lazily:
+
 ```python
-data = tomllib.load(f)
-for sect in ("lib", "bin", "test", "bench", "example"):
-    for t in ([data[sect]] if isinstance(data.get(sect), dict) else data.get(sect, [])):
-        for k in ("test", "doctest", "harness"):
-            if t.get(k) is False: errs.append(f"[{sect}] {k} = false")
-if data.get("package", {}).get("autotests") is False: errs.append("autotests = false")
+CANONICAL = [  # every non-blank, non-comment line of ci.yml, exactly
+    "name: CI", "on:", "  push:", "  pull_request:", "  workflow_dispatch:",
+    "permissions:", "  contents: read",
+    "concurrency:", "  group: ci-${{ github.ref }}", "  cancel-in-progress: true",
+    # ... through "        run: bash scripts/ci-smoke.sh"
+]
+def lines_check(text):
+    got = [l.rstrip() for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    return [] if got == CANONICAL else [f"workflow lines differ from the canonical ci.yml: {got!r}"]
+try:
+    import yaml
+except ImportError:
+    yaml = None   # main(): if yaml is None and CI is set, run lines_check and return
 ```
 
-### WR-03: Guard (d) checks only the Cargo feature; source code can select the unprotected platform directly
+Then make `ci-guards.sh` call this mode instead of printing `skip [g-structure]`.
 
-**File:** `scripts/ci-guards.sh:66-78`
-**Issue:** The invariant is "the release binary keeps the protected V8 platform". deno_core
-0.412 picks the unprotected platform only when it is passed `None`
-(`runtime/setup.rs:200-202`, `cfg!(any(test, feature = "unsafe_use_unprotected_platform"))`).
-`src/js/mod.rs:11` could just as well call
-`JsRuntime::init_platform(Some(deno_core::v8::new_unprotected_default_platform(0, false).make_shared()))`.
-`new_unprotected_default_platform` is a safe `pub fn` (`v8-150.4.0/src/platform.rs:328`), so
-`unsafe_code = "forbid"` does not block it. The release binary would then run unprotected with
-guard (d) green, and the smoke would pass, so the D-07 evidence would be falsified.
-**Fix:** Add a source grep to guard (d), and relax it together with the feature move in the
-D-07 fallback:
-```bash
-grep_guard d2 "no direct unprotected platform in src" "unprotected V8 platform selected in source:" \
-  -RnE 'new_unprotected_default_platform|unprotected_platform' "${rs_roots[@]}"
-```
-Folding it into tag `d` keeps the "[a]..[h] one-to-one" contract.
-
-### WR-04: check-workflow.py accepts keys that redirect or neuter every gate
-
-**File:** `scripts/check-workflow.py:30, 46-49, 77-83`
-**Issue:** `FORBIDDEN_KEYS` covers only `continue-on-error`, `env`, `if` and `shell`, and only the
-push trigger is checked for filters. All of the following passed the full structure check
-(PyYAML present, guards rc=0):
-- `actions/checkout@v7` with `with: { ref: main }` (or `repository: other/repo`). Every gate then
-  runs against a different commit than the one pushed. The PR is "green" without testing its code.
-- `working-directory: experiments/hashring` on the `cargo test` step. That crate has a
-  committed Cargo.lock, so `cargo test --locked` succeeds against unrelated code.
-- Job-level `permissions: write-all`. This overrides the checked workflow-level
-  `{contents: read}` and defeats D-03.
-- `pull_request: { paths-ignore: ['**'] }` or `types: [closed]`. PRs then never run CI.
-- Job-level `container:` (any image) and `services:`.
-**Fix:** Make job and step keys allow-lists instead of a deny-list, and validate `with:` and the
-PR trigger:
-```python
-JOB_KEYS = {"name", "runs-on", "timeout-minutes", "steps"}
-STEP_KEYS = {"name", "uses", "with", "run"}
-ALLOWED_WITH = {"actions/checkout@v7": set(), "dtolnay/rust-toolchain@1.99.1": {"components"},
-                "Swatinem/rust-cache@v2": set()}
-if set(job) - JOB_KEYS: errs.append(f"job: unexpected keys {sorted(set(job) - JOB_KEYS)}")
-for i, s in enumerate(steps):
-    if set(s) - STEP_KEYS: errs.append(f"step {i}: unexpected keys {sorted(set(s) - STEP_KEYS)}")
-    if "uses" in s and set(s.get("with") or {}) - ALLOWED_WITH.get(s["uses"], set()):
-        errs.append(f"step {i}: unexpected with: inputs for {s['uses']}")
-if triggers.get("pull_request") not in (None, {}):
-    errs.append("pull_request trigger must not be filtered")
-```
-
-### WR-05: In CI the forbidden-content grep is the only workflow check, and it is case-sensitive and incomplete
-
-**File:** `scripts/ci-guards.sh:105` (with `:107-110`)
-**Issue:** With `CI` set and no PyYAML, guard (g) relies on
-`grep -nE 'continue-on-error|SERVER\.|RUSTFLAGS|cap-lints|\$\{\{ *github\.event\.'`. Skipping the
-structure check is deliberate, but this remaining layer does not cover what it claims to:
-- `src/config.rs:7-8,16,72-77` lowercases every env key and accepts `SERVER.HOST` in any case.
-  `server.host: 0.0.0.0` under workflow `env:` therefore passes (verified: rc=0 with `CI=true`
-  and the PyYAML shim) and breaks CI-02.
-- `${{ github.head_ref }}`, the classic branch-name script-injection source, is not matched
-  (verified: rc=0). Neither are `github.event_path`-style variants or
-  `${{github.event` written with a tab.
-- `working-directory`, `permissions` and checkout `ref:` (WR-04) are also unchecked.
-
-I could not verify from this host whether the ubuntu-24.04 image's `/usr/bin/python3` ships
-PyYAML. If it does not, this weaker layer is the only workflow check on every CI run.
-**Fix:** Use `grep -inE` and widen the pattern, for example
-`'continue-on-error|server\.|rustflags|cap-lints|working-directory|permissions:.*write|\$\{\{[[:space:]]*github\.(event|head_ref)'`.
-Allow the single top-level `permissions:` line explicitly. Better still, make the structure
-check independent of PyYAML (JSON via `python3 -c` cannot parse YAML, but the workflow is
-small enough for a strict line-based allow-list).
-
-### WR-06: Nothing guards the `cargo fmt --check` gate against being disabled by configuration
-
-**File:** `scripts/ci-guards.sh:118-123`
-**Issue:** Guard (h) blocks a `.cargo/config*` that could weaken clippy, but the fmt gate has
-an equivalent bypass. A repo-root `rustfmt.toml` / `.rustfmt.toml` containing
-`disable_all_formatting = true` makes `cargo fmt --check` exit 0 on unformatted code. I verified
-this with rustfmt from 1.99.1: rc=1 without the file, rc=0 with it, and the guards rc=0. The
-same applies to item-level `#[rustfmt::skip]` sprinkled over source. This bypass mirrors the
-lint-suppression directive the guards exist to enforce.
-**Fix:**
-```bash
-shopt -s nullglob; fmtcfg=(rustfmt.toml .rustfmt.toml); shopt -u nullglob
-for f in "${fmtcfg[@]}"; do [[ -e $f ]] && grep -qE '^[[:space:]]*(disable_all_formatting|ignore)[[:space:]]*=' "$f" \
-  && fail h "rustfmt config disables formatting: $f"; done
-```
-Add `rustfmt::skip` to the guard (a) pattern, or to a new tag.
-
-### WR-07: The smoke never reports the PKU crash it exists to detect; it surfaces as a bare "transport error"
-
-**File:** `scripts/ci-smoke.sh:41-53, 59-67, 73-74` (comments at `:13-15`, `.github/workflows/ci.yml:50-53`, `scripts/ci-guards.sh:68-70`)
-**Issue:** `src/main.rs:16` initialises the platform, and
-`JsExecutor::start` (`src/js/executor.rs:33-80`) spawns workers that build only a tokio runtime.
-No `JsRuntime`/isolate exists until the first job, and readiness uses `GET /`, which never
-touches V8. A protected-platform PKU fault on the x86_64 runner would therefore kill the
-process during `PATCH /key/m`. The status-139 check sits only in the readiness loop, so the
-script prints `PATCH /key/m: transport error` (curl: empty reply). The server's exit status is
-then swallowed by `cleanup`'s `wait ... || true`. The workflow comment, the smoke header and
-guard (d)'s comment all tell the operator to look for "status 139 at startup". That never
-appears, so the D-07 decision has to be made from a misleading message. The gate still fails,
-so CI behaviour is correct, but the diagnosis is wrong.
-**Fix:** On any request failure, report whether the server died and with what status:
-```bash
-server_status() {
-  if ! kill -0 "$PID" 2>/dev/null; then local st=0; wait "$PID" || st=$?; PID=""
-    echo " (server exited with status ${st}${st:+; 139 = SIGSEGV, see D-07})"; fi
-}
-out=$(curl ...) || fail "$1 $2: transport error$(server_status)"
-```
-Also update the comments to say "at the first script execution", not "at startup".
-
-### WR-08: test-ci-guards.sh runs `rm -rf` on an unvalidated, environment-supplied path
-
-**File:** `scripts/test-ci-guards.sh:12, 24, 74, 187` (and `:32`)
-**Issue:** `SCRATCH="${CI_GUARDS_SCRATCH:-...}"` goes straight into `rm -rf "$SCRATCH"`.
-`CI_GUARDS_SCRATCH=.` (relative to the repo root, after `cd "$ROOT"`), `CI_GUARDS_SCRATCH=..` or a
-mistyped `$HOME` deletes the working tree or more before anything is copied. A relative value
-also breaks the shims. `run_guards` does `cd "$SCRATCH"` and then prepends the still-relative
-`$SCRATCH/shim` to PATH, which now resolves under the new cwd. The cargo and python3 shims are
-then not found, and the (e) and PyYAML cases fail for the wrong reason. There is no trap, so an
-interrupted run leaves the scratch copy behind.
-**Fix:**
-```bash
-SCRATCH="$(realpath -m "${CI_GUARDS_SCRATCH:-$ROOT/target/tmp/guard-selftest}")"
-case "$SCRATCH" in "$ROOT"/target/*) ;; *) echo "CI_GUARDS_SCRATCH must be under $ROOT/target" >&2; exit 2;; esac
-trap 'rm -rf "$SCRATCH"' EXIT
-```
+A smaller fix closes the realistic rows: in the skip branch, require each of the six run lines with `grep -qxF '        run: <cmd>'`, and also require the `permissions:` and `  contents: read` lines. Add `if|shell|env|defaults` (indented) to the key-position pattern. Under either fix, port the `if: false`, `|| true`, missing `-D warnings` and deleted-smoke cases to `expect_fail_ci`.
 
 ## Info
 
-### IN-01: Guard (e) can false-positive on a same-version v8
+### IN-01 (new): check-workflow.py silently accepts the forbidden keys and `defaults` in scopes it never reports them for
 
-**File:** `scripts/ci-guards.sh:80-88`
-**Issue:** `cargo tree -d --target all -e normal,build,dev` lists same-version duplicates. Here it
-currently prints `actix-router v0.5.4`, `libc v0.2.191`, `memchr v2.8.3` and others twice. Any
-`v8` line fails the guard, so a single v8 version built twice (host/target or a feature split)
-would be reported as "duplicate v8".
-**Fix:** Count distinct versions:
-`grep -E '^(v8|rusty_v8) v' <<<"$dups" | sort -u | wc -l` and fail only when the count is greater than 1.
+**File:** `scripts/check-workflow.py:47-49, 81-82, 88-89, 102-116`
+**Issue:** `unexpected()` always removes `FORBIDDEN_KEYS` and `"defaults"` from its result, because they are "reported separately". In fact they are reported separately only for the job and its steps (`FORBIDDEN_KEYS`), and for the workflow and the job (`defaults`). I verified with PyYAML present that `check-workflow.py` exits 0 for each of these:
 
-### IN-02: Guard (g) treats grep errors as "no hits" and reports only the first failing layer
+- `if: false` under `concurrency:`
+- a top-level `continue-on-error: true`
+- a step-level `defaults: x`
 
-**File:** `scripts/ci-guards.sh:105-116`
-**Issue:** `elif hits=$(grep ...)` treats exit 2 (a read error) the same as exit 1, so it does not
-fail closed the way `grep_guard` does. The `elif` chain also stops at the first problem. That
-contradicts the header claim that "one run shows every violation", because forbidden content
-hides structure errors.
-**Fix:** Capture `rc` as `grep_guard` does, and run the structure check even when the content grep hits.
+GitHub rejects all three as schema errors, so the workflow would not run at all. A broken run shows up there, so this is not a bypass. Still, the checker's diagnostics do not match its own allow-list comment (`:31-33`).
 
-### IN-03: Guard (f) does not cover whitespace variants or `tests/`
+**Fix:** Pass the separately reported keys explicitly, for example `unexpected(obj, allowed, reported=())`. Use `reported=FORBIDDEN_KEYS + ("defaults",)` only for the job, `("defaults",)` only for the workflow, and `FORBIDDEN_KEYS` only for steps.
 
-**File:** `scripts/ci-guards.sh:90-94`
-**Issue:** `Deno.core.ops ( );` passes (verified). `tests/` (already in `rs_roots` when it
-exists) is not scanned, although integration tests would embed JS strings.
+### IN-02 (new, extends the carry-over text-grep note): guard (g) fails on ordinary English in ci.yml comments
+
+**File:** `scripts/ci-guards.sh:215-220`
+**Issue:** The case-insensitive pattern includes `server\.`, `rustflags`, `working-directory` and `<key>: write`. I verified that adding the comment line `# Starts the release server.` above the smoke step makes guard (g) fail with "forbidden workflow content", while `check-workflow.py` exits 0. A step named `name: Write ...` would fail too, because `-i` also matches `write`. This fails closed, and the error message prints the offending line, so the impact is limited to confusion.
+
+**Fix:** Run the content grep on the comment-stripped text, which the brace check already builds with `sed`. Add `s/^[[:space:]]*#.*//` to the `sed` script, keeping line numbers. Alternatively, note in the header that workflow comments must avoid these words.
+
+### IN-03: Guard (d) source scan misses `Platform::new_custom(.., true, ..)` passed through `RuntimeOptions::v8_platform` (carry-over, iteration-2 IN-01)
+
+**File:** `scripts/ci-guards.sh:166`
+**Issue:** The current regex matches `\bnew_custom_platform\b`, but not the method `v8::Platform::new_custom(thread_pool_size, idle_task_support, unprotected: bool, impl PlatformImpl)`. It also does not match a platform passed through `RuntimeOptions { v8_platform: Some(..) }`, which never calls `init_platform`. This is unlikely to happen by accident.
+
+**Fix:** Use `\bnew_custom\w*` and add `\bv8_platform\s*:\s*Some\b`.
+
+### IN-04: test-ci-guards.sh refuses to run when `target/` is a symlink, and blames an unset variable (carry-over, iteration-2 IN-03)
+
+**File:** `scripts/test-ci-guards.sh:14-19`
+**Issue:** `realpath -m` resolves a `target -> elsewhere` symlink, so the default scratch path fails the `"$ROOT"/target/tmp/?*` check. The script then reports "CI_GUARDS_SCRATCH must resolve ..." even though the variable is unset. This fails safe.
+
+**Fix:** Compare against `"$(realpath -m -- "$ROOT/target/tmp")"/?*`, and name the default path in the message when the variable is unset.
+
+### IN-05: Guard (e) can false-positive on a same-version v8 (carry-over)
+
+**File:** `scripts/ci-guards.sh:178-181`
+**Issue:** `cargo tree -d` can list a crate twice at the same version. When it does, any `v8` line fails the guard.
+
+**Fix:** Fail only when `grep -E '^(v8|rusty_v8) v' | sort -u | wc -l` is greater than 1.
+
+### IN-06: Guard (f) misses whitespace variants and does not scan `tests/` (carry-over)
+
+**File:** `scripts/ci-guards.sh:188-190`
+**Issue:** `Deno.core.ops ( )` passes the check. Only `requests` and `src` are scanned, even though `rs_roots` would include `tests/`.
+
 **Fix:** Use `Deno\.core\.ops[[:space:]]*\([[:space:]]*\)` and scan `requests "${rs_roots[@]}"`.
 
-### IN-04: Strict greps reject harmless text, and workspace lints are rejected
+### IN-07: The Rust-source text greps reject harmless comments and strings, and `[lints] workspace = true` fails (c) (carry-over)
 
-**File:** `scripts/ci-guards.sh:32-39, 43-64, 92-94`
-**Issue:** A doc comment such as "never write `#[allow(..)]`" or a string containing `rs3_get`
-fails (a), (b) or (f). In (c), `[lints] workspace = true` is reported as "not a table" and
-fails the unwrap/expect check. This is acceptable for a single-crate repo, but it is not
-documented.
-**Fix:** Document this in the header, or skip `//` comment lines in (a) and (b).
+**File:** `scripts/ci-guards.sh:80-82, 91, 129-133, 188-190`
+**Issue:** A doc comment that mentions `#[allow(..)]`, or a string that contains `rs3_get`, fails guard (a) or (f). `[lints] workspace = true` is reported as "not a table". This is acceptable for a single-crate repo, but it is undocumented.
 
-### IN-05: Smoke robustness nits
+**Fix:** Note it in the header.
 
-**File:** `scripts/ci-smoke.sh:20, 26, 33/38, 45-54`
-**Issue:**
-- (`:20`) Picking a port by bind-then-close is a TOCTOU race.
-- (`:45-54`) The message says "after 30s", but the worst case is 60 × (2 s curl timeout +
-  0.5 s) ≈ 150 s.
-- (`:26`) `cleanup` sends SIGTERM and then waits with no deadline. actix's graceful shutdown can
-  take up to 30 s, and a hung server blocks until the 45-minute job timeout.
-- (`:33` vs `:38`) `[[ -x "$BIN" ]]` checks the cwd, but `env` searches PATH when `RS3_BIN` has no slash.
-**Fix:** Retry on a bind failure, or let the server bind port 0 and report its port. Use a
-deadline (`SECONDS`) for readiness. Escalate to `kill -9` after a few seconds. Normalise
-`BIN` to a path (`[[ $BIN == */* ]] || BIN=./$BIN`).
+### IN-08: Smoke port TOCTOU and `RS3_BIN` lookup mismatch (carry-over)
 
-### IN-06: Self-test gaps
+**File:** `scripts/ci-smoke.sh:23, 71, 76`
+**Issue:** The port is chosen by binding and then closing a socket, which is racy. `[[ -x "$BIN" ]]` checks a path relative to the current directory, but `env` searches `PATH` when `RS3_BIN` has no slash.
 
-**File:** `scripts/test-ci-guards.sh:23-27, 32, 136-158`
-**Issue:**
-- `fresh()` ignores `cp` failures and never copies `tests/ benches/ examples/ build.rs`, so the
-  control can diverge from the real tree.
-- `run_guards` does not unset an inherited `CI_GUARDS_ROOT`. If it is set, the copied guards
-  check the real tree, every planted case is MISSED, and the control still passes.
-- The `continue-on-error`, `SERVER.HOST` and `github.event` cases are all caught by the
-  content grep before `check-workflow.py` runs, so the checker's own handling of those keys is
-  never exercised.
-**Fix:** Use `cp ... || exit 1`, copy the optional roots when they exist, add
-`-u CI_GUARDS_ROOT` to `run_guards`, and add cases that invoke `python3 scripts/check-workflow.py`
-directly.
+**Fix:** Use `[[ $BIN == */* ]] || BIN=./$BIN`, and retry once if the bind fails.
 
-### IN-07: Unreachable actions-rs check
+### IN-09: check-workflow.py's `continue-on-error`/`env` handling is never exercised directly, and the actions-rs check is unreachable (carry-over, iteration-2 IN-08 + IN-09)
 
-**File:** `scripts/check-workflow.py:98-99`
-**Issue:** `uses` must already equal `EXPECTED_USES` exactly (line 82), so an `actions-rs/*` ref
-always produces the earlier error. This check is dead code.
-**Fix:** Remove it, or keep it as an explicit message but note that it is redundant.
+**File:** `scripts/test-ci-guards.sh:244-247`; `scripts/check-workflow.py:145-146`
+**Issue:** The content grep catches the step-level `continue-on-error` and `env` cases before the checker runs, so a regression in the checker's own handling would go unnoticed. Separately, `uses` must already equal `EXPECTED_USES`, so the `actions-rs/` check is dead code.
 
-### IN-08: Concurrency cancels superseded runs on main too
+**Fix:** Add two `expect_wf_fail` cases (step `continue-on-error: true`, and step `env:` with one key in block style). Remove the actions-rs check, or comment that it is redundant on purpose.
+
+### IN-10: `cancel-in-progress` cancels superseded runs on `main`, and same-repo PR branches run twice (carry-over)
 
 **File:** `.github/workflows/ci.yml:11-13`
-**Issue:** `cancel-in-progress: true` for every ref means rapid pushes to `main` leave earlier
-main commits with no CI verdict. A same-repo PR branch also runs twice, once for `push` and
-once for `pull_request`, because the refs differ.
-**Fix:** Consider `cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}`, and update
-check-workflow.py to match. Accepting the trade-off is also fine if it is documented.
+**Issue:** Rapid pushes to `main` leave earlier `main` commits with no verdict. A same-repo PR runs CI twice, once for `push` and once for `pull_request`, because the two events have different refs.
+
+**Fix:** Accept and document the trade-off. Changing it would need a second `${{` expression, which the grep layer and `check-workflow.py` now forbid.
 
 ---
 
-_Reviewed: 2026-10-20T22:06:15Z_
+_Reviewed: 2026-10-20T22:49:38Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
