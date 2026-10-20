@@ -59,6 +59,28 @@ impl Store {
         Ok(count)
     }
 
+    /// Remove `key` and return the value it held, or `NotFound`.
+    pub fn remove(&self, key: &str) -> Result<String, StoreError> {
+        self.map
+            .pin()
+            .remove(key)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(key.to_owned()))
+    }
+
+    /// Owned snapshot of every entry, sorted by key.
+    pub fn list(&self) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = self
+            .map
+            .pin()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        // Keys are unique, so the unstable sort is deterministic.
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
     /// Number of stored entries.
     pub fn len(&self) -> usize {
         self.map.len()
@@ -124,6 +146,42 @@ mod tests {
         assert_eq!(store.get("y"), Err(StoreError::NotFound("y".into())));
         assert_eq!(store.len(), before);
         assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn remove_returns_value() {
+        let store = Store::new();
+        store.insert("a".into(), "1".into());
+        store.insert("b".into(), "2".into());
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.remove("a"), Ok("1".to_owned()));
+        assert_eq!(store.get("a"), Err(StoreError::NotFound("a".into())));
+        assert_eq!(store.get("b"), Ok("2".to_owned()));
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn remove_missing_is_not_found() {
+        let store = Store::new();
+        assert_eq!(
+            store.remove("missing"),
+            Err(StoreError::NotFound("missing".into()))
+        );
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn list_empty() {
+        assert_eq!(Store::new().list(), Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn list_sorted_by_key() {
+        let store = Store::new();
+        store.insert("b".into(), "2".into());
+        store.insert("a".into(), "1".into());
+        store.insert("c".into(), "3".into());
+        assert_eq!(store.list(), vec![kv("a", "1"), kv("b", "2"), kv("c", "3")]);
     }
 
     #[test]

@@ -1,7 +1,7 @@
-//! Store-backed routes: `POST /insert` and `GET /key/{key}`.
+//! Store-backed routes: `POST /insert`, `GET /key/{key}`, `DELETE /key/{key}` and `GET /list`.
 use std::sync::LazyLock;
 
-use actix_web::{HttpResponse, Responder, get, post, web};
+use actix_web::{HttpResponse, Responder, delete, get, post, web};
 
 use crate::store::{Store, legacy};
 
@@ -10,7 +10,10 @@ pub(crate) static STORE: LazyLock<Store> = LazyLock::new(Store::new);
 
 /// Register the store routes.
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(insert).service(get_key);
+    cfg.service(insert)
+        .service(get_key)
+        .service(delete_key)
+        .service(list);
 }
 
 /// `POST /insert` stores every key/value of a JSON object of strings and echoes it.
@@ -38,9 +41,24 @@ pub async fn get_key(path: web::Path<String>) -> impl Responder {
     }
 }
 
+/// `DELETE /key/{key}` removes the key and returns the value it held.
+///
+/// Phase 1 keeps the legacy semantics of panicking on a missing key; Phase 2 adds 404.
+#[delete("/key/{key}")]
+pub async fn delete_key(path: web::Path<String>) -> impl Responder {
+    HttpResponse::Ok().json(STORE.remove(&path.into_inner()).unwrap())
+}
+
+/// `GET /list` returns every stored pair, sorted by key, in the legacy list shape.
+#[get("/list")]
+pub async fn list() -> impl Responder {
+    HttpResponse::Ok().json(legacy::format_list(&STORE.list()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::StoreError;
     use actix_web::{App, http::StatusCode, test as atest, web};
 
     fn insert_request(payload: &'static str) -> atest::TestRequest {
@@ -90,6 +108,37 @@ mod tests {
         let resp = atest::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(atest::read_body(resp).await, r#""John Doe""#.as_bytes());
+    }
+
+    #[actix_web::test]
+    async fn test_delete_is_ok() {
+        STORE.insert("delete_test".into(), "John Doe".into());
+        let app = atest::init_service(App::new().service(delete_key)).await;
+        let req = atest::TestRequest::delete()
+            .uri("/key/delete_test")
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""John Doe""#)
+        );
+        assert_eq!(
+            STORE.get("delete_test"),
+            Err(StoreError::NotFound("delete_test".into()))
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_list_is_ok() {
+        STORE.insert("list_test".into(), "John Doe".into());
+        let app = atest::init_service(App::new().service(list)).await;
+        let req = atest::TestRequest::get().uri("/list").to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = atest::read_body(resp).await;
+        assert!(body.starts_with(br#""["#), "body: {body:?}");
+        assert!(body.ends_with(br#"]""#), "body: {body:?}");
     }
 
     #[actix_web::test]
