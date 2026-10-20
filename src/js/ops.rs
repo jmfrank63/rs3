@@ -61,16 +61,88 @@ deno_core::extension!(
 
 #[cfg(test)]
 mod tests {
-    use crate::js::run_js;
+    use super::ExecCtx;
+    use crate::js::{ExecError, run_js};
     use crate::store::Store;
+
+    fn ok(s: &str) -> Result<String, ExecError> {
+        Ok(s.to_owned())
+    }
 
     #[test]
     fn run_script_reads_the_store() {
         let store = Store::new();
         store.insert("num".into(), "5".into());
+        assert_eq!(run_js(&store, "Deno.core.ops.op_rs3_get('num')"), ok("5"));
+    }
+
+    #[test]
+    fn nested_patch_returns_inner_result() {
+        let store = Store::new();
+        store.insert("num".into(), "5".into());
+        store.insert("inner".into(), "Deno.core.ops.op_rs3_get('num')".into());
         assert_eq!(
-            run_js(&store, "Deno.core.ops.op_rs3_get('num')"),
-            Ok("5".to_owned())
+            run_js(&store, "Deno.core.ops.op_rs3_patch('inner')"),
+            ok("5")
+        );
+    }
+
+    #[test]
+    fn nested_patch_has_own_top_level_scope() {
+        let store = Store::new();
+        store.insert("inner".into(), "let q = 70; q".into());
+        assert_eq!(
+            run_js(
+                &store,
+                "let q = 1; q + Number(Deno.core.ops.op_rs3_patch('inner'))"
+            ),
+            ok("71")
+        );
+    }
+
+    #[test]
+    fn nested_throw_is_catchable_without_uncaught_prefix() {
+        let store = Store::new();
+        store.insert("inner".into(), "throw new RangeError('inner boom')".into());
+        let src = "try { Deno.core.ops.op_rs3_patch('inner'); 'no throw' } \
+                   catch (e) { (e instanceof Error) + '|' + e.message }";
+        assert_eq!(run_js(&store, src), ok("true|RangeError: inner boom"));
+    }
+
+    #[test]
+    fn nested_patch_of_missing_key_throws() {
+        let store = Store::new();
+        let src = "try { Deno.core.ops.op_rs3_patch('ghost'); 'no throw' } \
+                   catch (e) { e.message }";
+        assert_eq!(run_js(&store, src), ok("key not found: ghost"));
+    }
+
+    #[test]
+    fn exec_ctx_nested_increments_depth_and_shares_store() {
+        let ctx = ExecCtx::new(Store::new());
+        assert_eq!(ctx.depth, 0);
+        let nested = ctx.nested();
+        assert_eq!(nested.depth, 1);
+        nested.store.insert("k".into(), "v".into());
+        assert_eq!(ctx.store.get("k"), Ok("v".to_owned()));
+    }
+
+    #[test]
+    fn op_panic_is_disabled_and_catchable() {
+        let store = Store::new();
+        let src = "try { Deno.core.ops.op_panic('x'); 'no throw' } \
+                   catch (e) { (e instanceof Error) + '|' + e.message }";
+        assert_eq!(run_js(&store, src), ok("true|op is disabled"));
+    }
+
+    #[test]
+    fn uncaught_op_panic_is_a_script_error() {
+        let store = Store::new();
+        assert_eq!(
+            run_js(&store, "Deno.core.ops.op_panic('x')"),
+            Err(ExecError::Script {
+                message: "Uncaught Error: op is disabled".to_owned()
+            })
         );
     }
 }
