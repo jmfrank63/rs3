@@ -200,6 +200,156 @@ pub(crate) mod tests {
         assert_eq!(state.store.get("k"), Ok("v".to_owned()));
     }
 
+    /// Seed `pairs` into a fresh test state, PATCH `/key/{key}` and return the response.
+    async fn patch_seeded(pairs: &[(&str, &str)], key: &str) -> ServiceResponse {
+        let state = test_state();
+        for (k, v) in pairs {
+            state.store.insert((*k).to_owned(), (*v).to_owned());
+        }
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let req = atest::TestRequest::patch()
+            .uri(&format!("/key/{key}"))
+            .to_request();
+        atest::call_service(&app, req).await
+    }
+
+    #[actix_web::test]
+    async fn test_patch_throw_is_422_js_error() {
+        let resp = patch_seeded(&[("t", r#"throw new Error("boom")"#)], "t").await;
+        let body = assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_error").await;
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "js_error", "message": "Uncaught Error: boom"})
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_patch_syntax_error_is_422_js_error() {
+        let resp = patch_seeded(&[("s", "let = ;")], "s").await;
+        let body = assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_error").await;
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(message.starts_with("Uncaught SyntaxError"), "{body}");
+    }
+
+    #[actix_web::test]
+    async fn test_patch_non_error_throw_is_422_js_error() {
+        let resp = patch_seeded(&[("n", r#"throw "plain""#)], "n").await;
+        let body = assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_error").await;
+        assert_eq!(body["message"], "Uncaught plain");
+    }
+
+    #[actix_web::test]
+    async fn test_patch_uncaught_op_error_is_422_js_error() {
+        let resp = patch_seeded(&[("g", r#"Deno.core.ops.op_rs3_get("nope")"#)], "g").await;
+        let body = assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_error").await;
+        assert_eq!(body["message"], "Uncaught Error: key not found: nope");
+    }
+
+    #[actix_web::test]
+    async fn test_patch_op_panic_is_422_and_server_keeps_serving() {
+        let state = test_state();
+        state
+            .store
+            .insert("p".into(), r#"Deno.core.ops.op_panic("x")"#.into());
+        state.store.insert("ok".into(), "1+1".into());
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let resp =
+            atest::call_service(&app, atest::TestRequest::patch().uri("/key/p").to_request()).await;
+        let body = assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_error").await;
+        assert_eq!(body["message"], "Uncaught Error: op is disabled");
+        let resp = atest::call_service(&app, atest::TestRequest::get().uri("/").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""Welcome to rs3""#)
+        );
+        let resp = atest::call_service(
+            &app,
+            atest::TestRequest::patch().uri("/key/ok").to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""2""#)
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_patch_script_error_is_repeatable() {
+        let state = test_state();
+        state
+            .store
+            .insert("t".into(), r#"throw new Error("again")"#.into());
+        state.store.insert("ok".into(), "40+2".into());
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let resp =
+                atest::call_service(&app, atest::TestRequest::patch().uri("/key/t").to_request())
+                    .await;
+            bodies
+                .push(assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_error").await);
+        }
+        assert_eq!(bodies[0], bodies[1]);
+        let resp = atest::call_service(
+            &app,
+            atest::TestRequest::patch().uri("/key/ok").to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""42""#)
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_patch_error_message_keeps_non_ascii() {
+        let resp = patch_seeded(&[("u", r#"throw new Error("ключ ✓")"#)], "u").await;
+        let body = assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_error").await;
+        assert_eq!(body["message"], "Uncaught Error: ключ ✓");
+    }
+
+    #[actix_web::test]
+    async fn test_patch_executor_down_is_500_internal() {
+        let state = AppState {
+            js: crate::js::executor::JsExecutor::closed(),
+            ..test_state()
+        };
+        state.store.insert("k".into(), "1".into());
+        let app = atest::init_service(App::new().configure(configure(state.clone()))).await;
+        let resp =
+            atest::call_service(&app, atest::TestRequest::patch().uri("/key/k").to_request()).await;
+        let body = assert_json_error(resp, StatusCode::INTERNAL_SERVER_ERROR, "internal").await;
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "internal", "message": "internal error"})
+        );
+        assert_eq!(state.store.get("k"), Ok("1".to_owned()));
+    }
+
+    #[actix_web::test]
+    async fn test_internal_error_response_is_500_json() {
+        use actix_web::ResponseError;
+        let resp = ApiError::Internal.error_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .map(|v| v.as_bytes().to_vec()),
+            Some(b"application/json".to_vec())
+        );
+        let bytes = actix_web::body::to_bytes(resp.into_body())
+            .await
+            .expect("error body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error body");
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "internal", "message": "internal error"})
+        );
+    }
+
     const LIST_SCRIPT: &str = "Deno.core.ops.op_rs3_list().toString();";
 
     #[actix_web::test]
