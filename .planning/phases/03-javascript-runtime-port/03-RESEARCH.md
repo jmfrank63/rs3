@@ -542,14 +542,14 @@ Also document: PATCH stringification (`120`→`"120"`, `undefined`, `[object Obj
 | A4 | Stripping the leading `"Uncaught "` from nested error messages is acceptable UX | Pattern 4 | Cosmetic only (discretion item) |
 | A5 | Removing `ApiError::NotImplemented` is acceptable (nothing constructs it after this phase) | Code Examples | None functionally. Keeping it is also fine |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **D-07 fallback choice for Phase 4.**
+1. **D-07 fallback choice for Phase 4.** — RESOLVED (orchestrator, Recommended): if x86 CI crashes, move `unsafe_use_unprotected_platform` from `[dev-dependencies]` to `[dependencies]` (keeps deno_core's DenoPlatformImpl); this supersedes CONTEXT D-07's `new_unprotected_default_platform` fallback. Recorded for Phase 4.
    - What we know: `new_unprotected_default_platform()` would replace deno_core's private `DenoPlatformImpl` (foreground/delayed task routing) [VERIFIED: setup.rs:116-212]. The `unsafe_use_unprotected_platform` feature keeps it and only flips the `unprotected` flag.
    - Recommendation: if x86 CI crashes, move the feature from `[dev-dependencies]` to `[dependencies]`, not `new_unprotected_default_platform`. No Phase 3 action; record it for Phase 4.
-2. **How much of the built-in op surface to deny.**
+2. **How much of the built-in op surface to deny.** — RESOLVED (orchestrator, Recommended): Phase 3 disables `op_panic` only via `rs3_ext` op middleware, with a regression test; broader allowlist deferred to v2 JSHD hardening.
    - Recommendation: Phase 3 disables `op_panic` only (the one proven abort) and adds its regression test. A broader allowlist risks breaking bootstrap (core JS calls many ops). Revisit with JSHD-* hardening.
-3. **Nested error message format** (discretion): recommended strip-`Uncaught` mapping. The planner may choose to prefix the key (`op_rs3_patch <key>: ...`).
+3. **Nested error message format** (discretion) — RESOLVED (orchestrator, Recommended): strip the leading `Uncaught ` from nested errors before rethrowing; key prefix at the planner's discretion. recommended strip-`Uncaught` mapping. The planner may choose to prefix the key (`op_rs3_patch <key>: ...`).
 
 ## Environment Availability
 
