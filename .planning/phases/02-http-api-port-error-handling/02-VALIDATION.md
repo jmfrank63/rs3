@@ -43,7 +43,13 @@ Filled in by the planner and executor as tasks are created. The requirement → 
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 02-xx-xx | — | — | (see research map) | — | — | — | — | — | ⬜ pending |
+| 02-01-01 | 01 | 1 | ARCH-02, ARCH-03, ROBU-01, HTTP-02, HTTP-05, HTTP-08 | T-02-01, T-02-02, T-02-05 | One AppState, no global; missing key gives a JSON 404 instead of a panic; banner after bind | unit + live smoke | `cargo test --lib http::` + live smokes on 18460 (insert/get/404) and 18462 (bind failure, no banner) | ✅ (tests re-pointed; `get_missing_is_404_json` new) | ⬜ pending |
+| 02-01-02 | 01 | 1 | ROBU-01, HTTP-01, HTTP-03, HTTP-06, ARCH-02, TEST-01, TEST-02 | T-02-01, T-02-02 | PATCH 404/501; two apps share state; goldens; env-free, serial and 5x runs | unit (TDD) + live smoke | test-name list check + `cargo test --lib http::`; multi-worker smoke on 18461; `env -i` / `--test-threads=1` / 5x repeat | ❌ Wave 0 (8 new tests) | ⬜ pending |
+| 02-02-01 | 02 | 1 | ARCH-03, TEST-02 | T-02-07, T-02-08 | No env mutation; dotenv errors are config errors; never half-loaded | unit + live smoke | `cargo test --lib config::` (from_sources tests); env-only smoke on 18463; Phase 1 no-config smoke; human-check: malformed dotenv file | ❌ Wave 0 (4 new tests) | ⬜ pending |
+| 02-02-02 | 02 | 1 | TEST-02, ARCH-03 | T-02-09, T-02-11 | server.* allow-list; env wins, first wins in file; non-UTF-8 skipped; BOM pinned | unit (TDD) + live smoke | `cargo test --lib config::`; stray SERVER=x smoke on 18464; human-check: valid file and env override | ❌ Wave 0 (7 new tests) | ⬜ pending |
+| 02-03-01 | 03 | 2 | ROBU-02, HTTP-03, HTTP-08 | T-02-15, T-02-16 | Malformed, empty, deep or non-UTF-8 body gives 400 malformed_json; any content type accepted | unit + live smoke | test-name list check + `cargo test --lib`; smoke on 18465 | partial (`parse_rejects_malformed_json` rewritten; 10 new) | ⬜ pending |
+| 02-03-02 | 03 | 2 | ROBU-02, HTTP-03 | T-02-13, T-02-14, T-02-17 | 422 writes nothing; {} no-op; 413 oversize; insert_all; unwrap/expect denied outside tests | unit + static + live smoke | test-name list check + `cargo test --lib`; lint/clippy.toml gate + `cargo clippy --all-targets -- -D warnings`; smoke on 18466 | ❌ Wave 0 (10 new tests, clippy.toml) | ⬜ pending |
+| 02-03-03 | 03 | 2 | HTTP-04, TEST-01, TEST-02, HTTP-08 | T-02-12 | Escaped /list round-trips and cannot be forged; full phase gate | unit (TDD) + full gate + live smokes | test-name list check; TOOL-03 four commands; `env -i` / serial / 5x; combined static + ARCH-01 gate; smokes on 18467 (escaping) and 18468 (all-routes goldens) | ❌ Wave 0 (7 new tests; quirk test replaced) | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
