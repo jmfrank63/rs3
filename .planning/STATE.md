@@ -106,6 +106,8 @@ Recent decisions affecting current work:
 |-------|-------|--------|
 | 02 | verification_deferred_human | /gsd-verify-work 02 |
 
+Phase 01 (roadmap-complete): VERIFICATION.md reads `stale` because Phase 02 intentionally evolved files it covered (STORE bridge → injected AppState, `dotenv()` → `dotenv_iter()`, legacy codec). Re-verification of every stale earlier phase is scheduled once, against the final tree, immediately before the milestone audit (`/gsd-execute-phase N` resumes at the verification gates).
+
 Phase 02: all automated must-haves verified (18/18, 13/13 requirements). 4 human items are in `02-UAT.md`: three live dotenv-file binary checks (a project hook blocks agents from creating the file) and the no-suppression prohibition (Phase 4 CI grep will wire it). Per operator directive the autonomous run continues to Phase 3.
 
 ## Deferred Items
