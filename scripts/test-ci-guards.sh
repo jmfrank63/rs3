@@ -103,6 +103,26 @@ expect_fail b '#[ignore] on a test' \
   'printf "#[test]\n#[ignore]\nfn planted() {}\n" >> src/lib.rs'
 expect_fail b 'doc block fenced as ignore' \
   'printf "/// \x60\x60\x60ignore\n/// planted();\n/// \x60\x60\x60\nfn planted_doc() {}\n" >> src/lib.rs'
+expect_fail b '#[cfg_attr(not(feature = "never"), ignore)] on a test' \
+  'printf "#[test]\n#[cfg_attr(not(feature = \"never\"), ignore)]\nfn planted() {}\n" >> src/lib.rs'
+expect_fail b 'multi-line cfg_attr(..., ignore) on a test' \
+  'printf "#[test]\n#[cfg_attr(\n    not(feature = \"never\"),\n    ignore\n)]\nfn planted() {}\n" >> src/lib.rs'
+expect_fail b 'doc block fenced as ~~~ignore' \
+  'printf "/// ~~~ignore\n/// planted();\n/// ~~~\nfn planted_doc() {}\n" >> src/lib.rs'
+expect_fail b 'doc block fenced as ```rust ignore (space-separated)' \
+  'printf "/// \x60\x60\x60rust ignore\n/// planted();\n/// \x60\x60\x60\nfn planted_doc() {}\n" >> src/lib.rs'
+expect_fail b 'doc block fenced as ```rust,ignore' \
+  'printf "/// \x60\x60\x60rust,ignore\n/// planted();\n/// \x60\x60\x60\nfn planted_doc() {}\n" >> src/lib.rs'
+expect_fail b '#[cfg(any())] on a test module' \
+  'printf "#[cfg(any())]\nmod planted_tests {}\n" >> src/lib.rs'
+expect_fail b '[lib] test = false in Cargo.toml' \
+  'printf "\n[lib]\ntest = false\n" >> Cargo.toml' 'test = false'
+expect_fail b '[lib] doctest = false in Cargo.toml' \
+  'printf "\n[lib]\ndoctest = false\n" >> Cargo.toml' 'doctest = false'
+expect_fail b '[[test]] harness = false in Cargo.toml' \
+  'printf "\n[[test]]\nname = \"planted\"\npath = \"tests/planted.rs\"\nharness = false\n" >> Cargo.toml' 'harness = false'
+expect_fail b 'autotests = false in [package]' \
+  'sed -i "s/^edition = \"2024\"\$/edition = \"2024\"\nautotests = false/" Cargo.toml && grep -qx "autotests = false" Cargo.toml' 'autotests = false'
 
 # --- (c) lowered lint levels in Cargo.toml --------------------------------------------------
 expect_fail c 'unwrap_used = "warn"' \

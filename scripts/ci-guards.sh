@@ -79,10 +79,42 @@ grep_guard a "no #[allow]/#![allow]/#[expect]/cfg_attr(..allow..)" "lint-suppres
   ml_grep '#\s*!?\s*\[\s*(?:allow|expect)\s*\(|cfg_attr\s*\([^\]]*?\b(?:allow|expect)\s*\(' \
   "${rs_roots[@]}"
 
-# (b) no ignored tests. A source grep, never `cargo test` output: deno_core's extension!
-# macro generates a doctest that cargo test reports as `1 ignored`.
-grep_guard b "no #[ignore] / ignored doc blocks" "#[ignore] or ignored doc block found:" \
-  grep -RnE '#\[[[:space:]]*ignore|```[[:alnum:]_,]*ignore' "${rs_roots[@]}"
+# (b) no ignored or disabled tests. A source scan, never `cargo test` output: deno_core's
+# extension! macro generates a doctest that cargo test reports as `1 ignored`.
+# Source: #[ignore], cfg_attr(.., ignore), doc fences (``` or ~~~) whose lang string contains
+# ignore (rustdoc splits on commas and spaces), and #[cfg(any())] / #[cfg(FALSE)].
+# Cargo.toml: test/doctest/harness = false on a target, or autolib/autobins/autotests = false,
+# which silently drop whole test targets.
+b_errs=""
+b_src=$(ml_grep '#\s*\[\s*ignore\b|cfg_attr\s*\([^\]]*?\bignore\b|(?:```|~~~)[^\n`~]*\bignore\b|#\s*\[\s*cfg\s*\(\s*(?:any\s*\(\s*\)|FALSE\b)' \
+  "${rs_roots[@]}" 2>&1) && b_rc=0 || b_rc=$?
+case $b_rc in
+  0) b_errs+=$'\n'"ignored test or doc block found:"$'\n'"$b_src" ;;
+  1) ;;
+  *) b_errs+=$'\n'"ml_grep failed (exit $b_rc):"$'\n'"$b_src" ;;
+esac
+if ! b_toml=$(python3 - <<'PY' 2>&1
+import sys, tomllib
+with open("Cargo.toml", "rb") as f:
+    data = tomllib.load(f)
+errs = []
+for sect in ("lib", "bin", "test", "bench", "example"):
+    v = data.get(sect)
+    for t in [v] if isinstance(v, dict) else (v if isinstance(v, list) else []):
+        if not isinstance(t, dict):
+            continue
+        for k in ("test", "doctest", "harness"):
+            if t.get(k) is False:
+                errs.append(f"[{sect}] {t.get('name', '(unnamed)')}: {k} = false")
+for k in ("autolib", "autobins", "autotests"):
+    if data.get("package", {}).get(k) is False:
+        errs.append(f"[package] {k} = false")
+print("\n".join(errs))
+sys.exit(1 if errs else 0)
+PY
+); then b_errs+=$'\n'"Cargo.toml disables tests:"$'\n'"$b_toml"; fi
+if [[ -z $b_errs ]]; then pass b "no ignored tests / ignored doc blocks / disabled test targets"
+else fail b "${b_errs#$'\n'}"; fi
 
 # (c) Cargo.toml lint levels: unwrap_used/expect_used at deny (or forbid), nothing at allow
 # (string or `{ level = ... }` table form), parsed with tomllib rather than grepped.
