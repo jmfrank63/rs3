@@ -3,50 +3,51 @@ phase: 03
 review: 03-REVIEW.md
 titles: json
 findings:
-  - id: CR-01
-    severity: critical
-    disposition: open
-    title: "An exception while stringifying the completion value becomes 200 `\"\"` instead of 422"
   - id: WR-01
     severity: warning
-    disposition: open
-    title: "A host fault in a nested runtime turns into a catchable JS `Error` and a 422 whose body contains host details"
-  - id: WR-02
-    severity: warning
-    disposition: open
-    title: "Log forging is still possible through exception messages and `Deno.core.print(.., true)`"
-  - id: WR-03
-    severity: warning
-    disposition: open
-    title: "`full_queue_makes_callers_wait` does not test what its name says"
+    disposition: fixed
+    title: "One nested host fault is logged once per ancestor level, and each extra line blames a key whose runtime did not fail"
   - id: IN-01
     severity: info
     disposition: open
-    title: "The `.txt` payloads the REST walkthrough posts are separate, untested copies of the `.js` fixtures"
+    title: "The `faulted_before` attribution branch cannot be reached in production"
   - id: IN-02
     severity: info
     disposition: open
-    title: "The `catch_unwind` comment overstates what it protects"
+    title: "The migration table lists the post-fault refusal for `op_rs3_list` and `op_rs3_patch` only"
+  - id: CR-01
+    severity: critical
+    disposition: fixed
+    title: "An exception while stringifying the completion value becomes 200 `\"\"` instead of 422"
+  - id: WR-02
+    severity: warning
+    disposition: fixed
+    title: "After a host fault the script keeps running, and its later writes are committed even though the request answers 500"
+  - id: WR-03
+    severity: warning
+    disposition: fixed
+    title: "`full_queue_makes_callers_wait` does not test what its name says"
   - id: IN-03
     severity: info
     disposition: open
     title: "`stack_bytes` is not clamped, unlike `workers` and `queue_capacity`"
-open: 7
+open: 3
 total: 7
-recorded: 2026-10-20T20:34:23.692Z
+unparsed: 5
+recorded: 2026-10-20T21:03:15.182Z
 ---
 
 # Phase 03: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | - |
-| WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
-| WR-03 | warning | open | - |
+| WR-01 | warning | fixed | 03-REVIEW-FIX.md |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
-| IN-03 | info | open | - |
+| CR-01 | critical | fixed | 03-REVIEW-FIX.iter2.md (not in the current review) |
+| WR-02 | warning | fixed | 03-REVIEW-FIX.iter3.md (not in the current review) |
+| WR-03 | warning | fixed | 03-REVIEW-FIX.iter2.md (not in the current review) |
+| IN-03 | info | open | - (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
