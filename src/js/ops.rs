@@ -207,6 +207,37 @@ mod tests {
     }
 
     #[test]
+    fn nested_symbol_result_matches_js_string() {
+        let store = Store::new();
+        store.insert("inner".into(), "Symbol('x')".into());
+        assert_eq!(
+            run_js(&store, "'[' + Deno.core.ops.op_rs3_patch('inner') + ']'"),
+            ok("[Symbol(x)]")
+        );
+    }
+
+    #[test]
+    fn nested_stringify_exception_throws_into_caller() {
+        let store = Store::new();
+        store.insert(
+            "throws".into(),
+            "({ toString() { throw new Error('x') } })".into(),
+        );
+        store.insert("bare".into(), "Object.create(null)".into());
+        let src = "const g = (k) => { try { Deno.core.ops.op_rs3_patch(k); return 'no throw'; } \
+                   catch (e) { return (e instanceof Error) + ' ' + e.message; } }; \
+                   g('throws') + '|' + g('bare')";
+        let got = run_js(&store, src).expect("script result");
+        assert!(got.starts_with("true Error: x|true TypeError"), "{got}");
+        assert_eq!(
+            run_js(&store, "Deno.core.ops.op_rs3_patch('throws')"),
+            Err(ExecError::Script {
+                message: "Uncaught Error: Error: x".to_owned()
+            })
+        );
+    }
+
+    #[test]
     fn nested_patch_of_missing_key_throws() {
         let store = Store::new();
         let src = "try { Deno.core.ops.op_rs3_patch('ghost'); 'no throw' } \

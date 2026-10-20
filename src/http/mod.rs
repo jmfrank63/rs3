@@ -224,6 +224,29 @@ pub(crate) mod tests {
     }
 
     #[actix_web::test]
+    async fn test_patch_stringify_exception_is_422_js_error() {
+        let src = "({ toString() { throw new Error('x') } })";
+        let resp = patch_seeded(&[("t", src)], "t").await;
+        let body = assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_error").await;
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "js_error", "message": "Uncaught Error: x"})
+        );
+        let resp = patch_seeded(&[("n", "Object.create(null)")], "n").await;
+        let body = assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_error").await;
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(message.starts_with("Uncaught TypeError"), "{body}");
+    }
+
+    #[actix_web::test]
+    async fn test_patch_symbol_result_is_200() {
+        let resp = patch_seeded(&[("s", "Symbol('x')")], "s").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = atest::read_body(resp).await;
+        assert_eq!(body, web::Bytes::from_static(br#""Symbol(x)""#));
+    }
+
+    #[actix_web::test]
     async fn test_patch_syntax_error_is_422_js_error() {
         let resp = patch_seeded(&[("s", "let = ;")], "s").await;
         let body = assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_error").await;

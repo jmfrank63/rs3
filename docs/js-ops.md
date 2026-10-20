@@ -81,13 +81,20 @@ table is the migration path.
   | `({a:1})` | `"[object Object]"` |
   | `Promise.resolve(1)` | `"[object Promise]"` |
   | `null` | `"null"` |
+  | `Symbol('x')` | `"Symbol(x)"` |
   | an empty script | `"undefined"` |
+
+  Turning the completion value into a string can run the script's own code,
+  such as a `toString`, `valueOf` or `Symbol.toPrimitive` method. If that code
+  throws, or the value cannot be converted at all (for example
+  `Object.create(null)`), the script fails with a 422 as described below.
 
   Promises are not awaited and their `.then` callbacks never run. Return a
   plain value, or `JSON.stringify(..)` an object yourself. Awaiting promises is
   planned for v2 (APIV-02).
-- **Script error: 422.** A thrown exception, a syntax error or an uncaught op
-  error gives `{"error":"js_error","message":"Uncaught Error: boom"}`. The
+- **Script error: 422.** A thrown exception, a syntax error, an uncaught op
+  error or an exception while converting the completion value to a string
+  gives `{"error":"js_error","message":"Uncaught Error: boom"}`. The
   message is the JavaScript exception message. Other examples:
   `Uncaught SyntaxError: Unexpected token ';'`,
   `Uncaught ReferenceError: nope is not defined`, and `Uncaught plain` for
