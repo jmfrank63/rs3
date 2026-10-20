@@ -3,6 +3,16 @@
 # V8 platform path: target/release/rs3 is built without dev-dependency features.
 # Env: CI_SMOKE_ROOT (default: this script's parent directory), RS3_BIN (default
 # target/release/rs3), RS3_SMOKE_PORT (default: a free 127.0.0.1 port).
+#
+# Asserts, each with the exact status code and the exact body bytes:
+#   GET /                   -> 200 "Welcome to rs3"
+#   POST /insert m, boom    -> 200  (m = 6*20, boom = throw new Error("boom"))
+#   PATCH /key/m            -> 200 "120"  (stored script run in V8)
+#   PATCH /key/boom         -> 422 {"error":"js_error","message":"Uncaught Error: boom"}
+#   GET / after JS error    -> 200 "Welcome to rs3", and the server process is still alive
+# A server that dies during startup fails fast with its exit status. Status 139 (SIGSEGV)
+# at startup is the x86_64 PKU symptom of V8 platform init; the D-07 fallback handles it
+# (move unsafe_use_unprotected_platform to [dependencies] and relax guard (d) together).
 set -euo pipefail
 ROOT="${CI_SMOKE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT"
@@ -44,5 +54,34 @@ done
 (( ready )) || fail "server not ready on ${BASE} after 30s"
 [[ "$body" == '"Welcome to rs3"' ]] || fail "GET / body: ${body}"
 echo "ci-smoke: ok   GET / -> \"Welcome to rs3\""
+
+# req METHOD PATH [BODY]: one request; sets CODE (last output line) and BODY (the rest).
+req() {
+  local out
+  local -a data=()
+  if (( $# > 2 )); then data=(--data-binary "$3"); fi
+  out=$(curl -sS --max-time 30 -w $'\n%{http_code}' -X "$1" ${data[@]+"${data[@]}"} "$BASE$2") \
+    || fail "$1 $2: transport error"
+  CODE="${out##*$'\n'}"
+  BODY="${out%$'\n'*}"
+}
+
+req POST /insert '{"m":"6*20","boom":"throw new Error(\"boom\")"}'
+[[ "$CODE" == "200" ]] || fail "POST /insert -> ${CODE} ${BODY}"
+echo "ci-smoke: ok   POST /insert -> 200"
+
+req PATCH /key/m
+[[ "$CODE" == "200" && "$BODY" == '"120"' ]] || fail "PATCH /key/m -> ${CODE} ${BODY}"
+echo "ci-smoke: ok   PATCH /key/m -> 200 \"120\""
+
+req PATCH /key/boom
+[[ "$CODE" == "422" && "$BODY" == '{"error":"js_error","message":"Uncaught Error: boom"}' ]] \
+  || fail "PATCH /key/boom -> ${CODE} ${BODY}"
+echo "ci-smoke: ok   PATCH /key/boom -> 422 js_error"
+
+req GET /
+[[ "$CODE" == "200" && "$BODY" == '"Welcome to rs3"' ]] || fail "GET / after JS error -> ${CODE} ${BODY}"
+kill -0 "$PID" 2>/dev/null || fail "server died after JS error"
+echo "ci-smoke: ok   GET / after JS error -> 200, server alive"
 
 echo "ci-smoke: OK (${BIN}, port ${PORT})"
