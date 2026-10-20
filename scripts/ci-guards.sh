@@ -194,7 +194,9 @@ grep_guard f "no opSync / Deno.core.ops() / un-prefixed rs3_* ops" "legacy op sy
 # The content grep is the only workflow check when PyYAML is missing in CI, so it stands on
 # its own: case-insensitive (the config loader accepts SERVER.HOST in any case), and it
 # rejects working-directory, job-level or write permissions, checkout ref/repository,
-# trigger filters, and every `${{` except the one concurrency group line.
+# trigger filters (in block or flow style, keys optionally quoted), any YAML flow mapping
+# (`{ ... }`; ci.yml is block style, so a brace in a `run:` string fails too), and every
+# `${{` except the one concurrency group line.
 # PyYAML: in CI ($CI set) a missing PyYAML skips only the structure check, with a
 # printed skip line; locally the structure check is mandatory. Nothing is pip-installed.
 # Every layer runs, so forbidden content does not hide structure errors.
@@ -206,16 +208,36 @@ g_skip=""
 if [[ ${#wf[@]} -ne 1 || ${wf[0]:-} != .github/workflows/ci.yml ]]; then
   g_errs+=$'\n'"expected only .github/workflows/ci.yml, found: ${wf[*]:-none}"
 else
+  # Keys are matched in any key position, not only at the line start: after indentation, `{`,
+  # `[` or `,` (YAML flow collections), optionally quoted. A `write` value may be quoted too.
+  k='(^|[[:space:]{,[])["'\'']?'
+  q='["'\'']?'
   g_pat='continue-on-error|server\.|rustflags|cap-lints|working-directory|write-all'
-  g_pat+='|^[[:space:]]+permissions[[:space:]]*:|^[[:space:]]*[a-z-]+[[:space:]]*:[[:space:]]*write[[:space:]]*(#.*)?$'
-  g_pat+='|^[[:space:]]+(ref|repository)[[:space:]]*:'
-  g_pat+='|^[[:space:]]+(branches|branches-ignore|tags|tags-ignore|paths|paths-ignore|types)[[:space:]]*:'
+  g_pat+="|^[[:space:]]+${q}permissions${q}[[:space:]]*:"
+  g_pat+="|${k}[a-z-]+${q}[[:space:]]*:[[:space:]]*${q}write${q}([[:space:]]*[,}#]|[[:space:]]*\$)"
+  g_pat+="|${k}(ref|repository)${q}[[:space:]]*:"
+  g_pat+="|${k}(branches|branches-ignore|tags|tags-ignore|paths|paths-ignore|types)${q}[[:space:]]*:"
   hits=$(grep -inE "$g_pat" "${wf[@]}" 2>&1) && rc=0 || rc=$?
   case $rc in
     0) g_errs+=$'\n'"forbidden workflow content:"$'\n'"$hits" ;;
     1) ;;
     *) g_errs+=$'\n'"grep failed (exit $rc):"$'\n'"$hits" ;;
   esac
+  # No YAML flow mappings at all: ci.yml is block style throughout, and a flow mapping
+  # (`with: { ref: main }`, `permissions: { contents: write }`) is the easiest way to hide a
+  # key from line-oriented patterns. `${{ ... }}` expressions are stripped first; they are
+  # policed by the next check. Line numbers survive because sed works line by line.
+  # (sed runs on its own: in a pipe, grep's "no match" would mask a sed failure.)
+  if ! stripped=$(sed 's/\${{[^}]*}}//g' "${wf[@]}" 2>&1); then
+    g_errs+=$'\n'"sed failed:"$'\n'"$stripped"
+  else
+    hits=$(grep -n '[{}]' <<<"$stripped" 2>&1) && rc=0 || rc=$?
+    case $rc in
+      0) g_errs+=$'\n'"YAML flow mapping (or stray brace) in the workflow:"$'\n'"$hits" ;;
+      1) ;;
+      *) g_errs+=$'\n'"grep failed (exit $rc):"$'\n'"$hits" ;;
+    esac
+  fi
   hits=$(grep -nF '${{' "${wf[@]}" 2>&1) && rc=0 || rc=$?
   case $rc in
     0) if other=$(grep -vE '^[0-9]+:  group: ci-\$\{\{ github\.ref \}\}$' <<<"$hits"); then

@@ -335,6 +335,29 @@ expect_fail_ci g 'checkout with: ref: main' \
 expect_fail_ci g "pull_request paths-ignore: ['**']" \
   "sed -i \"s/^  pull_request:\\\$/  pull_request:\n    paths-ignore: ['**']/\" $WF && grep -q 'paths-ignore' $WF" \
   'forbidden workflow content'
+# Flow-style spellings of the same violations (each is also a flow mapping).
+expect_fail_ci g 'checkout with: { ref: main } (flow mapping)' \
+  "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with: { ref: main }|' $WF && grep -q '^        with: { ref: main }' $WF" \
+  'forbidden workflow content'
+expect_fail_ci g "pull_request: { paths-ignore: ['**'] } (flow mapping)" \
+  "sed -i \"s/^  pull_request:\\\$/  pull_request: { paths-ignore: ['**'] }/\" $WF && grep -q 'pull_request: { paths-ignore' $WF" \
+  'forbidden workflow content'
+expect_fail_ci g 'permissions: { contents: write } (flow mapping)' \
+  "sed -i '/^  contents: read\$/d; s/^permissions:\$/permissions: { contents: write }/' $WF && grep -q '^permissions: { contents: write }' $WF" \
+  'forbidden workflow content'
+expect_fail_ci g 'push: { branches: [main] } (flow mapping)' \
+  "sed -i 's/^  push:\$/  push: { branches: [main] }/' $WF && grep -q '^  push: { branches: \[main\] }' $WF" \
+  'forbidden workflow content'
+# Quoted keys and values in block style, and a flow mapping with no forbidden key.
+expect_fail_ci g 'checkout with: "ref": main (quoted key)' \
+  "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          \"ref\": main|' $WF && grep -q '^          \"ref\": main' $WF" \
+  'forbidden workflow content'
+expect_fail_ci g "top-level contents: 'write' (quoted value)" \
+  "sed -i \"s/^  contents: read\\\$/  contents: 'write'/\" $WF && grep -q \"^  contents: 'write'\" $WF" \
+  'forbidden workflow content'
+expect_fail_ci g 'rust-toolchain with: { components: rustfmt } (flow mapping, no forbidden key)' \
+  "sed -i '/^          components: rustfmt, clippy\$/d; s/^        uses: dtolnay\/rust-toolchain@1.99.1\$/&\n        with: { components: rustfmt }/' $WF && sed -i '/^        with:\$/d' $WF && grep -q 'with: { components: rustfmt }' $WF" \
+  'YAML flow mapping'
 
 expect_fail g 'ci.yml deleted (zero workflows)' \
   "rm $WF" 'found: none'
