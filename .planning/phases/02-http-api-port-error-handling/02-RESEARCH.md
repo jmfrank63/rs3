@@ -587,18 +587,18 @@ async fn assert_json_error(resp: ServiceResponse, status: StatusCode, code: &str
 | A3 | Accepting the BOM regression is acceptable to the operator (Linux-only target, loud failure) | Open Question 1 | If rejected, the planner must read the file manually (deviating from D-14's literal `dotenv_iter()`). |
 | A4 | Echoing the raw failing `.env` line to stderr is acceptable | Open Question 2 / Security | Possible leak of a secret value from `.env` into container logs. Low, since `.env` here holds only host and port. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **BOM-prefixed `.env` (behaviour change vs `dotenv()`)**
+1. **BOM-prefixed `.env` (behaviour change vs `dotenv()`)** — RESOLVED (orchestrator, Recommended): accept the startup failure, pinned by unit test `bom_prefixed_dotenv_is_error` (02-02); document it in the Phase 6 README.
    - What we know: `dotenv_iter()` gives no BOM stripping, and the failure is explicit at startup.
    - What's unclear: whether the operator wants parity.
    - Recommendation: accept and pin it with a unit test (`from_read_iter("\u{feff}SERVER.HOST=x\n")` → `Err` starting with `.env:`). Note it in the Phase 6 README "Behaviour changes". The alternative would be to locate the file manually (cwd → ancestors), read it to a `String`, strip `\u{feff}`, then `from_read_iter`. It is more code and deviates from D-14's wording.
 
-2. **Should `LineParse` details be redacted?**
+2. **Should `LineParse` details be redacted?** — RESOLVED (orchestrator, Recommended): no redaction; keep dotenvy's Display in the startup error (02-02).
    - What we know: `Display` includes the full raw line, possibly multiple lines for unbalanced quotes.
    - Recommendation: keep dotenvy's Display (best operator diagnostics, as D-15 asks for `<detail>`). This is a LOW risk. If redaction is wanted, match `dotenvy::Error::LineParse(_, idx)` (the enum is `#[non_exhaustive]`, so add a `_ =>` arm) and print only the index.
 
-3. **`AppState` location**: `src/state.rs` (recommended) vs `src/http/state.rs`. Either works. Decide in the plan, and keep `AppState` `pub` (re-exported as `rs3::AppState`) so `main` can build it.
+3. **`AppState` location** — RESOLVED (orchestrator, Recommended): `src/state.rs` at crate root (02-01). `src/state.rs` (recommended) vs `src/http/state.rs`. Either works. Decide in the plan, and keep `AppState` `pub` (re-exported as `rs3::AppState`) so `main` can build it.
 
 ## Environment Availability
 
