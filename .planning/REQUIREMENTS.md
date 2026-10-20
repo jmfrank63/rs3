@@ -24,7 +24,7 @@ Requirements for the modernization milestone. Each maps to roadmap phases.
 
 - [x] **ARCH-01**: Code is split into separate store, JS runtime, HTTP and config modules (`lib.rs` + thin `main.rs`, single package) with dependencies pointing one way (http → js → store)
 - [x] **ARCH-02**: The store is created once in `main` and injected into HTTP handlers (`web::Data`) and JS ops (`OpState`); there is no global map
-- [ ] **ARCH-03**: Config is loaded once at startup and injected; handlers do not re-read the environment per request
+- [x] **ARCH-03**: Config is loaded once at startup and injected; handlers do not re-read the environment per request
 - [x] **ARCH-04**: Startup errors (bad config, port bind failure) are reported and exit non-zero instead of panicking
 
 ### HTTP API
@@ -142,7 +142,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DEPS-04 | Phase 1 | Complete |
 | ARCH-01 | Phase 1 | Complete |
 | ARCH-02 | Phase 2 | Complete |
-| ARCH-03 | Phase 2 | Pending |
+| ARCH-03 | Phase 2 | Complete |
 | ARCH-04 | Phase 1 | Complete |
 | HTTP-01 | Phase 2 | Complete |
 | HTTP-02 | Phase 2 | Complete |

@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: HTTP API Port & Error Handling
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-10-20T18:19:02.687Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-10-20T18:26:33.974Z"
 last_activity: 2026-10-20
 last_activity_desc: Phase 02 execution started
-state_head: 1e548f751fac69e294bfc20f4bdc99c097888713
+state_head: 93c0895fac64d426dd496f024779f8b60675ebfb
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 6
-  completed_plans: 4
+  completed_plans: 5
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-20)
 ## Current Position
 
 Phase: 02 (HTTP API Port & Error Handling) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-10-20 — Phase 02 execution started
 
@@ -57,6 +57,7 @@ Progress: [██░░░░░░░░] 17%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 02 P01 | 5 min | 2 tasks | 6 files |
+| Phase 02 P02 | 5 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -74,10 +75,12 @@ Recent decisions affecting current work:
 - [Phase 1 UAT]: dotenv path verified by operator; rustup auto-install concurrency accepted as risk (override); v8x lock-entry disclosure accepted.
 - [Phase 02]: [02-01] AppState { store, Arc<Settings> } lives at crate root (src/state.rs), built once in main; http::configure(state) creates the single web::Data and returns a Clone closure cloned per worker
 - [Phase 02]: [02-01] ApiError (pub, in pub mod http::error) wraps StoreError via #[from]; exhaustive no-wildcard status/code match; error body {error, message} application/json
+- [Phase 02]: [02-02] Settings::load() reads dotenv via dotenvy::dotenv_iter() and env via std::env::vars_os(), never writes the environment; env wins, first duplicate wins in the file
+- [Phase 02]: [02-02] Missing dotenv ignored; any other dotenv error is 'error: invalid configuration: .env: <detail>' exit 1, never half-loaded; raw line kept (T-02-10)
+- [Phase 02]: [02-02] Only keys whose lowercased name starts with 'server.' enter the config map; BOM-prefixed .env is now a startup error (Phase 6 README must document)
 
 ### Pending Todos
 
-- [Phase 2]: Fix review WR-01 (malformed `.env` half-loaded, error swallowed) and WR-02 (dotenvy `set_var` under a safe API) — operator directive.
 - [Phase 4]: Add a CI grep check that fails on new `#[allow(..)]` / `#[cfg_attr(.., allow(..))]` suppression attributes — operator directive (01-UAT test 4).
 - [Phase 4]: Do NOT push; validate the workflow locally (actionlint/YAML lint) and record the remote x86_64 CI run as a pending human UAT item.
 
@@ -100,6 +103,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T18:19:02.611Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-10-20T18:26:33.900Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
