@@ -108,13 +108,39 @@ SNIP
 )
 
 # expect_fail_ci TAG LABEL SNIPPET [EXTRA]: expect_fail with CI=true and PyYAML hidden, so in
-# guard (g) only the content grep runs (the structure check is skipped), as on a CI runner
-# without PyYAML.
+# guard (g) only the stdlib canonical-lines check runs (the structure check is skipped), as
+# on a CI runner without PyYAML.
 expect_fail_ci() {
   local tag=$1 label=$2 snippet=$3
   shift 3
   local -a GUARD_ENV=(CI=true)
   expect_fail "$tag" "$label (CI, no PyYAML)" "$PY_SHIM"$'\n'"$snippet" "$@"
+}
+
+# expect_pass LABEL SNIPPET: plant SNIPPET in a fresh copy and require every guard to pass,
+# both locally (CI unset, PyYAML present) and in CI with PyYAML hidden. Two cases.
+expect_pass() {
+  local label=$1 snippet=$2 mode
+  for mode in local ci; do
+    cases=$((cases + 1))
+    fresh
+    if [[ $mode == ci ]]; then
+      (cd "$SCRATCH" && bash -c "$PY_SHIM") || { echo "MISSED pass: $label ($mode, shim failed)"; missed=$((missed + 1)); continue; }
+    fi
+    if ! (cd "$SCRATCH" && bash -c "$snippet"); then
+      echo "MISSED pass: $label ($mode, setup failed)"
+      missed=$((missed + 1))
+      continue
+    fi
+    if [[ $mode == ci ]]; then run_guards CI=true; else run_guards -u CI; fi
+    if [[ $RC -eq 0 && "$OUT" == *"ci-guards: all guards passed"* ]]; then
+      echo "ok pass: $label ($mode)"
+    else
+      echo "MISSED pass: $label ($mode, rc=$RC)"
+      printf '%s\n' "$OUT" | sed 's/^/    /'
+      missed=$((missed + 1))
+    fi
+  done
 }
 
 # --- control: an unmodified copy passes ---------------------------------------------------
@@ -307,10 +333,47 @@ expect_fail g 'checkout with: ref: main (through the guards)' \
   "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          ref: main|' $WF && grep -q '^          ref: main' $WF"
 
 
-# --- (g) content grep alone (CI without PyYAML) ---------------------------------------------
+# --- (g) canonical-lines allow-list alone (CI without PyYAML) -------------------------------
+# Every expect_fail_ci case runs with CI=true and PyYAML hidden, so only the stdlib
+# `check-workflow.py --lines` stands between the edit and a green guard (g).
+LINES='workflow lines differ from the canonical ci.yml'
+D05='continue-on-error / SERVER. is forbidden'
+# The gate-weakening edits the iteration-3 review reproduced against the old block-list grep.
+expect_fail_ci g 'if: false on the clippy step' \
+  "sed -i 's/^      - name: cargo clippy\$/      - name: cargo clippy\n        if: false/' $WF && grep -q '^        if: false' $WF" \
+  "$LINES"
+expect_fail_ci g 'clippy with -- -D warnings dropped' \
+  "sed -i 's/^        run: cargo clippy --all-targets --locked -- -D warnings\$/        run: cargo clippy --all-targets --locked/' $WF && grep -qx '        run: cargo clippy --all-targets --locked' $WF" \
+  "$LINES"
+expect_fail_ci g 'cargo test --locked || true' \
+  "sed -i 's/^        run: cargo test --locked\$/        run: cargo test --locked || true/' $WF && grep -q 'locked || true' $WF" \
+  "$LINES"
+expect_fail_ci g 'cargo test with a single-thread flag appended' \
+  "sed -i 's/^        run: cargo test --locked\$/        run: cargo test --locked -- --test-threads=1/' $WF && grep -q 'threads=1' $WF" \
+  "$LINES"
+expect_fail_ci g 'shell: sh on the fmt step' \
+  "sed -i 's/^      - name: cargo fmt --check\$/      - name: cargo fmt --check\n        shell: sh/' $WF && grep -q '^        shell: sh' $WF" \
+  "$LINES"
+expect_fail_ci g 'Release smoke step deleted' \
+  "sed -i '/^      - name: Release smoke\$/d; /^        run: bash scripts\/ci-smoke.sh\$/d' $WF && ! grep -q 'ci-smoke' $WF" \
+  "$LINES"
+expect_fail_ci g 'top-level permissions block deleted' \
+  "sed -i '/^permissions:\$/d; /^  contents: read\$/d' $WF && ! grep -q '^permissions' $WF" \
+  "$LINES"
+expect_fail_ci g 'checkout with: ? ref / : main (YAML explicit key)' \
+  "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          ? ref\n          : main|' $WF && grep -q '^          ? ref' $WF" \
+  "$LINES"
+expect_fail_ci g 'guards run line deleted' \
+  "sed -i '/run: bash scripts\/ci-guards.sh/d' $WF && ! grep -q 'run: bash scripts/ci-guards.sh' $WF" \
+  "$LINES"
+# D-05 (g) by name: continue-on-error and SERVER. (any case) on a functional line.
+expect_fail_ci g 'continue-on-error on the job' \
+  "sed -i 's/^    timeout-minutes: 45\$/    timeout-minutes: 45\n    continue-on-error: true/' $WF && grep -q '^    continue-on-error: true' $WF" \
+  "$D05"
 expect_fail_ci g 'lowercase server.host under the workflow env' \
   "sed -i 's/^  CARGO_TERM_COLOR: always\$/  CARGO_TERM_COLOR: always\n  server.host: 0.0.0.0/' $WF && grep -q '^  server.host' $WF" \
-  'forbidden workflow content'
+  "$D05"
+# Earlier block-list cases, kept as regressions for the allow-list.
 expect_fail_ci g 'run line echoes the github.head_ref expression' "$(cat <<'SNIP'
 cat >> .github/workflows/ci.yml <<'EOF'
 
@@ -318,52 +381,59 @@ cat >> .github/workflows/ci.yml <<'EOF'
         run: echo "${{ github.head_ref }}"
 EOF
 SNIP
-)" 'expression interpolation outside the concurrency group'
+)" "$LINES"
 expect_fail_ci g 'multi-line run block interpolates github.event after a tab' "$(cat <<'SNIP'
 printf '\n      - name: Echo title\n        run: |\n          echo "${{\tgithub.event.pull_request.title }}"\n' >> .github/workflows/ci.yml
 SNIP
-)" 'expression interpolation outside the concurrency group'
+)" 'non-printable or non-ASCII characters'
 expect_fail_ci g 'working-directory on the cargo test step' \
   "sed -i 's|^        run: cargo test --locked\$|        run: cargo test --locked\n        working-directory: experiments/hashring|' $WF && grep -q 'working-directory' $WF" \
-  'forbidden workflow content'
+  "$LINES"
 expect_fail_ci g 'job-level permissions: write-all' \
   "sed -i 's/^    timeout-minutes: 45\$/    timeout-minutes: 45\n    permissions: write-all/' $WF && grep -q 'permissions: write-all' $WF" \
-  'forbidden workflow content'
+  "$LINES"
 expect_fail_ci g 'top-level contents: write' \
   "sed -i 's/^  contents: read\$/  contents: write/' $WF && grep -q '^  contents: write' $WF" \
-  'forbidden workflow content'
+  "$LINES"
 expect_fail_ci g 'checkout with: ref: main' \
   "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          ref: main|' $WF && grep -q '^          ref: main' $WF" \
-  'forbidden workflow content'
+  "$LINES"
 expect_fail_ci g "pull_request paths-ignore: ['**']" \
   "sed -i \"s/^  pull_request:\\\$/  pull_request:\n    paths-ignore: ['**']/\" $WF && grep -q 'paths-ignore' $WF" \
-  'forbidden workflow content'
-# Flow-style spellings of the same violations (each is also a flow mapping).
+  "$LINES"
 expect_fail_ci g 'checkout with: { ref: main } (flow mapping)' \
   "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with: { ref: main }|' $WF && grep -q '^        with: { ref: main }' $WF" \
-  'forbidden workflow content'
+  "$LINES"
 expect_fail_ci g "pull_request: { paths-ignore: ['**'] } (flow mapping)" \
   "sed -i \"s/^  pull_request:\\\$/  pull_request: { paths-ignore: ['**'] }/\" $WF && grep -q 'pull_request: { paths-ignore' $WF" \
-  'forbidden workflow content'
+  "$LINES"
 expect_fail_ci g 'permissions: { contents: write } (flow mapping)' \
   "sed -i '/^  contents: read\$/d; s/^permissions:\$/permissions: { contents: write }/' $WF && grep -q '^permissions: { contents: write }' $WF" \
-  'forbidden workflow content'
+  "$LINES"
 expect_fail_ci g 'push: { branches: [main] } (flow mapping)' \
   "sed -i 's/^  push:\$/  push: { branches: [main] }/' $WF && grep -q '^  push: { branches: \[main\] }' $WF" \
-  'forbidden workflow content'
+  "$LINES"
 expect_fail_ci g 'constant concurrency group: ci' \
   "sed -i 's/^  group: ci-\${{ github\.ref }}\$/  group: ci/' $WF && grep -qx '  group: ci' $WF" \
-  'concurrency group line'
-# Quoted keys and values in block style, and a flow mapping with no forbidden key.
+  "$LINES"
 expect_fail_ci g 'checkout with: "ref": main (quoted key)' \
   "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          \"ref\": main|' $WF && grep -q '^          \"ref\": main' $WF" \
-  'forbidden workflow content'
+  "$LINES"
 expect_fail_ci g "top-level contents: 'write' (quoted value)" \
   "sed -i \"s/^  contents: read\\\$/  contents: 'write'/\" $WF && grep -q \"^  contents: 'write'\" $WF" \
-  'forbidden workflow content'
+  "$LINES"
 expect_fail_ci g 'rust-toolchain with: { components: rustfmt } (flow mapping, no forbidden key)' \
   "sed -i '/^          components: rustfmt, clippy\$/d; s/^        uses: dtolnay\/rust-toolchain@1.99.1\$/&\n        with: { components: rustfmt }/' $WF && sed -i '/^        with:\$/d' $WF && grep -q 'with: { components: rustfmt }' $WF" \
-  'YAML flow mapping'
+  "$LINES"
+
+# Comments and blank lines are free: plain English that the old block-list rejected passes.
+expect_pass 'comment lines mentioning the release server. and write access' \
+  "sed -i 's/^      - name: Release smoke\$/      # Starts the release server. Never needs write access or a working-directory.\n\n&/' $WF && grep -q 'release server\.' $WF"
+# CANONICAL is guarded too: the same gate-weakening edit made to ci.yml and to CANONICAL
+# passes --lines, but the structure check (mandatory outside CI) still fails it.
+expect_fail g 'if: false planted in ci.yml and in CANONICAL together' \
+  "sed -i 's/^      - name: cargo clippy\$/      - name: cargo clippy\n        if: false/' $WF && sed -i 's/^    \"      - name: cargo clippy\",\$/&\n    \"        if: false\",/' scripts/check-workflow.py && grep -q '^    \"        if: false\",' scripts/check-workflow.py && python3 scripts/check-workflow.py --lines" \
+  'step 5: if is forbidden'
 
 expect_fail g 'ci.yml deleted (zero workflows)' \
   "rm $WF" 'found: none'

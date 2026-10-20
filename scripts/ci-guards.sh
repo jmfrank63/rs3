@@ -189,17 +189,18 @@ grep_guard f "no opSync / Deno.core.ops() / un-prefixed rs3_* ops" "legacy op sy
   grep -RnE 'opSync|Deno\.core\.ops\(\)|(^|[^_[:alnum:]])rs3_(list|get|insert|delete|patch)([^_[:alnum:]]|$)' \
   requests src
 
-# (g) exactly one workflow; no error suppression, server env, lint-lowering flags, gate
-# redirection or expression interpolation in it; and its structure matches check-workflow.py.
-# The content grep is the only workflow check when PyYAML is missing in CI, so it stands on
-# its own: case-insensitive (the config loader accepts SERVER.HOST in any case), and it
-# rejects working-directory, job-level or write permissions, checkout ref/repository,
-# trigger filters (in block or flow style, keys optionally quoted), any YAML flow mapping
-# (`{ ... }`; ci.yml is block style, so a brace in a `run:` string fails too), and every
-# `${{` except the one concurrency group line.
-# PyYAML: in CI ($CI set) a missing PyYAML skips only the structure check, with a
-# printed skip line; locally the structure check is mandatory. Nothing is pip-installed.
-# Every layer runs, so forbidden content does not hide structure errors.
+# (g) exactly one workflow, and it is exactly the canonical ci.yml.
+# Allow-list, not block-list: `check-workflow.py --lines` (standard library only) requires
+# every non-blank, non-comment line of ci.yml to equal CANONICAL in scripts/check-workflow.py,
+# in order, and bans continue-on-error / SERVER. (any case) on those lines (D-05). So any
+# edit that weakens a gate (`if: false`, `|| true`, a dropped `-D warnings`, `shell:`, a
+# deleted step or permissions block, `with: ref:` in any YAML spelling, another `${{`) fails,
+# with or without PyYAML. Comments and blank lines are free.
+# EDITING ci.yml MEANS UPDATING CANONICAL IN THE SAME CHANGE.
+# `check-workflow.py --structure` (PyYAML) checks the policy on top, which also catches a
+# gate-weakening edit made to ci.yml and CANONICAL together. In CI ($CI set) a missing PyYAML
+# skips only that structure check, with a printed skip line; locally it is mandatory. Nothing
+# is pip-installed. Both checks always run, so one does not hide the other's errors.
 shopt -s nullglob
 wf=(.github/workflows/*.yml .github/workflows/*.yaml)
 shopt -u nullglob
@@ -208,47 +209,8 @@ g_skip=""
 if [[ ${#wf[@]} -ne 1 || ${wf[0]:-} != .github/workflows/ci.yml ]]; then
   g_errs+=$'\n'"expected only .github/workflows/ci.yml, found: ${wf[*]:-none}"
 else
-  # Keys are matched in any key position, not only at the line start: after indentation, `{`,
-  # `[` or `,` (YAML flow collections), optionally quoted. A `write` value may be quoted too.
-  k='(^|[[:space:]{,[])["'\'']?'
-  q='["'\'']?'
-  g_pat='continue-on-error|server\.|rustflags|cap-lints|working-directory|write-all'
-  g_pat+="|^[[:space:]]+${q}permissions${q}[[:space:]]*:"
-  g_pat+="|${k}[a-z-]+${q}[[:space:]]*:[[:space:]]*${q}write${q}([[:space:]]*[,}#]|[[:space:]]*\$)"
-  g_pat+="|${k}(ref|repository)${q}[[:space:]]*:"
-  g_pat+="|${k}(branches|branches-ignore|tags|tags-ignore|paths|paths-ignore|types)${q}[[:space:]]*:"
-  hits=$(grep -inE "$g_pat" "${wf[@]}" 2>&1) && rc=0 || rc=$?
-  case $rc in
-    0) g_errs+=$'\n'"forbidden workflow content:"$'\n'"$hits" ;;
-    1) ;;
-    *) g_errs+=$'\n'"grep failed (exit $rc):"$'\n'"$hits" ;;
-  esac
-  # No YAML flow mappings at all: ci.yml is block style throughout, and a flow mapping
-  # (`with: { ref: main }`, `permissions: { contents: write }`) is the easiest way to hide a
-  # key from line-oriented patterns. `${{ ... }}` expressions are stripped first; they are
-  # policed by the next check. Line numbers survive because sed works line by line.
-  # (sed runs on its own: in a pipe, grep's "no match" would mask a sed failure.)
-  if ! stripped=$(sed 's/\${{[^}]*}}//g' "${wf[@]}" 2>&1); then
-    g_errs+=$'\n'"sed failed:"$'\n'"$stripped"
-  else
-    hits=$(grep -n '[{}]' <<<"$stripped" 2>&1) && rc=0 || rc=$?
-    case $rc in
-      0) g_errs+=$'\n'"YAML flow mapping (or stray brace) in the workflow:"$'\n'"$hits" ;;
-      1) ;;
-      *) g_errs+=$'\n'"grep failed (exit $rc):"$'\n'"$hits" ;;
-    esac
-  fi
-  hits=$(grep -nF '${{' "${wf[@]}" 2>&1) && rc=0 || rc=$?
-  case $rc in
-    0) if other=$(grep -vE '^[0-9]+:  group: ci-\$\{\{ github\.ref \}\}$' <<<"$hits"); then
-         g_errs+=$'\n'"expression interpolation outside the concurrency group:"$'\n'"$other"
-       fi ;;
-    1) ;;
-    *) g_errs+=$'\n'"grep failed (exit $rc):"$'\n'"$hits" ;;
-  esac
-  # The concurrency group is per ref (D-03); a constant group cancels runs across refs.
-  if ! grep -qxF '  group: ci-${{ github.ref }}' "${wf[@]}"; then
-    g_errs+=$'\n'"concurrency group line '  group: ci-\${{ github.ref }}' missing"
+  if ! msg=$(python3 scripts/check-workflow.py --lines 2>&1); then
+    g_errs+=$'\n'"workflow lines:"$'\n'"$msg"
   fi
   if ! python3 -c 'import yaml' 2>/dev/null; then
     if [[ -n "${CI:-}" ]]; then
@@ -257,13 +219,13 @@ else
     else
       g_errs+=$'\n'"PyYAML is required locally for the workflow structure check (python3 -c 'import yaml' failed)"
     fi
-  elif ! msg=$(python3 scripts/check-workflow.py 2>&1); then
+  elif ! msg=$(python3 scripts/check-workflow.py --structure 2>&1); then
     g_errs+=$'\n'"workflow structure:"$'\n'"$msg"
   fi
 fi
 if [[ -n $g_errs ]]; then fail g "${g_errs#$'\n'}"
-elif [[ -n $g_skip ]]; then pass g "single ci.yml, no forbidden content$g_skip"
-else pass g "single ci.yml, no forbidden content, structure ok"; fi
+elif [[ -n $g_skip ]]; then pass g "single ci.yml, lines match the canonical list$g_skip"
+else pass g "single ci.yml, lines match the canonical list, structure ok"; fi
 
 # (h) no repo-level config that could lower lints (rustflags, cap-lints) or disable the
 # `cargo fmt --check` gate. The project uses rustfmt defaults, so any rustfmt.toml or

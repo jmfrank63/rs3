@@ -1,18 +1,81 @@
 #!/usr/bin/env python3
-"""Structural check of .github/workflows/ci.yml (D-08; no actionlint on this host).
+"""Checks of .github/workflows/ci.yml (D-08; no actionlint on this host).
 
-The workflow path is resolved from this script's location, so a copied tree
-(for example the planted-violation self-test under target/tmp) checks its own
-ci.yml. Run strings are matched exactly, which rejects an appended `|| true` or
-a thread-count flag. Depends only on the standard library and PyYAML.
-Prints one `check-workflow: <msg>` line per error to stderr; exits 0 or 1.
+Usage: check-workflow.py [--lines] [--structure]   (no argument: both checks)
+
+--lines      Standard library only. ci.yml must be printable ASCII, and its non-blank,
+             non-comment lines must equal CANONICAL below, in order: an allow-list of the
+             whole text, not a block-list. Any structural edit fails it: a new key (`if:`,
+             `shell:`, `env:`, `with: ref:`), a changed or suffixed run string (`|| true`,
+             a dropped `-D warnings`, a thread-count flag), a deleted step or permissions
+             block, explicit-key (`? ref`) or flow-style YAML, a second `${{` expression.
+             It also bans `continue-on-error` and `SERVER.` (any case) on those lines
+             (D-05 (g)). This is the only workflow check in CI when PyYAML is missing.
+--structure  Needs PyYAML. Parses the workflow and checks the policy: allow-listed keys,
+             exact action refs and run strings, triggers, permissions, concurrency. It also
+             guards CANONICAL: a gate-weakening edit made to ci.yml and CANONICAL together
+             passes --lines but still fails here (scripts/ci-guards.sh makes it mandatory
+             outside CI).
+
+EDITING ci.yml MEANS UPDATING CANONICAL IN THE SAME CHANGE (comments and blank lines are
+free; every other line is pinned). scripts/test-ci-guards.sh proves the current ci.yml
+passes both checks.
+
+The workflow path is resolved from this script's location, so a copied tree (for example
+the planted-violation self-test under target/tmp) checks its own ci.yml.
+Prints `check-workflow: <msg>` per error to stderr; exits 0 if every selected check passes.
 """
+import difflib
+import re
 import sys
 from pathlib import Path
 
-import yaml
-
 PATH = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
+# Every non-blank, non-comment line of ci.yml, exactly (trailing spaces aside), in order.
+# None opens a block scalar (`|`, `>`) or a quoted scalar, so every line that starts with
+# `#` really is a YAML comment and can be skipped safely.
+CANONICAL = [
+    "name: CI",
+    "on:",
+    "  push:",
+    "  pull_request:",
+    "  workflow_dispatch:",
+    "permissions:",
+    "  contents: read",
+    "concurrency:",
+    "  group: ci-${{ github.ref }}",
+    "  cancel-in-progress: true",
+    "env:",
+    "  CARGO_TERM_COLOR: always",
+    "jobs:",
+    "  ci:",
+    "    name: fmt, clippy, test, release smoke (x86_64)",
+    "    runs-on: ubuntu-26.04",
+    "    timeout-minutes: 45",
+    "    steps:",
+    "      - name: Checkout",
+    "        uses: actions/checkout@v7",
+    "      - name: Install Rust 1.99.1",
+    "        uses: dtolnay/rust-toolchain@1.99.1",
+    "        with:",
+    "          components: rustfmt, clippy",
+    "      - name: Cache cargo and target",
+    "        uses: Swatinem/rust-cache@v2",
+    "      - name: Repo guards",
+    "        run: bash scripts/ci-guards.sh",
+    "      - name: cargo fmt --check",
+    "        run: cargo fmt --check",
+    "      - name: cargo clippy",
+    "        run: cargo clippy --all-targets --locked -- -D warnings",
+    "      - name: cargo test",
+    "        run: cargo test --locked",
+    "      - name: cargo build --release",
+    "        run: cargo build --release --locked",
+    "      - name: Release smoke",
+    "        run: bash scripts/ci-smoke.sh",
+]
+# D-05 (g), on the functional lines (comments may say "server." in plain English).
+D05_BANNED = re.compile(r"continue-on-error|server\.", re.IGNORECASE)
 EXPECTED_USES = [
     "actions/checkout@v7",
     "dtolnay/rust-toolchain@1.99.1",
@@ -49,16 +112,39 @@ def unexpected(obj, allowed):
     return sorted(str(k) for k in set(obj) - allowed - set(FORBIDDEN_KEYS) - {"defaults"})
 
 
-def main() -> int:
+def lines_errors(text):
+    """--lines: printable ASCII only, and the functional lines equal CANONICAL exactly."""
+    errs = []
+    lines = text.split("\n")
+    # Only "\n" separates lines here, and nothing else may hide in a line: YAML and Python
+    # disagree on other line breaks (\x85,  , \x0c, ...), and a tab or CR is never needed.
+    bad = [n for n, line in enumerate(lines, 1) if any(not " " <= ch <= "~" for ch in line)]
+    if bad:
+        errs.append(f"non-printable or non-ASCII characters (tab, CR, ...) on lines {bad}")
+    got = [line.rstrip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+    for line in got:
+        if D05_BANNED.search(line):
+            errs.append(f"continue-on-error / SERVER. is forbidden in the workflow: {line.strip()!r}")
+    if got != CANONICAL:
+        diff = "\n".join(difflib.unified_diff(
+            CANONICAL, got, "CANONICAL (scripts/check-workflow.py)", str(PATH), lineterm="", n=1))
+        errs.append("workflow lines differ from the canonical ci.yml (non-blank, non-comment lines;"
+                    " editing ci.yml means updating CANONICAL in scripts/check-workflow.py):\n" + diff)
+    return errs
+
+
+def structure_errors(text):
+    """--structure: parse with PyYAML and check the policy."""
     try:
-        with open(PATH, encoding="utf-8") as f:
-            wf = yaml.safe_load(f)
-    except (OSError, yaml.YAMLError) as e:
-        print(f"check-workflow: cannot load {PATH}: {e}", file=sys.stderr)
-        return 1
+        import yaml
+    except ImportError as e:
+        return [f"PyYAML is required for --structure ({e}); --lines needs only the standard library"]
+    try:
+        wf = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        return [f"cannot parse {PATH}: {e}"]
     if not isinstance(wf, dict):
-        print(f"check-workflow: {PATH} is not a YAML mapping", file=sys.stderr)
-        return 1
+        return [f"{PATH} is not a YAML mapping"]
     errs = []
     if extra := unexpected(wf, WORKFLOW_KEYS):
         errs.append(f"workflow: unexpected keys {extra}")
@@ -144,10 +230,28 @@ def main() -> int:
         errs.append(f"run steps must be exactly {REQUIRED_RUNS}, got {runs}")
     if any("actions-rs/" in str(u) for u in uses):
         errs.append("actions-rs/* is forbidden")
+    return errs
+
+
+def main(argv) -> int:
+    modes = set(argv) or {"--lines", "--structure"}
+    if not modes <= {"--lines", "--structure"}:
+        print(f"check-workflow: usage: {Path(__file__).name} [--lines] [--structure]", file=sys.stderr)
+        return 2
+    try:
+        text = PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"check-workflow: cannot read {PATH}: {e}", file=sys.stderr)
+        return 1
+    errs = []
+    if "--lines" in modes:
+        errs += lines_errors(text)
+    if "--structure" in modes:
+        errs += structure_errors(text)
     for e in errs:
         print(f"check-workflow: {e}", file=sys.stderr)
     return 1 if errs else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

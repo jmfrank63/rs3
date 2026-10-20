@@ -1,3 +1,5 @@
+# Every non-blank, non-comment line here is pinned by CANONICAL in scripts/check-workflow.py
+# (guard (g) in scripts/ci-guards.sh). Update CANONICAL in the same change as any edit here.
 name: CI
 
 on:
