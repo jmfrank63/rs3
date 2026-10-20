@@ -2,6 +2,7 @@
 use actix_web::{HttpResponse, Responder, get, patch, web};
 
 use crate::state::AppState;
+use error::ApiError;
 
 pub mod error;
 pub mod kv;
@@ -37,12 +38,18 @@ pub async fn status(state: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(format!("{{'IP' : '{}'}}", state.settings.server.host))
 }
 
-/// `PATCH /key/{key}` answers 501 Not Implemented until the JavaScript runtime returns in Phase 3.
+/// `PATCH /key/{key}` answers a 404 JSON error for a missing key, and a 501
+/// `not_implemented` JSON error for an existing key until the JavaScript
+/// runtime returns in Phase 3.
 #[patch("/key/{key}")]
-pub async fn patch_key(_path: web::Path<String>) -> impl Responder {
-    HttpResponse::NotImplemented().json(serde_json::json!({
-        "error": "PATCH /key/{key} is not implemented yet; JavaScript execution returns in Phase 3"
-    }))
+pub async fn patch_key(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    state.store.get(&path.into_inner())?;
+    Err(ApiError::NotImplemented(
+        "PATCH /key/{key} runs the stored JavaScript from Phase 3".into(),
+    ))
 }
 
 #[cfg(test)]
