@@ -1,6 +1,6 @@
 //! The store ops scripts call as `Deno.core.ops.op_rs3_*`. They reach the
 //! injected `Store` only through `OpState`, never panic, and are free of
-//! actix_web.
+//! actix-web.
 use deno_core::{OpState, op2};
 use deno_error::JsErrorBox;
 

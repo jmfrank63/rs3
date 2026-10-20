@@ -1,5 +1,5 @@
 //! Runs one script on a fresh `JsRuntime` and stringifies its completion value.
-//! This module is free of actix_web.
+//! This module is free of actix-web.
 use deno_core::{JsRuntime, RuntimeOptions, v8};
 
 use super::ExecError;

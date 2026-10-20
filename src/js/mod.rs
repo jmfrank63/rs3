@@ -1,5 +1,5 @@
 //! The JavaScript runtime layer: the store ops, the script runner and the
-//! dedicated JS thread pool. This module is free of actix_web.
+//! dedicated JS thread pool. This module is free of actix-web.
 use deno_core::JsRuntime;
 
 pub mod ops;
