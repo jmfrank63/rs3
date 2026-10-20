@@ -1,10 +1,10 @@
 //! The store ops scripts call as `Deno.core.ops.op_rs3_*`. They reach the
 //! injected `Store` only through `OpState`, never panic, and are free of
 //! actix-web.
-use deno_core::{OpState, op2};
+use deno_core::{FromV8, OpState, op2, v8};
 use deno_error::JsErrorBox;
 
-use crate::store::{Store, StoreError};
+use crate::store::{Store, StoreError, legacy};
 
 /// Per-job context the ops read from `OpState`.
 #[derive(Clone, Debug)]
@@ -31,6 +31,36 @@ impl ExecCtx {
     }
 }
 
+/// A string op argument. Strings pass through unchanged. Other primitives are
+/// converted with JS `String(..)` semantics, so a missing argument reads
+/// `"undefined"` and `5` reads `"5"`. Objects and symbols throw a `TypeError`.
+///
+/// deno_core's plain string argument turns every non-string into an empty
+/// string, which would make `op_rs3_delete(5)` delete the key `""`. Objects are
+/// rejected rather than converted because converting one runs user `toString`
+/// code inside the op.
+struct StrArg(String);
+
+impl<'a> FromV8<'a> for StrArg {
+    type Error = JsErrorBox;
+
+    fn from_v8<'i>(
+        scope: &mut v8::PinScope<'a, 'i>,
+        value: v8::Local<'a, v8::Value>,
+    ) -> Result<Self, Self::Error> {
+        if value.is_object() || value.is_symbol() {
+            return Err(JsErrorBox::type_error(
+                "op argument must be a string or another primitive value",
+            ));
+        }
+        // Converting a non-symbol primitive cannot throw or run user code.
+        value
+            .to_string(scope)
+            .map(|s| StrArg(s.to_rust_string_lossy(scope)))
+            .ok_or_else(|| JsErrorBox::type_error("op argument cannot be converted to a string"))
+    }
+}
+
 /// Map a store error to a JS exception of a built-in class. A custom class name
 /// would throw `undefined` in bare deno_core, so only `Error` and `TypeError`
 /// are used.
@@ -42,12 +72,45 @@ fn to_js(e: StoreError) -> JsErrorBox {
     }
 }
 
+/// Returns the whole store as the `GET /list` text, `[{"k" : "v"},...]` sorted
+/// by key, or `[]` when empty. Extra arguments are ignored. Never throws.
+#[op2]
+#[string]
+fn op_rs3_list(state: &mut OpState) -> String {
+    legacy::format_list(&state.borrow::<ExecCtx>().store.list())
+}
+
 /// Returns the value stored under `key`. Throws `Error: key not found: <key>`
 /// when the key is missing.
 #[op2]
 #[string]
-fn op_rs3_get(state: &mut OpState, #[string] key: String) -> Result<String, JsErrorBox> {
-    state.borrow::<ExecCtx>().store.get(&key).map_err(to_js)
+fn op_rs3_get(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
+    state.borrow::<ExecCtx>().store.get(&key.0).map_err(to_js)
+}
+
+/// Stores every pair of a JSON object of strings and returns the compact echo
+/// `{"k":"v"}`. Throws `TypeError: malformed JSON: ..` or
+/// `TypeError: invalid input: ..` and writes nothing when the body is rejected.
+#[op2]
+#[string]
+fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, JsErrorBox> {
+    // Validate the whole body before the first write.
+    let entries = legacy::parse_insert_body(&body.0).map_err(to_js)?;
+    let echo = legacy::format_insert_echo(&entries);
+    state.borrow::<ExecCtx>().store.insert_all(entries);
+    Ok(echo)
+}
+
+/// Removes `key` and returns the value it held. Throws
+/// `Error: key not found: <key>` when the key is missing.
+#[op2]
+#[string]
+fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
+    state
+        .borrow::<ExecCtx>()
+        .store
+        .remove(&key.0)
+        .map_err(to_js)
 }
 
 /// Runs the script stored under `key` in a fresh nested runtime on the same
@@ -62,7 +125,8 @@ fn op_rs3_get(state: &mut OpState, #[string] key: String) -> Result<String, JsEr
 // item and is never tested here.
 #[op2(reentrant)]
 #[string]
-fn op_rs3_patch(state: &mut OpState, #[string] key: String) -> Result<String, JsErrorBox> {
+fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
+    let StrArg(key) = key;
     // Clone the context out so no OpState borrow is held across the nested run.
     let ctx = state.borrow::<ExecCtx>().clone();
     let source = ctx.store.get(&key).map_err(to_js)?;
@@ -79,7 +143,7 @@ fn op_rs3_patch(state: &mut OpState, #[string] key: String) -> Result<String, Js
 
 deno_core::extension!(
     rs3_ext,
-    ops = [op_rs3_get, op_rs3_patch],
+    ops = [op_rs3_list, op_rs3_get, op_rs3_insert, op_rs3_delete, op_rs3_patch],
     options = { ctx: ExecCtx },
     // op_panic is a deno_core built-in that panics inside an op, which aborts
     // the whole process. Disabled ops throw a catchable "op is disabled".
@@ -228,6 +292,35 @@ mod tests {
             ),
             ok("u|five")
         );
+    }
+
+    #[test]
+    fn numeric_key_never_aliases_the_empty_key() {
+        let store = Store::new();
+        store.insert("".into(), "empty".into());
+        store.insert("5".into(), "five".into());
+        assert_eq!(run_js(&store, "Deno.core.ops.op_rs3_delete(5)"), ok("five"));
+        assert_eq!(store.get(""), Ok("empty".to_owned()));
+        assert!(store.get("5").is_err());
+    }
+
+    #[test]
+    fn object_and_symbol_arguments_throw_type_error() {
+        let store = Store::new();
+        store.insert("k".into(), "v".into());
+        let src = "const g = (f) => { try { f(); return 'no throw'; } \
+                   catch (e) { return e.name + ': ' + e.message; } }; \
+                   let ran = false; \
+                   const o = { toString() { ran = true; return 'k'; } }; \
+                   [g(() => Deno.core.ops.op_rs3_get(o)), \
+                    g(() => Deno.core.ops.op_rs3_delete(Symbol('k'))), \
+                    'toString ran: ' + ran].join('|')";
+        let msg = "TypeError: op argument must be a string or another primitive value";
+        assert_eq!(
+            run_js(&store, src),
+            Ok(format!("{msg}|{msg}|toString ran: false"))
+        );
+        assert_eq!(store.get("k"), Ok("v".to_owned()));
     }
 
     #[test]
