@@ -28,7 +28,9 @@ use serde_json::{Map, Value};
 ///
 /// When valid JSON grammar has more than one such problem, the first one in body
 /// order decides. With duplicate keys the last occurrence wins (serde_json map
-/// semantics), so only that value is checked.
+/// semantics), so only the last value must be a string. An earlier occurrence
+/// that cannot be parsed or represented at all (`{"a":1e400,"a":"1"}`) still
+/// rejects the whole body.
 pub fn parse_insert_body(body: &str) -> Result<Vec<(String, String)>, StoreError> {
     // Pass 1: syntax only. `IgnoredAny` scans numbers without converting them and
     // has no recursion limit, so only real syntax, EOF or I/O errors fail here.
@@ -376,6 +378,24 @@ mod tests {
                 other => panic!("expected InvalidInput, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn parse_duplicate_key_checks_only_last_value_type() {
+        assert_eq!(
+            parse_insert_body(r#"{"a":1,"a":"2"}"#),
+            Ok(vec![("a".to_owned(), "2".to_owned())])
+        );
+        assert!(is_invalid_input(parse_insert_body(r#"{"a":"1","a":2}"#)));
+    }
+
+    #[test]
+    fn parse_duplicate_key_unrepresentable_earlier_value_is_rejected() {
+        match parse_insert_body(r#"{"a":1e400,"a":"1"}"#) {
+            Err(StoreError::InvalidInput(m)) => assert!(m.contains("key a"), "message: {m}"),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert!(is_malformed(parse_insert_body(r#"{"a":"\ud800","a":"1"}"#)));
     }
 
     #[test]
