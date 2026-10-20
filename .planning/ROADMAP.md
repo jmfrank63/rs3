@@ -100,7 +100,19 @@ Plans:
   4. JS runs on dedicated JS threads, not actix worker threads, with the V8 platform initialised once in `main` before any other thread spawns, and the full suite passes under default parallel `cargo test`
   5. Every JS artefact (`requests/*.js`, `requests/*.txt`, `requests/*.http`, `src/example.js`, test scripts) uses `Deno.core.ops.op_rs3_*(...)` with no `Deno.core.ops();` or `opSync` calls left, and the old `rs3_*` to new `op_rs3_*` mapping (including "a missing key throws") is documented
 
-**Plans**: TBD
+**Plans:** 3 plans
+
+Plans:
+**Wave 1**
+- [ ] 03-01-PLAN.md: JS engine slice (wave 1). Spike first: in-repo failing tests for a nested JsRuntime inside the reentrant op_rs3_patch and for the op_panic guard, then made green. The five #[op2] ops sit in one extension! with per-job ExecCtx, run_script uses try_new and scope!, and a bounded rs3-js thread pool runs jobs under catch_unwind. The unprotected platform is dev-only, and tokio is the one new lockfile line
+- [ ] 03-02-PLAN.md: Samples and migration guide (wave 1, parallel). Every requests/* artefact and src/example.js moves to Deno.core.ops.op_rs3_*, with behaviour checked under a node stub. docs/js-ops.md gives the old-to-new mapping, error rules, PATCH stringification and the Phase 5 limits
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 03-03-PLAN.md: PATCH over HTTP (wave 2). main starts the pool after init_platform, AppState gains js, and patch_key awaits the pool. Script errors answer 422 js_error and host faults 500 internal (IN-01). The parked PATCH tests return, fac/sum/bin/store run as fixtures, PATCH of op_rs3_list equals GET /list, and all seven routes have success tests. Also IN-04/IN-05 and the full phase gate with live smokes
+
+**Cross-cutting constraints:**
+- cargo build --locked, cargo test, cargo clippy --all-targets -- -D warnings and cargo fmt --check all exit 0 at the end of every plan (TOOL-03). No lint-suppression attributes, and no self-patching script in any test or smoke (that is the Phase 5 depth limit's job).
+
 **Notes**: This is the highest-risk phase. Spike these early:
 - a nested `JsRuntime` inside a `#[op2(reentrant)]` `op_rs3_patch`
 - the test-side platform strategy (the `unsafe_use_unprotected_platform` feature, enabled only as a dev-dependency)
@@ -161,7 +173,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 |-------|----------------|--------|-----------|
 | 1. Toolchain, Dependencies & Foundation | 3/3 | Complete    | 2026-10-20 |
 | 2. HTTP API Port & Error Handling | 3/3 | In Progress | - |
-| 3. JavaScript Runtime Port | 0/TBD | Not started | - |
+| 3. JavaScript Runtime Port | 0/3 | Not started | - |
 | 4. CI Gate on x86_64 | 0/TBD | Not started | - |
 | 5. JS Execution Limits | 0/TBD | Not started | - |
 | 6. Docker Image & Documentation | 0/TBD | Not started | - |
