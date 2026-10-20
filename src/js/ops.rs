@@ -1,6 +1,7 @@
 //! The store ops scripts call as `Deno.core.ops.op_rs3_*`. They reach the
 //! injected `Store` only through `OpState`, never panic, and are free of
-//! actix-web.
+//! actix-web. Once any level of a job has hit a host fault, every op of that
+//! job throws `Error: internal error` instead of touching the store.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -109,12 +110,31 @@ fn to_js(e: StoreError) -> JsErrorBox {
     }
 }
 
+/// The error thrown into a script for a host fault. It carries no host details.
+fn internal_error() -> JsErrorBox {
+    JsErrorBox::generic("internal error")
+}
+
+/// The job context, or `Error: internal error` once any level of this job has
+/// hit a host fault. The request already answers 500 at that point, so no op
+/// may read or change the store any more: writes made before the fault stay,
+/// writes after it are refused.
+fn live_ctx(state: &OpState) -> Result<&ExecCtx, JsErrorBox> {
+    let ctx = state.borrow::<ExecCtx>();
+    if ctx.host_fault() {
+        Err(internal_error())
+    } else {
+        Ok(ctx)
+    }
+}
+
 /// Returns the whole store as the `GET /list` text, `[{"k" : "v"},...]` sorted
-/// by key, or `[]` when empty. Extra arguments are ignored. Never throws.
+/// by key, or `[]` when empty. Extra arguments are ignored. Throws only after
+/// a host fault in the same job.
 #[op2]
 #[string]
-fn op_rs3_list(state: &mut OpState) -> String {
-    legacy::format_list(&state.borrow::<ExecCtx>().store.list())
+fn op_rs3_list(state: &mut OpState) -> Result<String, JsErrorBox> {
+    Ok(legacy::format_list(&live_ctx(state)?.store.list()))
 }
 
 /// Returns the value stored under `key`. Throws `Error: key not found: <key>`
@@ -122,7 +142,7 @@ fn op_rs3_list(state: &mut OpState) -> String {
 #[op2]
 #[string]
 fn op_rs3_get(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
-    state.borrow::<ExecCtx>().store.get(&key.0).map_err(to_js)
+    live_ctx(state)?.store.get(&key.0).map_err(to_js)
 }
 
 /// Stores every pair of a JSON object of strings and returns the compact echo
@@ -131,10 +151,11 @@ fn op_rs3_get(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsEr
 #[op2]
 #[string]
 fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, JsErrorBox> {
+    let ctx = live_ctx(state)?;
     // Validate the whole body before the first write.
     let entries = legacy::parse_insert_body(&body.0).map_err(to_js)?;
     let echo = legacy::format_insert_echo(&entries);
-    state.borrow::<ExecCtx>().store.insert_all(entries);
+    ctx.store.insert_all(entries);
     Ok(echo)
 }
 
@@ -143,11 +164,7 @@ fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, 
 #[op2]
 #[string]
 fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
-    state
-        .borrow::<ExecCtx>()
-        .store
-        .remove(&key.0)
-        .map_err(to_js)
+    live_ctx(state)?.store.remove(&key.0).map_err(to_js)
 }
 
 /// Runs the script stored under `key` in a fresh nested runtime on the same
@@ -157,7 +174,8 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 /// nested script fails. A host fault in the nested runtime (such as a runtime
 /// creation failure) is logged, recorded in the job context and thrown as a
 /// plain `Error: internal error`; the top-level run then answers
-/// `ExecError::Internal` even if the script caught it.
+/// `ExecError::Internal` even if the script caught it, and every later op of
+/// the job throws the same error.
 //
 // `reentrant` is mandatory: the nested runtime calls ops while this op is on
 // the stack, and debug builds abort without the flag. The depth is carried for
@@ -168,7 +186,7 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
     let StrArg(key) = key;
     // Clone the context out so no OpState borrow is held across the nested run.
-    let ctx = state.borrow::<ExecCtx>().clone();
+    let ctx = live_ctx(state)?.clone();
     let source = ctx.store.get(&key).map_err(to_js)?;
     super::runtime::run_script(ctx.nested(), &key, source).map_err(|e| match e {
         super::ExecError::Script { message } => JsErrorBox::generic(
@@ -185,7 +203,7 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
                 other.to_string()
             );
             ctx.note_host_fault();
-            JsErrorBox::generic("internal error")
+            internal_error()
         }
     })
 }
@@ -343,15 +361,44 @@ mod tests {
     }
 
     #[test]
-    fn caught_nested_runtime_failure_is_still_internal_and_hides_details() {
+    fn caught_nested_runtime_failure_is_still_internal_and_refuses_later_writes() {
         let store = Store::new();
         store.insert("inner".into(), "1".into());
-        let src = "try { Deno.core.ops.op_rs3_patch('inner'); 'no throw' } \
-                   catch (e) { Deno.core.ops.op_rs3_insert(JSON.stringify({seen: e.message})); \
-                   'caught' }";
+        store.insert("keep".into(), "k".into());
+        let src = "Deno.core.ops.op_rs3_insert(JSON.stringify({before: '1'})); \
+                   try { Deno.core.ops.op_rs3_patch('inner'); 'no throw' } \
+                   catch (e) { \
+                     try { Deno.core.ops.op_rs3_insert(JSON.stringify({after: e.message})) } \
+                     catch (e2) {} \
+                     try { Deno.core.ops.op_rs3_delete('keep') } catch (e2) {} \
+                     'caught' }";
         let r = run_ctx(failing_at(&store, 1), src);
         assert!(is_internal(&r), "{r:?}");
-        assert_eq!(store.get("seen"), Ok("internal error".to_owned()));
+        // No transactions: the write before the fault stays.
+        assert_eq!(store.get("before"), Ok("1".to_owned()));
+        assert!(store.get("after").is_err());
+        assert_eq!(store.get("keep"), Ok("k".to_owned()));
+    }
+
+    #[test]
+    fn every_op_throws_internal_error_once_the_job_faulted() {
+        let store = Store::new();
+        store.insert("k".into(), "v".into());
+        store.insert("inner".into(), "1".into());
+        let ctx = ExecCtx::new(store.clone());
+        ctx.note_host_fault();
+        // The fault predates this run, so its completion value comes back.
+        let src = r#"const g = (f) => { try { f(); return 'no throw'; }
+                       catch (e) { return e.name + ': ' + e.message; } };
+                     [g(() => Deno.core.ops.op_rs3_list()),
+                      g(() => Deno.core.ops.op_rs3_get('k')),
+                      g(() => Deno.core.ops.op_rs3_insert('{"w":"1"}')),
+                      g(() => Deno.core.ops.op_rs3_delete('k')),
+                      g(() => Deno.core.ops.op_rs3_patch('inner'))].join('|')"#;
+        let refused = ["Error: internal error"; 5].join("|");
+        assert_eq!(run_ctx(ctx, src), Ok(refused));
+        assert_eq!(store.get("k"), Ok("v".to_owned()));
+        assert!(store.get("w").is_err());
     }
 
     #[test]
@@ -362,17 +409,24 @@ mod tests {
     }
 
     #[test]
-    fn healthy_patch_after_a_caught_fault_keeps_its_result() {
+    fn patch_after_a_caught_fault_is_refused_without_running() {
         let store = Store::new();
         store.insert("bad".into(), "1".into());
-        store.insert("good".into(), "'fine'".into());
+        store.insert(
+            "good".into(),
+            r#"Deno.core.ops.op_rs3_insert('{"good_ran":"1"}')"#.into(),
+        );
         let src = "try { Deno.core.ops.op_rs3_patch('bad') } catch (e) {} \
-                   let r; try { r = Deno.core.ops.op_rs3_patch('good') } \
-                   catch (e) { r = 'threw: ' + e.message } \
-                   Deno.core.ops.op_rs3_insert(JSON.stringify({good_result: r}))";
+                   Deno.core.ops.op_rs3_patch('good')";
         let r = run_ctx(failing_for(&store, "bad"), src);
         assert!(is_internal(&r), "{r:?}");
-        assert_eq!(store.get("good_result"), Ok("fine".to_owned()));
+        assert!(store.get("good_ran").is_err());
+        // The same chain without the injected failure runs `good`.
+        assert_eq!(
+            run_ctx(ExecCtx::new(store.clone()), src),
+            ok(r#"{"good_ran":"1"}"#)
+        );
+        assert_eq!(store.get("good_ran"), Ok("1".to_owned()));
     }
 
     #[test]

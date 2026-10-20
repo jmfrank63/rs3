@@ -7,7 +7,8 @@ the five ops are `op_rs3_list`, `op_rs3_get`, `op_rs3_insert`, `op_rs3_delete`
 and `op_rs3_patch`.
 
 Every op takes and returns strings. Errors are ordinary JavaScript exceptions
-that a script can catch with `try`/`catch`.
+that a script can catch with `try`/`catch`. After a nested host fault, every op
+throws `Error: internal error` for the rest of the PATCH (see Errors).
 
 ## Migrating from the legacy API
 
@@ -18,11 +19,11 @@ Neither exists any more. Rewrite old scripts with this table:
 | Old call | New call | Argument | Returns | Throws when |
 |----------|----------|----------|---------|-------------|
 | `Deno.core.ops();` | delete the statement | none | none | calling it now throws `TypeError: Deno.core.ops is not a function`, because `Deno.core.ops` is a plain object |
-| `Deno.core.opSync("rs3_list", "")` | `Deno.core.ops.op_rs3_list()` | none; extra arguments are ignored | the inner `GET /list` text, such as `[{"k" : "v"}]`, sorted by key in byte order; `[]` when the store is empty | never |
+| `Deno.core.opSync("rs3_list", "")` | `Deno.core.ops.op_rs3_list()` | none; extra arguments are ignored | the inner `GET /list` text, such as `[{"k" : "v"}]`, sorted by key in byte order; `[]` when the store is empty | only after a nested host fault (see Errors) |
 | `Deno.core.opSync("rs3_get", key)` | `Deno.core.ops.op_rs3_get(key)` | the key, coerced to a string | the value | the key is missing: `Error` with message `key not found: <key>` (legacy: the server panicked) |
 | `Deno.core.opSync("rs3_insert", json)` | `Deno.core.ops.op_rs3_insert(json)` | a JSON object whose values are all strings, passed as a string | the compact echo, such as `{"k":"v"}` | malformed JSON: `TypeError` whose message starts with `malformed JSON:`; wrong shape: `TypeError` whose message starts with `invalid input:`; nothing is written on error |
 | `Deno.core.opSync("rs3_delete", key)` | `Deno.core.ops.op_rs3_delete(key)` | the key | the value the key held | the key is missing: `Error` with message `key not found: <key>` |
-| `Deno.core.opSync("rs3_patch", key)` | `Deno.core.ops.op_rs3_patch(key)` | the key | `String(completion value)` of that key's script, run in a fresh nested runtime | the key is missing; the nested script fails, rethrown as `Error` with the nested message minus its leading `Uncaught `; the nested runtime hits a host fault, thrown as `Error: internal error`, and the whole PATCH then answers 500 even if the script catches it |
+| `Deno.core.opSync("rs3_patch", key)` | `Deno.core.ops.op_rs3_patch(key)` | the key | `String(completion value)` of that key's script, run in a fresh nested runtime | the key is missing; the nested script fails, rethrown as `Error` with the nested message minus its leading `Uncaught `; the nested runtime hits a host fault, thrown as `Error: internal error`; the whole PATCH then answers 500 even if the script catches it, and every later op throws the same error |
 
 The legacy `Deno.core.opSync` function no longer exists either, and calling it
 throws a `TypeError`. The old example script also called an op named `op_list`
@@ -69,8 +70,12 @@ table is the migration path.
   because it cannot be created, that is a server fault, not a script error.
   The caller sees an `Error` with the fixed message `internal error` and no
   host details. Catching it does not help: once any nested level has hit a
-  host fault, the whole PATCH answers 500 (see PATCH results). Store writes
-  the script made before that stay.
+  host fault, the whole PATCH answers 500 (see PATCH results). From then on,
+  every op the script calls (`op_rs3_list`, `op_rs3_get`, `op_rs3_insert`,
+  `op_rs3_delete` and `op_rs3_patch`) throws the same `Error: internal error`
+  without touching the store, so the script cannot make further writes after
+  the request has failed. There are no transactions: store writes the script
+  made before the fault stay.
 
 ## PATCH results
 
@@ -109,8 +114,9 @@ table is the migration path.
 - **Host fault: 500.** If the JS executor is unavailable or a runtime cannot be
   created, the answer is `{"error":"internal","message":"internal error"}`.
   This includes a nested runtime started by `op_rs3_patch` at any depth, even
-  when the script caught the error the op threw. The details go to the server
-  log only.
+  when the script caught the error the op threw. Writes made before the fault
+  stay; ops called after it are refused. The details go to the server log
+  only.
 - **Missing key: 404.** PATCH of a key that does not exist answers
   `{"error":"not_found","message":"key not found: <key>"}` without running
   anything.
