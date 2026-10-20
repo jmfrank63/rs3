@@ -179,4 +179,83 @@ mod tests {
         assert_eq!(state.store.get("idem_test"), Ok("v".to_owned()));
         assert_eq!(state.store.len(), 1);
     }
+
+    #[actix_web::test]
+    async fn get_on_empty_store_is_404_json() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp =
+            atest::call_service(&app, atest::TestRequest::get().uri("/key/any").to_request()).await;
+        let body =
+            crate::http::tests::assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+        assert_ne!(body, serde_json::Value::from("[]"));
+    }
+
+    #[actix_web::test]
+    async fn get_missing_twice_is_404_and_creates_nothing() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        for _ in 0..2 {
+            let resp = atest::call_service(
+                &app,
+                atest::TestRequest::get().uri("/key/ghost").to_request(),
+            )
+            .await;
+            crate::http::tests::assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+        }
+        assert_eq!(state.store.len(), 0);
+    }
+
+    #[actix_web::test]
+    async fn delete_missing_is_404_json() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp = atest::call_service(
+            &app,
+            atest::TestRequest::delete().uri("/key/nope").to_request(),
+        )
+        .await;
+        crate::http::tests::assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+    }
+
+    #[actix_web::test]
+    async fn delete_twice_is_200_then_404() {
+        let state = test_state();
+        state.store.insert("d".into(), "v".into());
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let first = atest::call_service(
+            &app,
+            atest::TestRequest::delete().uri("/key/d").to_request(),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(first).await,
+            web::Bytes::from_static(br#""v""#)
+        );
+        let second = atest::call_service(
+            &app,
+            atest::TestRequest::delete().uri("/key/d").to_request(),
+        )
+        .await;
+        crate::http::tests::assert_json_error(second, StatusCode::NOT_FOUND, "not_found").await;
+    }
+
+    #[actix_web::test]
+    async fn test_insert_echo_preserves_body_order() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let body =
+            atest::call_and_read_body(&app, insert_request(r#"{"b":"2","a":"1"}"#).to_request())
+                .await;
+        assert_eq!(
+            body,
+            web::Bytes::from_static(br#""{\"b\":\"2\",\"a\":\"1\"}""#)
+        );
+    }
 }

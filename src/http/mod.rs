@@ -129,17 +129,49 @@ pub(crate) mod tests {
     }
 
     #[actix_web::test]
-    async fn test_patch_is_501() {
+    async fn test_patch_missing_is_404_json() {
         let app = atest::init_service(App::new().configure(configure(test_state()))).await;
-        let req = atest::TestRequest::patch()
-            .uri("/key/anything")
-            .to_request();
+        let req = atest::TestRequest::patch().uri("/key/nope").to_request();
         let resp = atest::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
-        let body: serde_json::Value =
-            serde_json::from_slice(&atest::read_body(resp).await).expect("JSON error body");
+        assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+    }
+
+    #[actix_web::test]
+    async fn test_patch_existing_is_501() {
+        let state = test_state();
+        state.store.insert("p".into(), "1".into());
+        let app = atest::init_service(App::new().configure(configure(state.clone()))).await;
+        let req = atest::TestRequest::patch().uri("/key/p").to_request();
+        let resp = atest::call_service(&app, req).await;
+        let body = assert_json_error(resp, StatusCode::NOT_IMPLEMENTED, "not_implemented").await;
         assert!(body.is_object(), "body is not an object: {body}");
-        assert!(body["error"].is_string(), "no string error field: {body}");
+        assert_eq!(state.store.get("p"), Ok("1".to_owned()));
+    }
+
+    #[actix_web::test]
+    async fn insert_on_one_app_visible_on_another() {
+        // Two apps from clones of one configure closure stand in for two actix workers.
+        let state = test_state();
+        let cfg = configure(state.clone());
+        let a = atest::init_service(App::new().configure(cfg.clone())).await;
+        let b = atest::init_service(App::new().configure(cfg)).await;
+        let echo = atest::call_and_read_body(
+            &a,
+            atest::TestRequest::post()
+                .uri("/insert")
+                .set_payload(r#"{"k":"v"}"#)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(echo, web::Bytes::from_static(br#""{\"k\":\"v\"}""#));
+        let resp =
+            atest::call_service(&b, atest::TestRequest::get().uri("/key/k").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""v""#)
+        );
+        assert_eq!(state.store.get("k"), Ok("v".to_owned()));
     }
 
     const LIST_SCRIPT: &str = "Deno.core.ops.op_rs3_list().toString();";
