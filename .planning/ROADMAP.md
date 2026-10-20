@@ -45,15 +45,15 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The crate is a `lib.rs` plus a thin `main.rs` with separate `store`, `config`, `http` and `js` modules; the papaya-backed store and the config loader (current `config` builder API + `dotenvy`, still reading `SERVER.HOST` / `SERVER.PORT` from `.env` or the environment) have passing unit tests, and `store` imports nothing from actix-web or deno_core
   5. Starting the binary with invalid configuration or an already-bound port prints an error and exits non-zero instead of panicking
 
-**Plans:** 1/3 plans executed
+**Plans:** 3/3 plans executed
 
 Plans:
 **Wave 1**
 - [x] 01-01-PLAN.md: Walking skeleton (wave 1). Toolchain, manifest and lockfile reset; lib + thin main; serve GET / and an insert-to-get round trip through the papaya Store; exit 1 on bad config
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 01-02-PLAN.md: Key-value slice (wave 2). DELETE /key/{key} and GET /list via Store::remove, sorted Store::list and the shared legacy codec, with store unit tests
-- [ ] 01-03-PLAN.md: Config and service slice (wave 2). GET /ip from injected Settings, Settings::from_map with config tests, ARCH-04 startup smokes, PATCH 501 with parked PATCH tests, full phase gate
+- [x] 01-02-PLAN.md: Key-value slice (wave 2). DELETE /key/{key} and GET /list via Store::remove, sorted Store::list and the shared legacy codec, with store unit tests
+- [x] 01-03-PLAN.md: Config and service slice (wave 2). GET /ip from injected Settings, Settings::from_map with config tests, ARCH-04 startup smokes, PATCH 501 with parked PATCH tests, full phase gate
 
 **Cross-cutting constraints:**
 - cargo build, cargo test, cargo clippy --all-targets -- -D warnings and cargo fmt --check all exit 0 at the end of this plan (TOOL-03).
@@ -147,7 +147,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Toolchain, Dependencies & Foundation | 1/3 | In Progress | - |
+| 1. Toolchain, Dependencies & Foundation | 3/3 | In Progress | - |
 | 2. HTTP API Port & Error Handling | 0/TBD | Not started | - |
 | 3. JavaScript Runtime Port | 0/TBD | Not started | - |
 | 4. CI Gate on x86_64 | 0/TBD | Not started | - |
