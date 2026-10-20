@@ -141,8 +141,8 @@ expect_fail g 'actions/checkout@v2' \
   "sed -i 's|uses: actions/checkout@v7|uses: actions/checkout@v2|' $WF && grep -q 'checkout@v2' $WF"
 expect_fail g 'clippy without --locked' \
   "sed -i 's/run: cargo clippy --all-targets --locked -- -D warnings/run: cargo clippy --all-targets -- -D warnings/' $WF && grep -q 'run: cargo clippy --all-targets -- -D' $WF"
-expect_fail g 'runs-on ubuntu-24.04-arm' \
-  "sed -i 's/^    runs-on: ubuntu-24.04\$/    runs-on: ubuntu-24.04-arm/' $WF && grep -q 'ubuntu-24.04-arm' $WF"
+expect_fail g 'runs-on ubuntu-26.04-arm' \
+  "sed -i 's/^    runs-on: ubuntu-26.04\$/    runs-on: ubuntu-26.04-arm/' $WF && grep -q 'ubuntu-26.04-arm' $WF"
 expect_fail g 'guards run line deleted' \
   "sed -i '/run: bash scripts\/ci-guards.sh/d' $WF && ! grep -q 'run: bash scripts/ci-guards.sh' $WF"
 expect_fail g 'cargo test with a single-thread flag appended' \

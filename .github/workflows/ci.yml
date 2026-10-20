@@ -18,7 +18,7 @@ env:
 jobs:
   ci:
     name: fmt, clippy, test, release smoke (x86_64)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - name: Checkout

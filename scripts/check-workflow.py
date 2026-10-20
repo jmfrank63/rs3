@@ -64,8 +64,8 @@ def main() -> int:
     if not isinstance(job, dict):
         errs.append(f"job 'ci' must be a mapping, got {job!r}")
         job = {}
-    if job.get("runs-on") != "ubuntu-24.04":
-        errs.append(f"runs-on must be ubuntu-24.04, got {job.get('runs-on')!r}")
+    if job.get("runs-on") != "ubuntu-26.04":
+        errs.append(f"runs-on must be ubuntu-26.04, got {job.get('runs-on')!r}")
     if job.get("timeout-minutes") != 45:
         errs.append("timeout-minutes: 45 required")
     if "defaults" in job:
