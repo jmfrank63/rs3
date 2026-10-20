@@ -29,12 +29,13 @@ grep_guard() {
 # semantics: symlinked files and directories are followed, loops are skipped). The regex
 # sees whole files, so \s also matches newlines and an attribute split over several lines
 # (rustfmt's layout for long attributes) still matches. Prints `file:line: match` per hit,
-# with whitespace collapsed; exits 0 on hits, 1 on none, 2 on an error such as a missing
-# path or a dangling symlink (grep_guard fails closed on that).
+# with whitespace collapsed; exits 0 on hits, 1 on none, 2 on any error (a missing path, a
+# dangling symlink, an invalid regex, ...). Every consumer fails closed on exit >= 2, and no
+# exception may escape the try: Python's own exit status for an uncaught one is 1, which
+# reads as "no hits" and would turn the guard green.
 ml_grep() {
   python3 - "$@" <<'PY'
 import os, re, sys
-pat = re.compile(sys.argv[1])
 def walk_error(e):
     raise e
 def files(root):
@@ -53,6 +54,7 @@ def files(root):
             yield os.path.join(d, n)
 hits = 0
 try:
+    pat = re.compile(sys.argv[1])
     for root in sys.argv[2:]:
         for p in files(root):
             with open(p, encoding="utf-8", errors="replace") as fh:
@@ -61,8 +63,8 @@ try:
                 line = text.count("\n", 0, m.start()) + 1
                 print(f"{p}:{line}: {' '.join(m.group(0).split())}")
                 hits += 1
-except OSError as e:
-    print(f"ml_grep: {e}", file=sys.stderr)
+except BaseException as e:  # any scanner failure must fail the guard, never pass it
+    print(f"ml_grep: {type(e).__name__}: {e}", file=sys.stderr)
     sys.exit(2)
 sys.exit(0 if hits else 1)
 PY

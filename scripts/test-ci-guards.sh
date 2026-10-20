@@ -149,6 +149,14 @@ expect_fail a '#[allow(dead_code)] in a symlinked module file' \
   'mkdir -p outside && echo "#[allow(dead_code)] fn z() {}" > outside/z.rs && ln -s ../outside/z.rs src/z.rs'
 expect_fail a '#[allow(dead_code)] in a symlinked module directory' \
   'mkdir -p outside && echo "#[allow(dead_code)] fn z() {}" > outside/z.rs && ln -s ../outside src/linked'
+# A regex typo in a guard must fail the guard (ml_grep exit 2), not read as "no hits".
+expect_fail a 'guard (a) regex broken by a dropped ) with #[allow(dead_code)] planted' "$(cat <<'SNIP'
+set -e
+sed -i 's/(?:allow|expect)\\s\*\\(|cfg_attr/(?:allow|expect\\s*\\(|cfg_attr/' scripts/ci-guards.sh
+grep -qF '(?:allow|expect\s*\(|cfg_attr' scripts/ci-guards.sh
+echo "#[allow(dead_code)] fn planted() {}" >> src/lib.rs
+SNIP
+)" 'ml_grep failed (exit 2)'
 
 # --- (b) ignored tests ----------------------------------------------------------------------
 expect_fail b '#[ignore] on a test' \
