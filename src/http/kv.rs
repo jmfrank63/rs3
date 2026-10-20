@@ -287,8 +287,24 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn insert_deeply_nested_is_400_json() {
+    async fn insert_truncated_deep_nesting_is_400_json() {
         assert_insert_400("[".repeat(200).into_bytes()).await;
+    }
+
+    #[actix_web::test]
+    async fn insert_valid_deep_nesting_is_422_json() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        let resp = atest::call_service(&app, raw_insert(deep).to_request()).await;
+        crate::http::tests::assert_json_error(
+            resp,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_input",
+        )
+        .await;
+        assert_eq!(state.store.len(), 0);
     }
 
     #[actix_web::test]

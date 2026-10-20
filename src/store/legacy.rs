@@ -26,8 +26,10 @@ use serde_json::{Map, Value};
 ///   recursion limit. Those are reported against their key, or as "not a JSON
 ///   object" when they are the whole body.
 ///
-/// When valid JSON grammar has more than one such problem, the first one in body
-/// order decides. With duplicate keys the last occurrence wins (serde_json map
+/// When a body has several problems, a syntax error is reported first; then the
+/// first string that cannot be decoded or value that cannot be represented, in
+/// body order; only if there is none is the first non-string value reported.
+/// With duplicate keys the last occurrence wins (serde_json map
 /// semantics), so only the last value must be a string. An earlier occurrence
 /// that cannot be parsed or represented at all (`{"a":1e400,"a":"1"}`) still
 /// rejects the whole body.
@@ -270,8 +272,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_deep_nesting() {
+    fn parse_rejects_truncated_deep_nesting() {
         assert!(is_malformed(parse_insert_body(&"[".repeat(200))));
+    }
+
+    #[test]
+    fn parse_unrepresentable_value_beats_earlier_non_string() {
+        match parse_insert_body(r#"{"a":1,"b":1e400}"#) {
+            Err(StoreError::InvalidInput(m)) => assert!(m.contains("key b"), "message: {m}"),
+            other => panic!("expected InvalidInput naming key b, got {other:?}"),
+        }
     }
 
     #[test]
