@@ -1,6 +1,9 @@
 //! The store ops scripts call as `Deno.core.ops.op_rs3_*`. They reach the
 //! injected `Store` only through `OpState`, never panic, and are free of
 //! actix-web.
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use deno_core::{FromV8, OpState, op2, v8};
 use deno_error::JsErrorBox;
 
@@ -13,21 +16,47 @@ pub struct ExecCtx {
     pub store: Store,
     /// How many `op_rs3_patch` levels deep this script runs (0 at the top).
     pub depth: u32,
+    /// Set when a nested runtime hit a host fault. Shared by every level of
+    /// one job, so the top level answers a host fault even if a script caught
+    /// the error `op_rs3_patch` threw.
+    host_fault: Arc<AtomicBool>,
+    /// Test hook: make runtime creation fail at this depth.
+    #[cfg(test)]
+    pub(crate) fail_runtime_at_depth: Option<u32>,
 }
 
 impl ExecCtx {
     /// A top-level context for `store`.
     pub fn new(store: Store) -> Self {
-        Self { store, depth: 0 }
+        Self {
+            store,
+            depth: 0,
+            host_fault: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_runtime_at_depth: None,
+        }
     }
 
-    /// The context for a script run by `op_rs3_patch`: same store, one level
-    /// deeper. Phase 5 enforces a limit on the depth.
+    /// The context for a script run by `op_rs3_patch`: same store and host
+    /// fault flag, one level deeper. Phase 5 enforces a limit on the depth.
     pub fn nested(&self) -> Self {
         Self {
             store: self.store.clone(),
             depth: self.depth + 1,
+            host_fault: Arc::clone(&self.host_fault),
+            #[cfg(test)]
+            fail_runtime_at_depth: self.fail_runtime_at_depth,
         }
+    }
+
+    /// Record that a nested runtime hit a host fault during this job.
+    pub(crate) fn note_host_fault(&self) {
+        self.host_fault.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether any level of this job hit a host fault.
+    pub(crate) fn host_fault(&self) -> bool {
+        self.host_fault.load(Ordering::SeqCst)
     }
 }
 
@@ -117,7 +146,10 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 /// thread and returns `String(completion value)`. Throws
 /// `Error: key not found: <key>` when the key is missing, and an `Error` with
 /// the nested exception message (one leading "Uncaught " removed) when the
-/// nested script fails.
+/// nested script fails. A host fault in the nested runtime (such as a runtime
+/// creation failure) is logged, recorded in the job context and thrown as a
+/// plain `Error: internal error`; the top-level run then answers
+/// `ExecError::Internal` even if the script caught it.
 //
 // `reentrant` is mandatory: the nested runtime calls ops while this op is on
 // the stack, and debug builds abort without the flag. The depth is carried for
@@ -137,7 +169,16 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
                 .unwrap_or(&message)
                 .to_owned(),
         ),
-        other => JsErrorBox::generic(other.to_string()),
+        other => {
+            // Host details go to stderr only, escaped so they cannot forge log lines.
+            eprintln!(
+                "error: nested JS host failure in {key:?} at depth {}: {:?}",
+                ctx.depth + 1,
+                other.to_string()
+            );
+            ctx.note_host_fault();
+            JsErrorBox::generic("internal error")
+        }
     })
 }
 
@@ -159,7 +200,8 @@ deno_core::extension!(
 #[cfg(test)]
 mod tests {
     use super::ExecCtx;
-    use crate::js::{ExecError, run_js};
+    use crate::js::runtime::run_script;
+    use crate::js::{ExecError, block_on, run_js, test_executor};
     use crate::store::{Store, legacy};
 
     fn ok(s: &str) -> Result<String, ExecError> {
@@ -234,6 +276,66 @@ mod tests {
             Err(ExecError::Script {
                 message: "Uncaught Error: Error: x".to_owned()
             })
+        );
+    }
+
+    /// Run `source` against `ctx` on the shared test executor.
+    fn run_ctx(ctx: ExecCtx, source: &str) -> Result<String, ExecError> {
+        let source = source.to_owned();
+        block_on(test_executor().run(move || run_script(ctx, "test", source)))
+    }
+
+    fn failing_at(store: &Store, depth: u32) -> ExecCtx {
+        let mut ctx = ExecCtx::new(store.clone());
+        ctx.fail_runtime_at_depth = Some(depth);
+        ctx
+    }
+
+    fn is_internal(r: &Result<String, ExecError>) -> bool {
+        matches!(r, Err(ExecError::Internal(_)))
+    }
+
+    #[test]
+    fn top_level_runtime_failure_is_internal() {
+        let r = run_ctx(failing_at(&Store::new(), 0), "1");
+        assert!(is_internal(&r), "{r:?}");
+    }
+
+    #[test]
+    fn nested_runtime_failure_is_internal() {
+        let store = Store::new();
+        store.insert("inner".into(), "1".into());
+        let r = run_ctx(failing_at(&store, 1), "Deno.core.ops.op_rs3_patch('inner')");
+        assert!(is_internal(&r), "{r:?}");
+    }
+
+    #[test]
+    fn caught_nested_runtime_failure_is_still_internal_and_hides_details() {
+        let store = Store::new();
+        store.insert("inner".into(), "1".into());
+        let src = "try { Deno.core.ops.op_rs3_patch('inner'); 'no throw' } \
+                   catch (e) { Deno.core.ops.op_rs3_insert(JSON.stringify({seen: e.message})); \
+                   'caught' }";
+        let r = run_ctx(failing_at(&store, 1), src);
+        assert!(is_internal(&r), "{r:?}");
+        assert_eq!(store.get("seen"), Ok("internal error".to_owned()));
+    }
+
+    #[test]
+    fn deeper_nested_runtime_failure_is_internal() {
+        let store = Store::new();
+        store.insert("mid".into(), "Deno.core.ops.op_rs3_patch('inner')".into());
+        store.insert("inner".into(), "1".into());
+        let src = "try { Deno.core.ops.op_rs3_patch('mid') } catch (e) { 'caught' }";
+        let r = run_ctx(failing_at(&store, 2), src);
+        assert!(is_internal(&r), "{r:?}");
+        // Without the injected failure the same chain succeeds.
+        assert_eq!(
+            run_ctx(
+                ExecCtx::new(store.clone()),
+                "Deno.core.ops.op_rs3_patch('mid')"
+            ),
+            ok("1")
         );
     }
 

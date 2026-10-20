@@ -16,7 +16,30 @@ use super::ops::{ExecCtx, rs3_ext};
 /// while converting the completion value to a string becomes
 /// `ExecError::Script` carrying the JS exception message; the stack goes to
 /// stderr only.
+///
+/// A host fault in a nested runtime started by `op_rs3_patch` makes the whole
+/// run answer `ExecError::Internal`, even if the script caught the error the
+/// op threw. The detail was logged where the fault happened.
 pub fn run_script(ctx: ExecCtx, name: &str, source: String) -> Result<String, ExecError> {
+    let watch = ctx.clone();
+    let result = run_fresh(ctx, name, source);
+    match result {
+        Err(ExecError::Internal(_)) => result,
+        _ if watch.host_fault() => Err(ExecError::Internal(format!(
+            "a nested JS runtime failed while running {name:?}"
+        ))),
+        _ => result,
+    }
+}
+
+/// Create a runtime, run the script and stringify its completion value.
+fn run_fresh(ctx: ExecCtx, name: &str, source: String) -> Result<String, ExecError> {
+    #[cfg(test)]
+    if ctx.fail_runtime_at_depth == Some(ctx.depth) {
+        return Err(ExecError::Internal(
+            "cannot create JS runtime: injected test failure".into(),
+        ));
+    }
     let mut rt = JsRuntime::try_new(RuntimeOptions {
         extensions: vec![rs3_ext::init(ctx)],
         ..Default::default()

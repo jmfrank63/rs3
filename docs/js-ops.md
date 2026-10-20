@@ -22,7 +22,7 @@ Neither exists any more. Rewrite old scripts with this table:
 | `Deno.core.opSync("rs3_get", key)` | `Deno.core.ops.op_rs3_get(key)` | the key, coerced to a string | the value | the key is missing: `Error` with message `key not found: <key>` (legacy: the server panicked) |
 | `Deno.core.opSync("rs3_insert", json)` | `Deno.core.ops.op_rs3_insert(json)` | a JSON object whose values are all strings, passed as a string | the compact echo, such as `{"k":"v"}` | malformed JSON: `TypeError` whose message starts with `malformed JSON:`; wrong shape: `TypeError` whose message starts with `invalid input:`; nothing is written on error |
 | `Deno.core.opSync("rs3_delete", key)` | `Deno.core.ops.op_rs3_delete(key)` | the key | the value the key held | the key is missing: `Error` with message `key not found: <key>` |
-| `Deno.core.opSync("rs3_patch", key)` | `Deno.core.ops.op_rs3_patch(key)` | the key | `String(completion value)` of that key's script, run in a fresh nested runtime | the key is missing; the nested script fails, rethrown as `Error` with the nested message minus its leading `Uncaught ` |
+| `Deno.core.opSync("rs3_patch", key)` | `Deno.core.ops.op_rs3_patch(key)` | the key | `String(completion value)` of that key's script, run in a fresh nested runtime | the key is missing; the nested script fails, rethrown as `Error` with the nested message minus its leading `Uncaught `; the nested runtime hits a host fault, thrown as `Error: internal error`, and the whole PATCH then answers 500 even if the script catches it |
 
 The legacy `Deno.core.opSync` function no longer exists either, and calling it
 throws a `TypeError`. The old example script also called an op named `op_list`
@@ -65,6 +65,12 @@ table is the migration path.
   A nested `throw new RangeError("inner boom")` arrives as an `Error` with the
   message `RangeError: inner boom`. A nested missing key arrives as
   `key not found: <key>`.
+- **Nested host faults.** If the nested runtime itself fails, for example
+  because it cannot be created, that is a server fault, not a script error.
+  The caller sees an `Error` with the fixed message `internal error` and no
+  host details. Catching it does not help: once any nested level has hit a
+  host fault, the whole PATCH answers 500 (see PATCH results). Store writes
+  the script made before that stay.
 
 ## PATCH results
 
@@ -102,7 +108,9 @@ table is the migration path.
   never returned in a response.
 - **Host fault: 500.** If the JS executor is unavailable or a runtime cannot be
   created, the answer is `{"error":"internal","message":"internal error"}`.
-  The details go to the server log only.
+  This includes a nested runtime started by `op_rs3_patch` at any depth, even
+  when the script caught the error the op threw. The details go to the server
+  log only.
 - **Missing key: 404.** PATCH of a key that does not exist answers
   `{"error":"not_found","message":"key not found: <key>"}` without running
   anything.
@@ -148,11 +156,14 @@ table is the migration path.
   gives a 422 with the message `Uncaught Error: op is disabled`.
 - **Unbounded nesting until Phase 5.** There is no limit yet on how deep
   `op_rs3_patch` calls can nest. A script that patches itself, directly or
-  through a cycle of keys, does not crash the server, but it ends with a
-  catchable error only after about 235 (debug build) or 778 (release build)
-  nested levels. That costs about 800 MB of memory and 2.7 s of one JS worker
-  per request, and the resulting 422 message is very long because every level
-  adds its own prefix.
+  through a cycle of keys, does not crash the server, but it ends with an
+  error only after about 235 (debug build) or 778 (release build) nested
+  levels. That costs about 800 MB of memory and 2.7 s of one JS worker per
+  request. When the error is a JavaScript exception, the answer is a 422 whose
+  message is very long because every level adds its own prefix. Nested
+  runtimes share one thread's stack, so deep nesting, or calling
+  `op_rs3_patch` from inside deep recursion, can also leave too little stack
+  to create the next runtime. That is a host fault and answers 500.
 - **Non-terminating scripts until Phase 5.** A script that never finishes,
   such as `while(true){}`, occupies one JS worker indefinitely. Once every
   worker is busy, further PATCH requests queue behind them and wait. The other
