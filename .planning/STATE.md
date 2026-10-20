@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: HTTP API Port & Error Handling
 status: executing
-stopped_at: Phase 1 complete, ready to plan Phase 2
-last_updated: "2026-10-20T18:11:18.229Z"
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-10-20T18:19:02.687Z"
 last_activity: 2026-10-20
-last_activity_desc: Phase 1 complete, transitioned to Phase 2
-state_head: d0b8fe151d63b439ba947bfc8ee1dfa36b6f44f7
+last_activity_desc: Phase 02 execution started
+state_head: 1e548f751fac69e294bfc20f4bdc99c097888713
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 6
-  completed_plans: 3
+  completed_plans: 4
   percent: 17
 ---
 
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-20)
 
 **Core value:** rs3 builds, tests and lints cleanly on current stable Rust (edition 2024) with only released dependencies, while every existing HTTP route and the JS-executes-against-the-store behaviour keep working with the same semantics.
-**Current focus:** Phase 2 — HTTP API Port & Error Handling
+**Current focus:** Phase 02 — HTTP API Port & Error Handling
 
 ## Current Position
 
-Phase: 02 (HTTP API Port & Error Handling) — READY TO EXECUTE
-Plan: Not started
+Phase: 02 (HTTP API Port & Error Handling) — EXECUTING
+Plan: 2 of 3
 Status: Ready to execute
-Last activity: 2026-10-20 — Phase 1 complete, transitioned to Phase 2
+Last activity: 2026-10-20 — Phase 02 execution started
 
 Progress: [██░░░░░░░░] 17%
 
@@ -52,6 +52,11 @@ Progress: [██░░░░░░░░] 17%
 - Trend: -
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 02 P01 | 5 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -67,6 +72,8 @@ Recent decisions affecting current work:
 - [Research]: Status codes are 404 missing key, 400 malformed JSON, 422 bad shape / JS error / depth limit, 504 timeout. Ops throw on a missing key.
 - [Phase 1]: papaya `Store` facade (owned `String`s), lib + thin main, sorted `/list` already shipped, PATCH answers 501 until Phase 3 (two parked PATCH tests).
 - [Phase 1 UAT]: dotenv path verified by operator; rustup auto-install concurrency accepted as risk (override); v8x lock-entry disclosure accepted.
+- [Phase 02]: [02-01] AppState { store, Arc<Settings> } lives at crate root (src/state.rs), built once in main; http::configure(state) creates the single web::Data and returns a Clone closure cloned per worker
+- [Phase 02]: [02-01] ApiError (pub, in pub mod http::error) wraps StoreError via #[from]; exhaustive no-wildcard status/code match; error body {error, message} application/json
 
 ### Pending Todos
 
@@ -93,6 +100,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T17:45:00Z
-Stopped at: Phase 1 complete, ready to plan Phase 2
+Last session: 2026-10-20T18:19:02.611Z
+Stopped at: Completed 02-01-PLAN.md
 Resume file: None

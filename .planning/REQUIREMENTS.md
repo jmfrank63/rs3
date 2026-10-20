@@ -23,24 +23,24 @@ Requirements for the modernization milestone. Each maps to roadmap phases.
 ### Architecture
 
 - [x] **ARCH-01**: Code is split into separate store, JS runtime, HTTP and config modules (`lib.rs` + thin `main.rs`, single package) with dependencies pointing one way (http → js → store)
-- [ ] **ARCH-02**: The store is created once in `main` and injected into HTTP handlers (`web::Data`) and JS ops (`OpState`); there is no global map
+- [x] **ARCH-02**: The store is created once in `main` and injected into HTTP handlers (`web::Data`) and JS ops (`OpState`); there is no global map
 - [ ] **ARCH-03**: Config is loaded once at startup and injected; handlers do not re-read the environment per request
 - [x] **ARCH-04**: Startup errors (bad config, port bind failure) are reported and exit non-zero instead of panicking
 
 ### HTTP API
 
-- [ ] **HTTP-01**: `GET /` returns 200 with body `"Welcome to rs3"` (byte-identical to before)
-- [ ] **HTTP-02**: `GET /ip` returns 200 with the configured host in the existing body format
+- [x] **HTTP-01**: `GET /` returns 200 with body `"Welcome to rs3"` (byte-identical to before)
+- [x] **HTTP-02**: `GET /ip` returns 200 with the configured host in the existing body format
 - [ ] **HTTP-03**: `POST /insert` with a JSON object of string values inserts every pair and echoes the object in the existing body format
 - [ ] **HTTP-04**: `GET /list` returns all entries in the existing list shape, with keys/values correctly JSON-escaped
-- [ ] **HTTP-05**: `GET /key/{key}` returns the value for an existing key in the existing body format
-- [ ] **HTTP-06**: `DELETE /key/{key}` removes an existing key and returns its old value
+- [x] **HTTP-05**: `GET /key/{key}` returns the value for an existing key in the existing body format
+- [x] **HTTP-06**: `DELETE /key/{key}` removes an existing key and returns its old value
 - [ ] **HTTP-07**: `PATCH /key/{key}` executes the stored value as JavaScript and returns the stringified completion value
 - [ ] **HTTP-08**: Handlers are ported to the current actix-web 4.x release API (`#[actix_web::main]`, `#[actix_web::test]`, current test utilities)
 
 ### Robustness
 
-- [ ] **ROBU-01**: `GET`, `DELETE` or `PATCH` on a missing key returns 404 with a JSON error body (no panic; replaces the old `"[]"` on empty store)
+- [x] **ROBU-01**: `GET`, `DELETE` or `PATCH` on a missing key returns 404 with a JSON error body (no panic; replaces the old `"[]"` on empty store)
 - [ ] **ROBU-02**: `POST /insert` with malformed JSON returns 400; valid JSON that is not an object or contains non-string values returns 422; nothing is inserted on error
 - [ ] **ROBU-03**: `PATCH` on a script that throws or has a syntax error returns 422 with a JSON error body containing the JS error message
 - [ ] **ROBU-04**: No `unwrap()`/`expect()` on request-dependent data in handlers, store or ops; ops return errors to JS instead of panicking (an op panic would abort the process)
@@ -141,18 +141,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DEPS-03 | Phase 1 | Complete |
 | DEPS-04 | Phase 1 | Complete |
 | ARCH-01 | Phase 1 | Complete |
-| ARCH-02 | Phase 2 | Pending |
+| ARCH-02 | Phase 2 | Complete |
 | ARCH-03 | Phase 2 | Pending |
 | ARCH-04 | Phase 1 | Complete |
-| HTTP-01 | Phase 2 | Pending |
-| HTTP-02 | Phase 2 | Pending |
+| HTTP-01 | Phase 2 | Complete |
+| HTTP-02 | Phase 2 | Complete |
 | HTTP-03 | Phase 2 | Pending |
 | HTTP-04 | Phase 2 | Pending |
-| HTTP-05 | Phase 2 | Pending |
-| HTTP-06 | Phase 2 | Pending |
+| HTTP-05 | Phase 2 | Complete |
+| HTTP-06 | Phase 2 | Complete |
 | HTTP-07 | Phase 3 | Pending |
 | HTTP-08 | Phase 2 | Pending |
-| ROBU-01 | Phase 2 | Pending |
+| ROBU-01 | Phase 2 | Complete |
 | ROBU-02 | Phase 2 | Pending |
 | ROBU-03 | Phase 3 | Pending |
 | ROBU-04 | Phase 3 | Pending |
