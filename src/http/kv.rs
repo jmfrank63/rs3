@@ -386,6 +386,34 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn insert_unpaired_surrogate_escape_is_400_json() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        for payload in [
+            r#"{"a":"\ud800"}"#,
+            r#"{"\ud800":"v"}"#,
+            r#"{"ok":"1","a":"x\udc00y"}"#,
+        ] {
+            let resp = atest::call_service(&app, raw_insert(payload).to_request()).await;
+            let body = crate::http::tests::assert_json_error(
+                resp,
+                StatusCode::BAD_REQUEST,
+                "malformed_json",
+            )
+            .await;
+            let message = body["message"].as_str().expect("string message");
+            assert!(
+                message.contains("unpaired UTF-16 surrogate"),
+                "{payload}: message: {message}"
+            );
+            assert!(!message.contains("must be a string"), "message: {message}");
+            assert!(!message.contains("JSON object"), "message: {message}");
+        }
+        assert!(state.store.is_empty());
+    }
+
+    #[actix_web::test]
     async fn insert_rejected_twice_leaves_store_unchanged() {
         let state = test_state();
         let app =

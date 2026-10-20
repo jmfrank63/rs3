@@ -12,25 +12,44 @@ use serde_json::{Map, Value};
 /// Parse an insert body: a JSON object whose values are all strings.
 ///
 /// Returns the pairs in body order (serde_json `preserve_order` is enabled).
-/// Text that is not JSON at all (a syntax error, an empty or truncated body,
-/// trailing characters) gives `MalformedJson`. Valid JSON of the wrong shape
-/// (not an object, or an object with a non-string value) gives `InvalidInput`,
-/// naming the offending key. That includes valid JSON that serde_json cannot
-/// represent as a `Value`: a number outside the `f64` range (`{"a": 1e400}`) or
-/// nesting past serde_json's recursion limit is reported against its key, or as
-/// "not a JSON object" when it is the whole body. With duplicate keys the last
-/// occurrence wins (serde_json map semantics), so only that value is checked.
+/// Classification (400 vs 422):
+/// - `MalformedJson` (400): text that does not parse as JSON strings, numbers,
+///   arrays and objects. That covers a syntax error, an empty or truncated body,
+///   trailing characters, and a string (key or value) whose `\uXXXX` escapes
+///   encode an unpaired UTF-16 surrogate (`"\ud800"`, `"\udc00"`,
+///   `"\ud800\u0041"`): such a string has no Unicode text, so it is treated as a
+///   string-syntax error, whether it is a key or a value.
+/// - `InvalidInput` (422): valid JSON of the wrong shape, naming the offending
+///   key. That is a body that is not an object, an object with a non-string
+///   value, and valid JSON that serde_json cannot build into a `Value`: a number
+///   outside the `f64` range (`{"a": 1e400}`) or nesting past serde_json's
+///   recursion limit. Those are reported against their key, or as "not a JSON
+///   object" when they are the whole body.
+///
+/// When valid JSON grammar has more than one such problem, the first one in body
+/// order decides. With duplicate keys the last occurrence wins (serde_json map
+/// semantics), so only that value is checked.
 pub fn parse_insert_body(body: &str) -> Result<Vec<(String, String)>, StoreError> {
     // Pass 1: syntax only. `IgnoredAny` scans numbers without converting them and
     // has no recursion limit, so only real syntax, EOF or I/O errors fail here.
+    // It also skips `\uXXXX` escapes without checking surrogate pairing.
     serde_json::from_str::<IgnoredAny>(body).map_err(|e| match e.classify() {
         // Defensive: `IgnoredAny` never reports a data error.
         Category::Data => StoreError::InvalidInput(e.to_string()),
         Category::Syntax | Category::Eof | Category::Io => StoreError::MalformedJson(e.to_string()),
     })?;
-    // Pass 2: the text is valid JSON, so a failure here means a value that
-    // serde_json cannot represent; find the key it belongs to.
-    let value: Value = serde_json::from_str(body).map_err(|e| unrepresentable(body, &e))?;
+    // Pass 2: the text is valid JSON grammar, so a failure here is either an
+    // unpaired surrogate escape (400) or a value serde_json cannot represent
+    // (422, reported against its key).
+    let value: Value = serde_json::from_str(body).map_err(|e| {
+        if is_surrogate_escape_error(&e) {
+            StoreError::MalformedJson(format!(
+                "string contains an unpaired UTF-16 surrogate \\u escape: {e}"
+            ))
+        } else {
+            unrepresentable(body, &e)
+        }
+    })?;
     let object = value
         .as_object()
         .ok_or_else(|| StoreError::InvalidInput("insert body must be a JSON object".into()))?;
@@ -45,7 +64,24 @@ pub fn parse_insert_body(body: &str) -> Result<Vec<(String, String)>, StoreError
         .collect()
 }
 
+/// Whether a pass-2 failure is a `\uXXXX` escape with an unpaired UTF-16 surrogate.
+///
+/// After pass 1 accepted the text, serde_json 1.0 fails to build a `Value` for
+/// only three reasons: `number out of range`, `recursion limit exceeded`, or a
+/// surrogate escape it cannot decode into a `String` (`lone leading surrogate in
+/// hex escape` or `unexpected end of hex escape`). serde_json exposes no error
+/// code, so the message text tells them apart: only the surrogate errors
+/// mention an escape. The `parse_unpaired_surrogate_*` tests pin this.
+fn is_surrogate_escape_error(error: &serde_json::Error) -> bool {
+    error.to_string().contains("escape")
+}
+
 /// The `InvalidInput` error for valid JSON that serde_json could not build into a `Value`.
+///
+/// Only a number out of range or nesting past the recursion limit reaches here.
+/// Both fail inside a value (object keys are strings, and string failures are
+/// handled before this is called), so for an object the key is always found.
+/// When no key is found, the body is not an object.
 fn unrepresentable(body: &str, error: &serde_json::Error) -> StoreError {
     let mut bad_key = None;
     let mut de = serde_json::Deserializer::from_str(body);
@@ -266,6 +302,80 @@ mod tests {
     fn parse_syntax_error_next_to_big_number_is_malformed() {
         assert!(is_malformed(parse_insert_body(r#"{"a": 1e400"#)));
         assert!(is_malformed(parse_insert_body(r#"{"a": 1e}"#)));
+    }
+
+    /// Assert `body` is `MalformedJson` with a message about a surrogate escape.
+    fn assert_surrogate_malformed(body: &str) {
+        match parse_insert_body(body) {
+            Err(StoreError::MalformedJson(m)) => {
+                assert!(
+                    m.contains("unpaired UTF-16 surrogate"),
+                    "{body}: message: {m}"
+                );
+                assert!(!m.contains("must be a string"), "{body}: message: {m}");
+                assert!(!m.contains("JSON object"), "{body}: message: {m}");
+            }
+            other => panic!("{body}: expected MalformedJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unpaired_surrogate_in_value_is_malformed() {
+        for body in [
+            r#"{"a":"\ud800"}"#,
+            r#"{"a":"\udc00"}"#,
+            r#"{"ok":"1","a":"x\udc00y"}"#,
+            r#"{"a":"\ud800x"}"#,
+            r#"{"a":"\ud800\u0041"}"#,
+            r#"{"a":"\ud800\ud800"}"#,
+            r#"{"a":"\ud800\n"}"#,
+            r#"{"a":"\ud800\""}"#,
+        ] {
+            assert_surrogate_malformed(body);
+        }
+    }
+
+    #[test]
+    fn parse_unpaired_surrogate_in_key_is_malformed() {
+        for body in [
+            r#"{"\ud800":"v"}"#,
+            r#"{"\udc00":"v"}"#,
+            r#"{"ok":"1","\ud800":"v"}"#,
+        ] {
+            assert_surrogate_malformed(body);
+        }
+    }
+
+    #[test]
+    fn parse_unpaired_surrogate_nested_or_whole_body_is_malformed() {
+        assert_surrogate_malformed(r#"{"a":["\ud800"]}"#);
+        assert_surrogate_malformed(r#""\ud800""#);
+    }
+
+    #[test]
+    fn parse_paired_surrogate_escape_is_accepted() {
+        assert_eq!(
+            parse_insert_body(r#"{"\ud83d\ude00":"\ud83d\ude00"}"#),
+            Ok(vec![("\u{1F600}".to_owned(), "\u{1F600}".to_owned())])
+        );
+    }
+
+    #[test]
+    fn parse_unrepresentable_messages_never_mention_an_escape() {
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        for body in [
+            r#"{"a": 1e400}"#.to_owned(),
+            "1e400".to_owned(),
+            deep.clone(),
+            format!(r#"{{"a":{deep}}}"#),
+        ] {
+            match parse_insert_body(&body) {
+                Err(StoreError::InvalidInput(m)) => {
+                    assert!(!m.contains("escape"), "message: {m}");
+                }
+                other => panic!("expected InvalidInput, got {other:?}"),
+            }
+        }
     }
 
     #[test]
