@@ -29,6 +29,7 @@ impl ApiError {
     pub fn code(&self) -> &'static str {
         match self {
             ApiError::Store(StoreError::NotFound(_)) => "not_found",
+            ApiError::Store(StoreError::MalformedJson(_)) => "malformed_json",
             ApiError::Store(StoreError::InvalidInput(_)) => "invalid_input",
             ApiError::NotImplemented(_) => "not_implemented",
             ApiError::Internal => "internal",
@@ -40,6 +41,7 @@ impl ResponseError for ApiError {
     fn status_code(&self) -> StatusCode {
         match self {
             ApiError::Store(StoreError::NotFound(_)) => StatusCode::NOT_FOUND,
+            ApiError::Store(StoreError::MalformedJson(_)) => StatusCode::BAD_REQUEST,
             ApiError::Store(StoreError::InvalidInput(_)) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,

@@ -12,6 +12,8 @@ pub mod legacy;
 pub enum StoreError {
     #[error("key not found: {0}")]
     NotFound(String),
+    #[error("malformed JSON: {0}")]
+    MalformedJson(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
 }

@@ -3,7 +3,7 @@ use actix_web::{HttpResponse, Responder, delete, get, post, web};
 
 use super::error::ApiError;
 use crate::state::AppState;
-use crate::store::legacy;
+use crate::store::{StoreError, legacy};
 
 /// Register the store routes. The shared `AppState` is registered by `http::configure`.
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -15,11 +15,19 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 
 /// `POST /insert` stores every key/value of a JSON object of strings and echoes it.
 ///
-/// The body is fully parsed and validated before anything is written; a bad
-/// body becomes a JSON error response instead of a panic.
+/// The body is read as raw bytes, whatever its content type or charset
+/// parameter, and decoded as strict UTF-8. It is fully parsed and validated
+/// before anything is written. Invalid UTF-8 or malformed JSON answers a 400
+/// `malformed_json` JSON error; valid JSON of the wrong shape answers a 422
+/// `invalid_input` JSON error naming the offending key.
 #[post("/insert")]
-pub async fn insert(state: web::Data<AppState>, body: String) -> Result<HttpResponse, ApiError> {
-    let entries = legacy::parse_insert_body(&body)?;
+pub async fn insert(
+    state: web::Data<AppState>,
+    body: web::Bytes,
+) -> Result<HttpResponse, ApiError> {
+    let text = std::str::from_utf8(&body)
+        .map_err(|e| StoreError::MalformedJson(format!("body is not valid UTF-8: {e}")))?;
+    let entries = legacy::parse_insert_body(text)?;
     let echo = legacy::format_insert_echo(&entries);
     state.store.insert_many(entries.into_iter().map(Ok))?;
     Ok(HttpResponse::Ok().json(echo))
@@ -243,6 +251,82 @@ mod tests {
         )
         .await;
         crate::http::tests::assert_json_error(second, StatusCode::NOT_FOUND, "not_found").await;
+    }
+
+    async fn assert_insert_400(payload: Vec<u8>) {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp = atest::call_service(
+            &app,
+            atest::TestRequest::post()
+                .uri("/insert")
+                .insert_header(("Content-Type", "application/json"))
+                .set_payload(payload)
+                .to_request(),
+        )
+        .await;
+        crate::http::tests::assert_json_error(resp, StatusCode::BAD_REQUEST, "malformed_json")
+            .await;
+        assert_eq!(state.store.len(), 0);
+    }
+
+    #[actix_web::test]
+    async fn insert_malformed_is_400_json() {
+        assert_insert_400(b"{bad".to_vec()).await;
+    }
+
+    #[actix_web::test]
+    async fn insert_empty_body_is_400_json() {
+        assert_insert_400(Vec::new()).await;
+    }
+
+    #[actix_web::test]
+    async fn insert_invalid_utf8_is_400_json() {
+        assert_insert_400(vec![0xFF, 0xFE]).await;
+    }
+
+    #[actix_web::test]
+    async fn insert_deeply_nested_is_400_json() {
+        assert_insert_400("[".repeat(200).into_bytes()).await;
+    }
+
+    #[actix_web::test]
+    async fn insert_without_content_type_is_ok() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let req = atest::TestRequest::post()
+            .uri("/insert")
+            .set_payload(r#"{"n":"1"}"#)
+            .to_request();
+        assert!(req.head().headers.get("content-type").is_none());
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""{\"n\":\"1\"}""#)
+        );
+        assert_eq!(state.store.get("n"), Ok("1".to_owned()));
+    }
+
+    #[actix_web::test]
+    async fn insert_with_bogus_charset_is_ok() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let req = atest::TestRequest::post()
+            .uri("/insert")
+            .insert_header(("Content-Type", "text/plain; charset=bogus"))
+            .set_payload(r#"{"c":"d"}"#)
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""{\"c\":\"d\"}""#)
+        );
+        assert_eq!(state.store.get("c"), Ok("d".to_owned()));
     }
 
     #[actix_web::test]

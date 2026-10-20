@@ -3,14 +3,22 @@
 //! Shared by the HTTP layer and, from Phase 3, the JS ops, so both speak one codec.
 use super::StoreError;
 
+use serde_json::error::Category;
 use serde_json::{Map, Value};
 
 /// Parse an insert body: a JSON object whose values are all strings.
 ///
 /// Returns the pairs in body order (serde_json `preserve_order` is enabled).
+/// Text that is not JSON at all (a syntax error, an empty or truncated body,
+/// trailing characters, nesting past serde_json's recursion limit) gives
+/// `MalformedJson`. Valid JSON of the wrong shape (not an object, or an object
+/// with a non-string value) gives `InvalidInput`, naming the offending key.
 pub fn parse_insert_body(body: &str) -> Result<Vec<(String, String)>, StoreError> {
-    let value: Value =
-        serde_json::from_str(body).map_err(|e| StoreError::InvalidInput(e.to_string()))?;
+    let value: Value = serde_json::from_str(body).map_err(|e| match e.classify() {
+        // Defensive: deserializing into `Value` never reports a data error.
+        Category::Data => StoreError::InvalidInput(e.to_string()),
+        Category::Syntax | Category::Eof | Category::Io => StoreError::MalformedJson(e.to_string()),
+    })?;
     let object = value
         .as_object()
         .ok_or_else(|| StoreError::InvalidInput("insert body must be a JSON object".into()))?;
@@ -79,6 +87,10 @@ mod tests {
         matches!(r, Err(StoreError::InvalidInput(_)))
     }
 
+    fn is_malformed(r: Result<Vec<(String, String)>, StoreError>) -> bool {
+        matches!(r, Err(StoreError::MalformedJson(_)))
+    }
+
     #[test]
     fn parse_object_of_strings() {
         let parsed = parse_insert_body(r#"{"a":"1","b":"2"}"#);
@@ -93,7 +105,30 @@ mod tests {
 
     #[test]
     fn parse_rejects_malformed_json() {
-        assert!(is_invalid_input(parse_insert_body(r#"{"a":"#)));
+        assert!(is_malformed(parse_insert_body(r#"{"a":"#)));
+        assert!(is_malformed(parse_insert_body("{bad")));
+    }
+
+    #[test]
+    fn parse_rejects_empty_and_whitespace() {
+        assert!(is_malformed(parse_insert_body("")));
+        assert!(is_malformed(parse_insert_body("   ")));
+    }
+
+    #[test]
+    fn parse_rejects_trailing_characters() {
+        assert!(is_malformed(parse_insert_body(r#"{"a":"1"} trailing"#)));
+        assert!(is_malformed(parse_insert_body(r#"{"a":"1",}"#)));
+    }
+
+    #[test]
+    fn parse_rejects_deep_nesting() {
+        assert!(is_malformed(parse_insert_body(&"[".repeat(200))));
+    }
+
+    #[test]
+    fn parse_null_is_invalid_input() {
+        assert!(is_invalid_input(parse_insert_body("null")));
     }
 
     #[test]
