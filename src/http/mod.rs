@@ -379,4 +379,163 @@ pub(crate) mod tests {
                 .await;
         assert_eq!(patched, listing);
     }
+
+    const FAC_JS: &str = include_str!("../../requests/fac.js");
+    const SUM_JS: &str = include_str!("../../requests/sum.js");
+    const BIN_JS: &str = include_str!("../../requests/bin.js");
+    const STORE_JS: &str = include_str!("../../requests/store.js");
+    const TREE_BODY: &[u8] = br#""{\"value\":5,\"left\":{\"value\":3},\"right\":{\"value\":8}}""#;
+
+    /// Send `req` to `app` and return the status code and the body bytes.
+    async fn send<S, R>(app: &S, req: R) -> (StatusCode, web::Bytes)
+    where
+        S: actix_web::dev::Service<R, Response = ServiceResponse, Error = actix_web::Error>,
+    {
+        let resp = atest::call_service(app, req).await;
+        let code = resp.status();
+        (code, atest::read_body(resp).await)
+    }
+
+    /// A fresh state seeded with `pairs`.
+    fn seeded(pairs: &[(&str, &str)]) -> AppState {
+        let state = test_state();
+        for (k, v) in pairs {
+            state.store.insert((*k).to_owned(), (*v).to_owned());
+        }
+        state
+    }
+
+    fn patch_req(key: &str) -> atest::TestRequest {
+        atest::TestRequest::patch().uri(&format!("/key/{key}"))
+    }
+
+    fn get_req(uri: &str) -> atest::TestRequest {
+        atest::TestRequest::get().uri(uri)
+    }
+
+    #[actix_web::test]
+    async fn fixture_fac_is_120() {
+        let state = seeded(&[("num", "5"), ("fac", FAC_JS)]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let (code, body) = send(&app, patch_req("fac").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""120""#));
+    }
+
+    #[actix_web::test]
+    async fn fixture_sum_is_10() {
+        let state = seeded(&[("numbers", "1 2 3 4"), ("sum", SUM_JS)]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let (code, body) = send(&app, patch_req("sum").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""10""#));
+    }
+
+    #[actix_web::test]
+    async fn fixture_bin_is_tree_json() {
+        let state = seeded(&[("tree", "5 3 8"), ("bin", BIN_JS)]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let (code, body) = send(&app, patch_req("bin").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(TREE_BODY));
+    }
+
+    #[actix_web::test]
+    async fn fixture_store_writes_res() {
+        let state = seeded(&[("store", STORE_JS)]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let (code, body) = send(&app, patch_req("store").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""{\"res\":\"1111\"}""#));
+        let (code, body) = send(&app, get_req("/key/res").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""1111""#));
+    }
+
+    #[actix_web::test]
+    async fn fixtures_share_one_store_in_any_order() {
+        // sum.js and bin.js both declare `numbers` and `arr` at top level; every
+        // PATCH gets a fresh runtime, so they never collide.
+        let state = seeded(&[
+            ("numbers", "1 2 3 4"),
+            ("tree", "5 3 8"),
+            ("sum", SUM_JS),
+            ("bin", BIN_JS),
+        ]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let expected: [(&str, &[u8]); 3] =
+            [("sum", br#""10""#), ("bin", TREE_BODY), ("sum", br#""10""#)];
+        for (key, want) in expected {
+            let (code, body) = send(&app, patch_req(key).to_request()).await;
+            assert_eq!(code, StatusCode::OK, "PATCH {key}");
+            assert_eq!(body, web::Bytes::from_static(want), "PATCH {key}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn test_patch_listing_matches_list_with_escapes_and_order() {
+        let state = seeded(&[
+            ("b", "2"),
+            ("a", "1"),
+            ("B", "3"),
+            ("q", r#"say "hi" \ bye"#),
+            ("code", LIST_SCRIPT),
+        ]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let (code, patched) = send(&app, patch_req("code").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        let (code, listing) = send(&app, get_req("/list").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(patched, listing);
+        assert!(
+            listing.starts_with(br#""[{\"B\" : \"3\"}"#),
+            "listing not in byte order: {listing:?}"
+        );
+        // The listing includes the script key itself.
+        let text = std::str::from_utf8(&listing).expect("UTF-8 listing");
+        assert!(text.contains(r#"{\"code\" : "#), "{text}");
+    }
+
+    #[actix_web::test]
+    async fn test_patch_stringifies_completion_values() {
+        let cases: [(&str, &str, &[u8]); 5] = [
+            ("s1", "let a = 1;", br#""undefined""#),
+            ("s2", "({a:1})", br#""[object Object]""#),
+            ("s3", "Promise.resolve(1)", br#""[object Promise]""#),
+            ("s4", "''", br#""""#),
+            ("s5", "", br#""undefined""#),
+        ];
+        let state = test_state();
+        for (k, v, _) in cases {
+            state.store.insert(k.to_owned(), v.to_owned());
+        }
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        for (k, v, want) in cases {
+            let (code, body) = send(&app, patch_req(k).to_request()).await;
+            assert_eq!(code, StatusCode::OK, "script {v:?}");
+            assert_eq!(body, web::Bytes::from_static(want), "script {v:?}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn test_patch_get_delete_on_one_key_hit_their_own_handlers() {
+        let state = seeded(&[("k", "6*20")]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let (code, body) = send(&app, get_req("/key/k").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""6*20""#));
+        let (code, body) = send(&app, patch_req("k").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""120""#));
+        let (code, body) = send(
+            &app,
+            atest::TestRequest::delete().uri("/key/k").to_request(),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""6*20""#));
+        let resp =
+            atest::call_service(&app, atest::TestRequest::patch().uri("/key/k").to_request()).await;
+        assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+    }
 }
