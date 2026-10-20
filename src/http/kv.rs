@@ -29,7 +29,7 @@ pub async fn insert(
         .map_err(|e| StoreError::MalformedJson(format!("body is not valid UTF-8: {e}")))?;
     let entries = legacy::parse_insert_body(text)?;
     let echo = legacy::format_insert_echo(&entries);
-    state.store.insert_many(entries.into_iter().map(Ok))?;
+    state.store.insert_all(entries);
     Ok(HttpResponse::Ok().json(echo))
 }
 
@@ -327,6 +327,133 @@ mod tests {
             web::Bytes::from_static(br#""{\"c\":\"d\"}""#)
         );
         assert_eq!(state.store.get("c"), Ok("d".to_owned()));
+    }
+
+    fn raw_insert(payload: impl Into<Vec<u8>>) -> atest::TestRequest {
+        atest::TestRequest::post()
+            .uri("/insert")
+            .set_payload(payload.into())
+    }
+
+    #[actix_web::test]
+    async fn insert_non_object_is_422_json() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp = atest::call_service(&app, raw_insert("[1,2]").to_request()).await;
+        crate::http::tests::assert_json_error(
+            resp,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_input",
+        )
+        .await;
+        assert!(state.store.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn insert_non_string_value_is_422_and_inserts_nothing() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp = atest::call_service(&app, raw_insert(r#"{"a":"1","b":2}"#).to_request()).await;
+        let body = crate::http::tests::assert_json_error(
+            resp,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_input",
+        )
+        .await;
+        let message = body["message"].as_str().expect("string message");
+        assert!(message.contains("key b"), "message: {message}");
+        assert_eq!(state.store.get("a"), Err(StoreError::NotFound("a".into())));
+        assert!(state.store.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn insert_rejected_twice_leaves_store_unchanged() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        for _ in 0..2 {
+            let resp = atest::call_service(&app, raw_insert("{bad").to_request()).await;
+            crate::http::tests::assert_json_error(resp, StatusCode::BAD_REQUEST, "malformed_json")
+                .await;
+        }
+        for _ in 0..2 {
+            let resp =
+                atest::call_service(&app, raw_insert(r#"{"a":"1","b":2}"#).to_request()).await;
+            crate::http::tests::assert_json_error(
+                resp,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_input",
+            )
+            .await;
+        }
+        assert_eq!(state.store.len(), 0);
+    }
+
+    #[actix_web::test]
+    async fn insert_empty_object_is_noop() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp = atest::call_service(&app, raw_insert("{}").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""{}""#)
+        );
+        assert_eq!(state.store.len(), 0);
+    }
+
+    #[actix_web::test]
+    async fn insert_duplicate_key_last_value_wins() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let body =
+            atest::call_and_read_body(&app, raw_insert(r#"{"a":"1","a":"2"}"#).to_request()).await;
+        assert_eq!(body, web::Bytes::from_static(br#""{\"a\":\"2\"}""#));
+        assert_eq!(state.store.get("a"), Ok("2".to_owned()));
+        assert_eq!(state.store.len(), 1);
+    }
+
+    #[actix_web::test]
+    async fn insert_overwrites_existing_key() {
+        let state = test_state();
+        state.store.insert("a".into(), "old".into());
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp = atest::call_service(&app, raw_insert(r#"{"a":"new"}"#).to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let got =
+            atest::call_and_read_body(&app, atest::TestRequest::get().uri("/key/a").to_request())
+                .await;
+        assert_eq!(got, web::Bytes::from_static(br#""new""#));
+        assert_eq!(state.store.len(), 1);
+    }
+
+    #[actix_web::test]
+    async fn insert_non_ascii_round_trips() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let echo = atest::call_and_read_body(&app, raw_insert(r#"{"u":"ü €"}"#).to_request()).await;
+        assert_eq!(echo, r#""{\"u\":\"ü €\"}""#.as_bytes());
+        let got =
+            atest::call_and_read_body(&app, atest::TestRequest::get().uri("/key/u").to_request())
+                .await;
+        assert_eq!(got, r#""ü €""#.as_bytes());
+        assert_eq!(state.store.get("u"), Ok("ü €".to_owned()));
+    }
+
+    #[actix_web::test]
+    async fn insert_over_256_kib_is_413() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp = atest::call_service(&app, raw_insert(vec![b'a'; 300 * 1024]).to_request()).await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(state.store.is_empty());
     }
 
     #[actix_web::test]

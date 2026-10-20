@@ -46,19 +46,20 @@ impl Store {
         self.map.pin().insert(key, value).cloned()
     }
 
-    /// Validate every entry first, then write them all and return the count.
-    /// Nothing is written when any entry is an error.
-    pub fn insert_many<I>(&self, entries: I) -> Result<usize, StoreError>
-    where
-        I: IntoIterator<Item = Result<(String, String), StoreError>>,
-    {
-        let validated: Vec<(String, String)> = entries.into_iter().collect::<Result<_, _>>()?;
-        let count = validated.len();
+    /// Write every pair under one map guard and return the number written.
+    ///
+    /// This cannot fail: callers validate the whole batch before calling it
+    /// (the HTTP handler does so through `legacy::parse_insert_body`), so an
+    /// invalid body writes nothing. It is not atomic for concurrent readers: a
+    /// simultaneous `list()` or `get()` may observe a partially written batch.
+    pub fn insert_all<I: IntoIterator<Item = (String, String)>>(&self, entries: I) -> usize {
         let map = self.map.pin();
-        for (key, value) in validated {
+        let mut count = 0;
+        for (key, value) in entries {
             map.insert(key, value);
+            count += 1;
         }
-        Ok(count)
+        count
     }
 
     /// Remove `key` and return the value it held, or `NotFound`.
@@ -128,25 +129,13 @@ mod tests {
     }
 
     #[test]
-    fn insert_many_writes_all() {
+    fn insert_all_writes_all_and_counts() {
         let store = Store::new();
-        let n = store.insert_many([Ok(kv("a", "1")), Ok(kv("b", "2"))]);
-        assert_eq!(n, Ok(2));
+        let n = store.insert_all([kv("a", "1"), kv("b", "2")]);
+        assert_eq!(n, 2);
         assert_eq!(store.get("a"), Ok("1".to_owned()));
         assert_eq!(store.get("b"), Ok("2".to_owned()));
-    }
-
-    #[test]
-    fn insert_many_all_or_nothing() {
-        let store = Store::new();
-        store.insert("keep".into(), "v".into());
-        let before = store.len();
-        let bad = || StoreError::InvalidInput("bad entry".into());
-        let result = store.insert_many([Ok(kv("x", "1")), Err(bad()), Ok(kv("y", "2"))]);
-        assert_eq!(result, Err(bad()));
-        assert_eq!(store.get("x"), Err(StoreError::NotFound("x".into())));
-        assert_eq!(store.get("y"), Err(StoreError::NotFound("y".into())));
-        assert_eq!(store.len(), before);
+        assert_eq!(store.len(), 2);
         assert!(!store.is_empty());
     }
 
@@ -210,5 +199,31 @@ mod tests {
         });
         assert_eq!(store.len(), 400);
         assert_eq!(store.get("t3-k99"), Ok("v99".to_owned()));
+    }
+
+    #[test]
+    fn concurrent_remove_of_one_key_succeeds_once() {
+        let store = Store::new();
+        store.insert("k".into(), "v".into());
+        let results: Vec<Result<String, StoreError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let store = store.clone();
+                    s.spawn(move || store.remove("k"))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("remover thread panicked"))
+                .collect()
+        });
+        let ok: Vec<&String> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+        assert_eq!(ok, vec!["v"]);
+        let not_found = results
+            .iter()
+            .filter(|r| **r == Err(StoreError::NotFound("k".into())))
+            .count();
+        assert_eq!(not_found, 7);
+        assert!(store.is_empty());
     }
 }
