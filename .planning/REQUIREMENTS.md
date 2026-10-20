@@ -133,12 +133,58 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| TOOL-01 | Phase 1 | Pending |
+| TOOL-02 | Phase 1 | Pending |
+| TOOL-03 | Phase 1 | Pending |
+| DEPS-01 | Phase 1 | Pending |
+| DEPS-02 | Phase 1 | Pending |
+| DEPS-03 | Phase 1 | Pending |
+| DEPS-04 | Phase 1 | Pending |
+| ARCH-01 | Phase 1 | Pending |
+| ARCH-02 | Phase 2 | Pending |
+| ARCH-03 | Phase 2 | Pending |
+| ARCH-04 | Phase 1 | Pending |
+| HTTP-01 | Phase 2 | Pending |
+| HTTP-02 | Phase 2 | Pending |
+| HTTP-03 | Phase 2 | Pending |
+| HTTP-04 | Phase 2 | Pending |
+| HTTP-05 | Phase 2 | Pending |
+| HTTP-06 | Phase 2 | Pending |
+| HTTP-07 | Phase 3 | Pending |
+| HTTP-08 | Phase 2 | Pending |
+| ROBU-01 | Phase 2 | Pending |
+| ROBU-02 | Phase 2 | Pending |
+| ROBU-03 | Phase 3 | Pending |
+| ROBU-04 | Phase 3 | Pending |
+| ROBU-05 | Phase 5 | Pending |
+| ROBU-06 | Phase 5 | Pending |
+| JSRT-01 | Phase 3 | Pending |
+| JSRT-02 | Phase 3 | Pending |
+| JSRT-03 | Phase 3 | Pending |
+| JSRT-04 | Phase 3 | Pending |
+| JSRT-05 | Phase 3 | Pending |
+| JSRT-06 | Phase 3 | Pending |
+| TEST-01 | Phase 2 | Pending |
+| TEST-02 | Phase 2 | Pending |
+| TEST-03 | Phase 3 | Pending |
+| TEST-04 | Phase 5 | Pending |
+| TEST-05 | Phase 3 | Pending |
+| TEST-06 | Phase 3 | Pending |
+| CI-01 | Phase 4 | Pending |
+| CI-02 | Phase 4 | Pending |
+| CI-03 | Phase 4 | Pending |
+| DOCK-01 | Phase 6 | Pending |
+| DOCK-02 | Phase 6 | Pending |
+| DOCK-03 | Phase 6 | Pending |
+| DOCS-01 | Phase 6 | Pending |
+| DOCS-02 | Phase 6 | Pending |
+| DOCS-03 | Phase 6 | Pending |
 
 **Coverage:**
 - v1 requirements: 46 total
-- Mapped to phases: 0
-- Unmapped: 46 ⚠️
+- Mapped to phases: 46
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-10-20*
-*Last updated: 2026-10-20 after initial definition*
+*Last updated: 2026-10-20 after roadmap creation (traceability mapped to 6 phases)*
