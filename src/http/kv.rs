@@ -369,6 +369,23 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn insert_out_of_range_number_is_422_naming_key() {
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp = atest::call_service(&app, raw_insert(r#"{"a": 1e400}"#).to_request()).await;
+        let body = crate::http::tests::assert_json_error(
+            resp,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_input",
+        )
+        .await;
+        let message = body["message"].as_str().expect("string message");
+        assert!(message.contains("key a"), "message: {message}");
+        assert!(state.store.is_empty());
+    }
+
+    #[actix_web::test]
     async fn insert_rejected_twice_leaves_store_unchanged() {
         let state = test_state();
         let app =

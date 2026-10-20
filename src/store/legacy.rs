@@ -3,6 +3,9 @@
 //! Shared by the HTTP layer and, from Phase 3, the JS ops, so both speak one codec.
 use super::StoreError;
 
+use std::fmt;
+
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
 use serde_json::error::Category;
 use serde_json::{Map, Value};
 
@@ -10,15 +13,24 @@ use serde_json::{Map, Value};
 ///
 /// Returns the pairs in body order (serde_json `preserve_order` is enabled).
 /// Text that is not JSON at all (a syntax error, an empty or truncated body,
-/// trailing characters, nesting past serde_json's recursion limit) gives
-/// `MalformedJson`. Valid JSON of the wrong shape (not an object, or an object
-/// with a non-string value) gives `InvalidInput`, naming the offending key.
+/// trailing characters) gives `MalformedJson`. Valid JSON of the wrong shape
+/// (not an object, or an object with a non-string value) gives `InvalidInput`,
+/// naming the offending key. That includes valid JSON that serde_json cannot
+/// represent as a `Value`: a number outside the `f64` range (`{"a": 1e400}`) or
+/// nesting past serde_json's recursion limit is reported against its key, or as
+/// "not a JSON object" when it is the whole body. With duplicate keys the last
+/// occurrence wins (serde_json map semantics), so only that value is checked.
 pub fn parse_insert_body(body: &str) -> Result<Vec<(String, String)>, StoreError> {
-    let value: Value = serde_json::from_str(body).map_err(|e| match e.classify() {
-        // Defensive: deserializing into `Value` never reports a data error.
+    // Pass 1: syntax only. `IgnoredAny` scans numbers without converting them and
+    // has no recursion limit, so only real syntax, EOF or I/O errors fail here.
+    serde_json::from_str::<IgnoredAny>(body).map_err(|e| match e.classify() {
+        // Defensive: `IgnoredAny` never reports a data error.
         Category::Data => StoreError::InvalidInput(e.to_string()),
         Category::Syntax | Category::Eof | Category::Io => StoreError::MalformedJson(e.to_string()),
     })?;
+    // Pass 2: the text is valid JSON, so a failure here means a value that
+    // serde_json cannot represent; find the key it belongs to.
+    let value: Value = serde_json::from_str(body).map_err(|e| unrepresentable(body, &e))?;
     let object = value
         .as_object()
         .ok_or_else(|| StoreError::InvalidInput("insert body must be a JSON object".into()))?;
@@ -31,6 +43,49 @@ pub fn parse_insert_body(body: &str) -> Result<Vec<(String, String)>, StoreError
             ))),
         })
         .collect()
+}
+
+/// The `InvalidInput` error for valid JSON that serde_json could not build into a `Value`.
+fn unrepresentable(body: &str, error: &serde_json::Error) -> StoreError {
+    let mut bad_key = None;
+    let mut de = serde_json::Deserializer::from_str(body);
+    // The result is irrelevant: only the key recorded before the failure matters.
+    let _ = FindBadKey(&mut bad_key).deserialize(&mut de);
+    match bad_key {
+        Some(key) => {
+            StoreError::InvalidInput(format!("value for key {key} must be a string: {error}"))
+        }
+        None => StoreError::InvalidInput(format!("insert body must be a JSON object: {error}")),
+    }
+}
+
+/// Walks a top-level JSON object, recording each key before building its value,
+/// so after a failure the slot holds the key whose value could not be built.
+struct FindBadKey<'a>(&'a mut Option<String>);
+
+impl<'de> DeserializeSeed<'de> for FindBadKey<'_> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for FindBadKey<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        while let Some(key) = map.next_key::<String>()? {
+            *self.0 = Some(key);
+            map.next_value::<Value>()?;
+            *self.0 = None;
+        }
+        Ok(())
+    }
 }
 
 /// Format inserted entries as the compact JSON object text the legacy route echoed.
@@ -179,6 +234,38 @@ mod tests {
     #[test]
     fn parse_rejects_deep_nesting() {
         assert!(is_malformed(parse_insert_body(&"[".repeat(200))));
+    }
+
+    #[test]
+    fn parse_out_of_range_number_is_invalid_input_naming_key() {
+        for body in [r#"{"a": 1e400}"#, r#"{"ok":"1","a":-1e400}"#] {
+            match parse_insert_body(body) {
+                Err(StoreError::InvalidInput(m)) => assert!(m.contains("key a"), "message: {m}"),
+                other => panic!("{body}: expected InvalidInput, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_out_of_range_number_body_is_invalid_input() {
+        assert!(is_invalid_input(parse_insert_body("1e400")));
+        assert!(is_invalid_input(parse_insert_body("[1e400]")));
+    }
+
+    #[test]
+    fn parse_valid_deep_nesting_is_invalid_input() {
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        assert!(is_invalid_input(parse_insert_body(&deep)));
+        match parse_insert_body(&format!(r#"{{"ok":"1","a":{deep}}}"#)) {
+            Err(StoreError::InvalidInput(m)) => assert!(m.contains("key a"), "message: {m}"),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_syntax_error_next_to_big_number_is_malformed() {
+        assert!(is_malformed(parse_insert_body(r#"{"a": 1e400"#)));
+        assert!(is_malformed(parse_insert_body(r#"{"a": 1e}"#)));
     }
 
     #[test]
