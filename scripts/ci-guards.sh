@@ -246,6 +246,10 @@ else
     1) ;;
     *) g_errs+=$'\n'"grep failed (exit $rc):"$'\n'"$hits" ;;
   esac
+  # The concurrency group is per ref (D-03); a constant group cancels runs across refs.
+  if ! grep -qxF '  group: ci-${{ github.ref }}' "${wf[@]}"; then
+    g_errs+=$'\n'"concurrency group line '  group: ci-\${{ github.ref }}' missing"
+  fi
   if ! python3 -c 'import yaml' 2>/dev/null; then
     if [[ -n "${CI:-}" ]]; then
       echo "ci-guards: skip [g-structure] PyYAML unavailable"

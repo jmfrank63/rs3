@@ -300,6 +300,9 @@ expect_wf_fail 'pull_request types: [closed]' \
 expect_wf_fail 'extra pull_request_target trigger' \
   "sed -i 's/^  workflow_dispatch:\$/  workflow_dispatch:\n  pull_request_target:/' $WF && grep -q 'pull_request_target' $WF" \
   "unexpected triggers ['pull_request_target']"
+expect_wf_fail 'constant concurrency group: ci' \
+  "sed -i 's/^  group: ci-\${{ github\.ref }}\$/  group: ci/' $WF && grep -qx '  group: ci' $WF" \
+  "concurrency group must be 'ci-\${{ github.ref }}', got 'ci'"
 expect_fail g 'checkout with: ref: main (through the guards)' \
   "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          ref: main|' $WF && grep -q '^          ref: main' $WF"
 
@@ -348,6 +351,9 @@ expect_fail_ci g 'permissions: { contents: write } (flow mapping)' \
 expect_fail_ci g 'push: { branches: [main] } (flow mapping)' \
   "sed -i 's/^  push:\$/  push: { branches: [main] }/' $WF && grep -q '^  push: { branches: \[main\] }' $WF" \
   'forbidden workflow content'
+expect_fail_ci g 'constant concurrency group: ci' \
+  "sed -i 's/^  group: ci-\${{ github\.ref }}\$/  group: ci/' $WF && grep -qx '  group: ci' $WF" \
+  'concurrency group line'
 # Quoted keys and values in block style, and a flow mapping with no forbidden key.
 expect_fail_ci g 'checkout with: "ref": main (quoted key)' \
   "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          \"ref\": main|' $WF && grep -q '^          \"ref\": main' $WF" \

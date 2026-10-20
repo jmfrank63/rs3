@@ -34,6 +34,7 @@ FORBIDDEN_KEYS = ("continue-on-error", "env", "if", "shell")
 WORKFLOW_KEYS = {"name", "on", True, "permissions", "concurrency", "env", "jobs"}
 TRIGGERS = {"push", "pull_request", "workflow_dispatch"}
 CONCURRENCY_KEYS = {"group", "cancel-in-progress"}
+CONCURRENCY_GROUP = "ci-${{ github.ref }}"
 JOB_KEYS = {"name", "runs-on", "timeout-minutes", "steps"}
 STEP_KEYS = {"name", "uses", "with", "run"}
 ALLOWED_WITH = {
@@ -76,8 +77,12 @@ def main() -> int:
     conc = wf.get("concurrency") or {}
     if not isinstance(conc, dict) or conc.get("cancel-in-progress") is not True or not conc.get("group"):
         errs.append("concurrency group with cancel-in-progress: true required")
-    elif extra := unexpected(conc, CONCURRENCY_KEYS):
-        errs.append(f"concurrency: unexpected keys {extra}")
+    else:
+        if extra := unexpected(conc, CONCURRENCY_KEYS):
+            errs.append(f"concurrency: unexpected keys {extra}")
+        # Per ref (D-03): a constant group would let any push cancel runs on every other ref.
+        if conc.get("group") != CONCURRENCY_GROUP:
+            errs.append(f"concurrency group must be {CONCURRENCY_GROUP!r}, got {conc.get('group')!r}")
     if (wf.get("env") or {}) != {"CARGO_TERM_COLOR": "always"}:
         errs.append(f"workflow env must be only CARGO_TERM_COLOR, got {wf.get('env')!r}")
     if "defaults" in wf:
