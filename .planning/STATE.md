@@ -83,9 +83,11 @@ Recent decisions affecting current work:
 - [Phase 02]: [02-03] Store::insert_all (infallible, one guard, returns count) replaces insert_many; partial-batch visibility documented; Phase 3 op_rs3_insert reuses parse-then-insert_all
 - [Phase 02]: [02-03] /list escapes keys and values via serde_json Value Display in the legacy envelope; ,] quirk dropped; codec shared with op_rs3_list
 - [Phase 02]: [02-03] [lints.clippy] unwrap_used/expect_used = deny with clippy.toml test allowances; no suppression attributes
+- [Phase 02 review-fix]: config keys lowercased before precedence (env always wins over .env); config map restricted to exactly server.host/server.port; /insert: syntax/EOF/invalid-UTF-8/unpaired-surrogate-escape → 400, out-of-range number / valid over-deep nesting → 422 naming the key
 
 ### Pending Todos
 
+- [Phase 3]: Review housekeeping from 02-REVIEW-DISPOSITION: IN-01 give `ApiError::Internal` a real path (JS host faults → 500) plus a test; IN-04 fix the "first problem in body order decides" doc sentence in `parse_insert_body`; IN-05 rename `parse_rejects_deep_nesting` / `insert_deeply_nested_is_400_json` to truncated-input names.
 - [Phase 4]: Add a CI grep check that fails on new `#[allow(..)]` / `#[cfg_attr(.., allow(..))]` suppression attributes — operator directive (01-UAT test 4).
 - [Phase 4]: Do NOT push; validate the workflow locally (actionlint/YAML lint) and record the remote x86_64 CI run as a pending human UAT item.
 
@@ -96,7 +98,15 @@ Recent decisions affecting current work:
 - [Phase 4]: Verifying CI requires pushing `modernize-toolchain` to origin (github.com/jmfrank63/rs3).
 - [Phase 6]: Docker isn't installed on the dev host, so the image build and smoke test need a CI job or another machine.
 - [Env]: `/tmp` is about 96% full. Keep `target/` under the project dir, since a debug build with V8 is about 2.6 GB.
-- [Open]: The user should confirm the behaviour changes (`/list` escaping, sort order and whitespace; 404 replacing `"[]"`; the op rename) and have them recorded in PROJECT.md Key Decisions.
+- [Open]: The user should confirm the behaviour changes (`/list` escaping + sort order — legacy `" : "` whitespace is now preserved; 404 replacing `"[]"`; 400/422 inserts; BOM/malformed .env now fail startup; the op rename) and have them recorded in PROJECT.md Key Decisions.
+
+## Deferred Verification
+
+| Phase | State | Resume |
+|-------|-------|--------|
+| 02 | verification_deferred_human | /gsd-verify-work 02 |
+
+Phase 02: all automated must-haves verified (18/18, 13/13 requirements). 4 human items are in `02-UAT.md`: three live dotenv-file binary checks (a project hook blocks agents from creating the file) and the no-suppression prohibition (Phase 4 CI grep will wire it). Per operator directive the autonomous run continues to Phase 3.
 
 ## Deferred Items
 
