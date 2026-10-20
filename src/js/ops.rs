@@ -425,7 +425,9 @@ mod tests {
         store.insert("inner".into(), "1".into());
         let ctx = ExecCtx::new(store.clone());
         ctx.note_host_fault();
-        // The fault predates this run, so its completion value comes back.
+        // Pre-setting the flag is test-only: in production no run starts on a
+        // faulted job. The fault predates this run, so its completion value
+        // comes back.
         let src = r#"const g = (f) => { try { f(); return 'no throw'; }
                        catch (e) { return e.name + ': ' + e.message; } };
                      [g(() => Deno.core.ops.op_rs3_list()),
@@ -439,6 +441,8 @@ mod tests {
         assert!(store.get("w").is_err());
     }
 
+    /// Pins the defence-in-depth branch in `run_script`, which production
+    /// cannot reach while every op refuses after a fault.
     #[test]
     fn a_fault_recorded_before_a_run_is_not_blamed_on_it() {
         let ctx = ExecCtx::new(Store::new());

@@ -19,11 +19,14 @@ use super::ops::{ExecCtx, rs3_ext};
 ///
 /// A host fault in a nested runtime started by `op_rs3_patch` during this run
 /// makes the run answer `ExecError::Internal`, even if the script caught the
-/// error the op threw. The detail was logged where the fault happened. Only a
-/// fault recorded while this run was in progress counts: a fault that was
-/// already recorded when the run started belongs to an earlier run of the same
-/// job, so it is not blamed on this one. The top level always starts with a
-/// clean job, so it still answers `Internal` once any level has faulted.
+/// error the op threw. The detail was logged where the fault happened.
+///
+/// Only a fault recorded while this run was in progress is blamed on it. A
+/// fault already recorded when the run started is not. That case is
+/// unreachable while every op refuses after a fault (`op_rs3_patch` never
+/// starts a nested run once the flag is set, and the top level starts with a
+/// fresh job); the check is kept so attribution stays correct if that rule is
+/// relaxed.
 pub fn run_script(ctx: ExecCtx, name: &str, source: String) -> Result<String, ExecError> {
     let watch = ctx.clone();
     let faulted_before = watch.host_fault();
