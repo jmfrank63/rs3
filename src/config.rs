@@ -1,8 +1,13 @@
 //! Server configuration.
 //!
-//! Loads a dotenv file if one is present (it never overrides variables that are
-//! already set) and then reads `SERVER.HOST` and `SERVER.PORT` from the process
-//! environment. There are no defaults: missing or invalid values are an error.
+//! Settings come from the dotenv file (looked up in the current directory, then
+//! its ancestors) overlaid by the process environment, which wins. The process
+//! environment is only read, never modified. A missing dotenv file is ignored;
+//! any other dotenv problem (a line that does not parse, an unreadable file) is
+//! a configuration error. `SERVER.HOST` and `SERVER.PORT` are required: there
+//! are no defaults, and missing or invalid values are an error.
+use std::ffi::OsString;
+
 use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 
@@ -19,14 +24,70 @@ pub struct Settings {
     pub server: ServerSettings,
 }
 
+/// Merge dotenv pairs and environment pairs into one configuration map.
+///
+/// Precedence: inside the dotenv source the first occurrence of a key wins over
+/// later duplicates, and every environment entry overrides the dotenv source.
+/// The first dotenv error is returned before any pair is used, so a malformed
+/// file is never half-applied. Environment entries whose name or value is not
+/// valid UTF-8 are skipped.
+///
+/// This function is pure: it touches neither the process environment nor the
+/// filesystem.
+pub fn merge_dotenv_env<I, E>(
+    dotenv: Option<I>,
+    env: E,
+) -> Result<::config::Map<String, String>, ConfigError>
+where
+    I: IntoIterator<Item = dotenvy::Result<(String, String)>>,
+    E: IntoIterator<Item = (OsString, OsString)>,
+{
+    let mut vars = ::config::Map::new();
+    if let Some(items) = dotenv {
+        for item in items {
+            let (key, value) = item.map_err(dotenv_error)?;
+            vars.entry(key).or_insert(value);
+        }
+    }
+    for (key, value) in env {
+        if let (Ok(key), Ok(value)) = (key.into_string(), value.into_string()) {
+            vars.insert(key, value);
+        }
+    }
+    Ok(vars)
+}
+
+/// A dotenv failure as a configuration error whose text starts with `.env: `.
+fn dotenv_error(e: dotenvy::Error) -> ConfigError {
+    ConfigError::Message(format!(".env: {e}"))
+}
+
 impl Settings {
-    /// Load the dotenv file (if present), then read the process environment.
+    /// Read the dotenv file (if present) and the process environment, modifying neither.
     pub fn load() -> Result<Self, ConfigError> {
-        dotenvy::dotenv().ok();
-        Self::from_env_source(Environment::default())
+        Self::from_sources(dotenvy::dotenv_iter(), std::env::vars_os())
     }
 
-    /// Build settings from an explicit map instead of the process environment (for tests: edition 2024 makes env mutation unsafe, and unsafe code is forbidden here).
+    /// Build settings from a dotenv lookup result and an environment list.
+    ///
+    /// A not-found dotenv result is ignored; any other dotenv error becomes a
+    /// configuration error whose text starts with `.env: `.
+    pub fn from_sources<R: std::io::Read, E>(
+        dotenv: dotenvy::Result<dotenvy::Iter<R>>,
+        env: E,
+    ) -> Result<Self, ConfigError>
+    where
+        E: IntoIterator<Item = (OsString, OsString)>,
+    {
+        let file = match dotenv {
+            Ok(iter) => Some(iter),
+            Err(e) if e.not_found() => None,
+            Err(e) => return Err(dotenv_error(e)),
+        };
+        Self::from_map(merge_dotenv_env(file, env)?)
+    }
+
+    /// Build settings from an explicit map of variable names to values.
     pub fn from_map(vars: ::config::Map<String, String>) -> Result<Self, ::config::ConfigError> {
         Self::from_env_source(Environment::default().source(Some(vars)))
     }
@@ -44,6 +105,13 @@ mod tests {
         pairs
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (OsString::from(*k), OsString::from(*v)))
             .collect()
     }
 
@@ -90,5 +158,50 @@ mod tests {
         // The shell-friendly SERVER_HOST alias is deferred (OPS-02), not silently accepted.
         let r = Settings::from_map(vars(&[("SERVER_HOST", "h"), ("SERVER_PORT", "1")]));
         assert!(r.is_err(), "underscore names were mapped: {r:?}");
+    }
+
+    #[test]
+    fn malformed_dotenv_is_error_with_env_prefix() {
+        let content = "SERVER.HOST=a\nSERVER.PORT 5000\n";
+        let e = Settings::from_sources(Ok(dotenvy::from_read_iter(content.as_bytes())), env(&[]))
+            .unwrap_err();
+        assert!(e.to_string().starts_with(".env: "), "unexpected error: {e}");
+        let merged = merge_dotenv_env(Some(dotenvy::from_read_iter(content.as_bytes())), env(&[]));
+        assert!(
+            merged.is_err(),
+            "malformed dotenv was half-loaded: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn unreadable_dotenv_is_error() {
+        let denied = dotenvy::Error::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let e = Settings::from_sources::<&[u8], _>(
+            Err(denied),
+            env(&[("SERVER.HOST", "h"), ("SERVER.PORT", "1")]),
+        )
+        .unwrap_err();
+        assert!(e.to_string().starts_with(".env: "), "unexpected error: {e}");
+    }
+
+    #[test]
+    fn missing_dotenv_file_uses_env_only() {
+        let missing = dotenvy::Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let s = Settings::from_sources::<&[u8], _>(
+            Err(missing),
+            env(&[("SERVER.HOST", "h"), ("SERVER.PORT", "1")]),
+        )
+        .expect("a missing dotenv file is ignored");
+        assert_eq!(s.server.host, "h");
+        assert_eq!(s.server.port, 1);
+    }
+
+    #[test]
+    fn dotenv_source_configures_settings() {
+        let content = "SERVER.HOST=f\nSERVER.PORT=2\n";
+        let s = Settings::from_sources(Ok(dotenvy::from_read_iter(content.as_bytes())), env(&[]))
+            .expect("dotenv source supplies host and port");
+        assert_eq!(s.server.host, "f");
+        assert_eq!(s.server.port, 2);
     }
 }
