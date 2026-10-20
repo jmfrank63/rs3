@@ -196,11 +196,16 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
                 .to_owned(),
         ),
         other => {
-            // Host details go to stderr only, escaped so they cannot forge log lines.
+            // Host details go to stderr only, escaped so they cannot forge log
+            // lines. `Internal` already displays with a "JS host failure"
+            // prefix, so log its bare detail.
+            let detail = match other {
+                super::ExecError::Internal(m) => m,
+                e => e.to_string(),
+            };
             eprintln!(
-                "error: nested JS host failure in {key:?} at depth {}: {:?}",
-                ctx.depth + 1,
-                other.to_string()
+                "error: nested JS host failure in {key:?} at depth {}: {detail:?}",
+                ctx.depth + 1
             );
             ctx.note_host_fault();
             internal_error()

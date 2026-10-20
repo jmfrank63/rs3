@@ -33,7 +33,12 @@ impl From<ExecError> for ApiError {
         match e {
             ExecError::Script { message } => ApiError::JsError(message),
             ExecError::Unavailable | ExecError::Internal(_) => {
-                eprintln!("error: JS host failure: {e}");
+                // `Internal` already displays with this prefix; log its bare detail.
+                let detail = match e {
+                    ExecError::Internal(m) => m,
+                    other => other.to_string(),
+                };
+                eprintln!("error: JS host failure: {detail}");
                 ApiError::Internal
             }
         }
