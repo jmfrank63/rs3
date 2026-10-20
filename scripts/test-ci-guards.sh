@@ -54,6 +54,28 @@ expect_fail() {
   fi
 }
 
+# expect_wf_fail LABEL SNIPPET EXTRA: plant SNIPPET in a fresh copy and require
+# scripts/check-workflow.py itself (not the content grep in front of it in guard (g)) to
+# exit 1 with the fixed string EXTRA in its output.
+expect_wf_fail() {
+  local label=$1 snippet=$2 extra=$3 out rc
+  cases=$((cases + 1))
+  fresh
+  if ! (cd "$SCRATCH" && bash -c "$snippet"); then
+    echo "MISSED check-workflow: $label (setup failed)"
+    missed=$((missed + 1))
+    return
+  fi
+  out=$(cd "$SCRATCH" && python3 scripts/check-workflow.py 2>&1) && rc=0 || rc=$?
+  if [[ $rc -eq 1 && "$out" == *"$extra"* ]]; then
+    echo "caught check-workflow: $label"
+  else
+    echo "MISSED check-workflow: $label (rc=$rc)"
+    printf '%s\n' "$out" | sed 's/^/    /'
+    missed=$((missed + 1))
+  fi
+}
+
 PY_SHIM=$(cat <<'SNIP'
 mkdir -p shim
 cat > shim/python3 <<'EOF'
@@ -211,6 +233,38 @@ cat >> .github/workflows/ci.yml <<'EOF'
 EOF
 SNIP
 )"
+
+# --- (g) check-workflow.py allow-lists, exercised directly ---------------------------------
+expect_wf_fail 'checkout with: ref: main' \
+  "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          ref: main|' $WF && grep -q '^          ref: main' $WF" \
+  "unexpected with: inputs ['ref'] for actions/checkout@v7"
+expect_wf_fail 'checkout with: repository: other/repo' \
+  "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          repository: other/repo|' $WF && grep -q 'repository: other/repo' $WF" \
+  "unexpected with: inputs ['repository'] for actions/checkout@v7"
+expect_wf_fail 'rust-toolchain with: toolchain: nightly' \
+  "sed -i 's|^          components: rustfmt, clippy\$|          components: rustfmt, clippy\n          toolchain: nightly|' $WF && grep -q 'toolchain: nightly' $WF" \
+  "unexpected with: inputs ['toolchain'] for dtolnay/rust-toolchain@1.99.1"
+expect_wf_fail 'working-directory: experiments/hashring on the cargo test step' \
+  "sed -i 's|^        run: cargo test --locked\$|        run: cargo test --locked\n        working-directory: experiments/hashring|' $WF && grep -q 'working-directory' $WF" \
+  "unexpected keys ['working-directory']"
+expect_wf_fail 'job-level permissions: write-all' \
+  "sed -i 's/^    timeout-minutes: 45\$/    timeout-minutes: 45\n    permissions: write-all/' $WF && grep -q 'permissions: write-all' $WF" \
+  "job: unexpected keys ['permissions']"
+expect_wf_fail 'job-level container image' \
+  "sed -i 's/^    timeout-minutes: 45\$/    timeout-minutes: 45\n    container: rust:1.99.1/' $WF && grep -q 'container: rust' $WF" \
+  "job: unexpected keys ['container']"
+expect_wf_fail "pull_request paths-ignore: ['**']" \
+  "sed -i \"s/^  pull_request:\\\$/  pull_request:\n    paths-ignore: ['**']/\" $WF && grep -q 'paths-ignore' $WF" \
+  'pull_request trigger must not be filtered'
+expect_wf_fail 'pull_request types: [closed]' \
+  "sed -i 's/^  pull_request:\$/  pull_request:\n    types: [closed]/' $WF && grep -q 'types: \[closed\]' $WF" \
+  'pull_request trigger must not be filtered'
+expect_wf_fail 'extra pull_request_target trigger' \
+  "sed -i 's/^  workflow_dispatch:\$/  workflow_dispatch:\n  pull_request_target:/' $WF && grep -q 'pull_request_target' $WF" \
+  "unexpected triggers ['pull_request_target']"
+expect_fail g 'checkout with: ref: main (through the guards)' \
+  "sed -i 's|^        uses: actions/checkout@v7\$|        uses: actions/checkout@v7\n        with:\n          ref: main|' $WF && grep -q '^          ref: main' $WF"
+
 expect_fail g 'ci.yml deleted (zero workflows)' \
   "rm $WF" 'found: none'
 expect_fail g 'PyYAML unavailable outside CI' "$PY_SHIM"

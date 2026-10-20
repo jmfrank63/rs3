@@ -28,6 +28,24 @@ REQUIRED_RUNS = [
 ]
 # Keys that could weaken or bypass a gate step if set on the job or a step.
 FORBIDDEN_KEYS = ("continue-on-error", "env", "if", "shell")
+# Allow-lists: anything else could redirect or neuter the gates (checkout `ref:`/`repository:`,
+# `working-directory`, job-level `permissions`, `container`, `services`, a `toolchain:` override,
+# trigger filters). PyYAML loads the bare key `on` as True, so both spellings are allowed.
+WORKFLOW_KEYS = {"name", "on", True, "permissions", "concurrency", "env", "jobs"}
+TRIGGERS = {"push", "pull_request", "workflow_dispatch"}
+CONCURRENCY_KEYS = {"group", "cancel-in-progress"}
+JOB_KEYS = {"name", "runs-on", "timeout-minutes", "steps"}
+STEP_KEYS = {"name", "uses", "with", "run"}
+ALLOWED_WITH = {
+    "actions/checkout@v7": set(),
+    "dtolnay/rust-toolchain@1.99.1": {"components"},
+    "Swatinem/rust-cache@v2": set(),
+}
+
+
+def unexpected(obj, allowed):
+    """Keys of obj outside allowed; FORBIDDEN_KEYS and defaults are reported separately."""
+    return sorted(str(k) for k in set(obj) - allowed - set(FORBIDDEN_KEYS) - {"defaults"})
 
 
 def main() -> int:
@@ -41,17 +59,25 @@ def main() -> int:
         print(f"check-workflow: {PATH} is not a YAML mapping", file=sys.stderr)
         return 1
     errs = []
+    if extra := unexpected(wf, WORKFLOW_KEYS):
+        errs.append(f"workflow: unexpected keys {extra}")
     # PyYAML implements YAML 1.1: the bare key `on` loads as boolean True.
     triggers = wf.get("on", wf.get(True))
     if not isinstance(triggers, dict) or "push" not in triggers or "pull_request" not in triggers:
         errs.append(f"triggers must include push and pull_request, got {triggers!r}")
-    elif triggers.get("push") not in (None, {}):
-        errs.append("push trigger must not be filtered (all branches)")
+    else:
+        if extra := sorted(str(t) for t in set(triggers) - TRIGGERS):
+            errs.append(f"unexpected triggers {extra} (allowed: {sorted(TRIGGERS)})")
+        for t in sorted(TRIGGERS):
+            if triggers.get(t) not in (None, {}):
+                errs.append(f"{t} trigger must not be filtered, got {triggers.get(t)!r}")
     if wf.get("permissions") != {"contents": "read"}:
         errs.append(f"permissions must be {{contents: read}}, got {wf.get('permissions')!r}")
     conc = wf.get("concurrency") or {}
     if not isinstance(conc, dict) or conc.get("cancel-in-progress") is not True or not conc.get("group"):
         errs.append("concurrency group with cancel-in-progress: true required")
+    elif extra := unexpected(conc, CONCURRENCY_KEYS):
+        errs.append(f"concurrency: unexpected keys {extra}")
     if (wf.get("env") or {}) != {"CARGO_TERM_COLOR": "always"}:
         errs.append(f"workflow env must be only CARGO_TERM_COLOR, got {wf.get('env')!r}")
     if "defaults" in wf:
@@ -78,12 +104,28 @@ def main() -> int:
         for key in FORBIDDEN_KEYS:
             if key in obj:
                 errs.append(f"{scope}: {key} is forbidden")
+    if extra := unexpected(job, JOB_KEYS):
+        errs.append(f"job: unexpected keys {extra}")
+    for i, s in enumerate(steps):
+        if extra := unexpected(s, STEP_KEYS):
+            errs.append(f"step {i}: unexpected keys {extra}")
+        if ("uses" in s) == ("run" in s):
+            errs.append(f"step {i}: needs exactly one of uses or run")
+        with_ = s.get("with") or {}
+        if not isinstance(with_, dict):
+            errs.append(f"step {i}: with must be a mapping, got {with_!r}")
+        elif "run" in s and with_:
+            errs.append(f"step {i}: with is only allowed on uses steps")
+        elif "uses" in s:
+            if extra := sorted(set(map(str, with_)) - ALLOWED_WITH.get(str(s["uses"]), set())):
+                errs.append(f"step {i}: unexpected with: inputs {extra} for {s['uses']}")
     uses = [s["uses"] for s in steps if "uses" in s]
     if uses != EXPECTED_USES:
         errs.append(f"uses must be exactly {EXPECTED_USES} in order, got {uses}")
     for s in steps:
         if str(s.get("uses", "")).startswith("dtolnay/rust-toolchain"):
-            comps = {c.strip() for c in str((s.get("with") or {}).get("components", "")).split(",")}
+            with_ = s.get("with") if isinstance(s.get("with"), dict) else {}
+            comps = {c.strip() for c in str(with_.get("components", "")).split(",")}
             if not {"rustfmt", "clippy"} <= comps:
                 errs.append("dtolnay/rust-toolchain needs components: rustfmt, clippy")
     runs = [str(s["run"]).strip() for s in steps if "run" in s]
