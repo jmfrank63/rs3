@@ -1,4 +1,4 @@
-//! rs3 v0 wire format: the `/insert` request body and its echo.
+//! rs3 v0 wire format: the `/insert` request body, its echo and the `/list` output.
 //!
 //! Shared by the HTTP layer and, from Phase 3, the JS ops, so both speak one codec.
 use super::StoreError;
@@ -38,8 +38,12 @@ pub fn format_insert_echo(entries: &[(String, String)]) -> String {
 
 /// Format entries as the rs3 v0 `/list` text `[{"k" : "v"},...]`; Phase 2 replaces this shape.
 pub fn format_list(entries: &[(String, String)]) -> String {
-    let _ = entries;
-    String::new() // RED stub
+    let items: Vec<String> = entries
+        .iter()
+        .map(|(k, v)| format!("{{\"{k}\" : \"{v}\"}}"))
+        .collect();
+    // The legacy handler applied this replacement last; keep it for byte parity.
+    format!("[{}]", items.join(",")).replace(",]", "]")
 }
 
 #[cfg(test)]

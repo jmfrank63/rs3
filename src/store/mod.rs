@@ -70,7 +70,15 @@ impl Store {
 
     /// Owned snapshot of every entry, sorted by key.
     pub fn list(&self) -> Vec<(String, String)> {
-        Vec::new() // RED stub
+        let mut entries: Vec<(String, String)> = self
+            .map
+            .pin()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        // Keys are unique, so the unstable sort is deterministic.
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        entries
     }
 
     /// Number of stored entries.
