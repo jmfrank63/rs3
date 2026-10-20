@@ -1,0 +1,1 @@
+{"content":"GitHub Actions cache: default 10 GB per repo, 7-day retention, LRU eviction; since Nov 2025 admins may raise above 10 GB pay-as-you-go; eviction checks moved to hourly (cache thrashing risk).","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-10-20T15:35:34.502Z","ttl":86400000,"kind":"web"}
