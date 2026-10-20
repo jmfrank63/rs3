@@ -143,8 +143,9 @@ else fail c "Cargo.toml lints:"$'\n'"$msg"; fi
 
 # (d) the unprotected V8 platform feature stays on the dev edge only, so the release binary
 # keeps the protected platform.
-# D-07 fallback: if V8 platform init crashes on the x86_64 runner (PKU; the release smoke
-# reports status 139), deno_core's unsafe_use_unprotected_platform feature moves from
+# D-07 fallback: if V8 crashes on the x86_64 runner (PKU; the release smoke reports
+# "server died (status 139)", usually at the first script execution because isolates are
+# created lazily, not at startup), deno_core's unsafe_use_unprotected_platform feature moves from
 # [dev-dependencies] to [dependencies] in Cargo.toml, and this guard is relaxed in that same
 # change. Never apply it pre-emptively (03-RESEARCH resolved Q1).
 # Source code could select the unprotected platform without the feature (the v8 constructors

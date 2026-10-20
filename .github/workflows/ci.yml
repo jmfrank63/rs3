@@ -48,8 +48,10 @@ jobs:
         run: cargo build --release --locked
 
       # Release binary uses the protected V8 platform (no dev-dependency features).
-      # If V8 platform init crashes here (x86_64 PKU), move deno_core's
-      # unsafe_use_unprotected_platform feature from [dev-dependencies] to
-      # [dependencies] and relax guard (d) in scripts/ci-guards.sh in the same change.
+      # If V8 crashes here (x86_64 PKU; the smoke reports status 139, usually at the
+      # first script execution, PATCH /key/m, because isolates are created lazily),
+      # move deno_core's unsafe_use_unprotected_platform feature from
+      # [dev-dependencies] to [dependencies] and relax guard (d) in
+      # scripts/ci-guards.sh in the same change.
       - name: Release smoke
         run: bash scripts/ci-smoke.sh

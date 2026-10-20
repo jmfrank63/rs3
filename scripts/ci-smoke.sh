@@ -10,9 +10,12 @@
 #   PATCH /key/m            -> 200 "120"  (stored script run in V8)
 #   PATCH /key/boom         -> 422 {"error":"js_error","message":"Uncaught Error: boom"}
 #   GET / after JS error    -> 200 "Welcome to rs3", and the server process is still alive
-# A server that dies during startup fails fast with its exit status. Status 139 (SIGSEGV)
-# at startup is the x86_64 PKU symptom of V8 platform init; the D-07 fallback handles it
-# (move unsafe_use_unprotected_platform to [dependencies] and relax guard (d) together).
+# A server that dies fails the smoke with its exit status, whether it dies during startup or
+# during a request. Status 139 (SIGSEGV) is the x86_64 PKU symptom of the protected V8
+# platform. V8 isolates are created lazily on the JS workers, so the crash shows up at the
+# first script execution (PATCH /key/m), not at startup: look for
+# "server died (status 139)". The D-07 fallback handles it (move
+# unsafe_use_unprotected_platform to [dependencies] and relax guard (d) together).
 set -euo pipefail
 ROOT="${CI_SMOKE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT"
@@ -28,7 +31,35 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fail() { echo "ci-smoke: FAIL: $*" >&2; echo "--- server log ---" >&2; cat "$LOG" >&2 || true; exit 1; }
+# status_msg STATUS: "(status N)", plus the D-07 hint for 139 (SIGSEGV).
+status_msg() {
+  printf '(status %s)' "$1"
+  if (( $1 == 139 )); then printf '; SIGSEGV is the x86_64 V8 PKU symptom: apply the D-07 fallback'; fi
+}
+
+# server_exit_note: if the server process has exited, reap it and set NOTE to its exit status,
+# else set NOTE to "". Runs in the main shell (wait only works there). A crashing server may
+# still be exiting when curl sees the dropped connection, so allow it up to 2 s.
+server_exit_note() {
+  NOTE=""
+  [[ -n "$PID" ]] || return 0
+  local st=0 i
+  for i in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || break; sleep 0.1; done
+  if ! kill -0 "$PID" 2>/dev/null; then
+    wait "$PID" || st=$?
+    PID=""
+    NOTE="; server died $(status_msg "$st")"
+  fi
+}
+
+# fail MSG: report MSG (plus the server's exit status if it died), dump the log, exit 1.
+fail() {
+  server_exit_note
+  echo "ci-smoke: FAIL: $*${NOTE}" >&2
+  echo "--- server log ---" >&2
+  cat "$LOG" >&2 || true
+  exit 1
+}
 
 [[ -x "$BIN" ]] || fail "$BIN missing; run cargo build --release --locked first"
 if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then fail "port ${PORT} already in use"; fi
@@ -38,15 +69,16 @@ if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then fail "port ${PORT} a
 env -i PATH="$PATH" SERVER.HOST=127.0.0.1 SERVER.PORT="$PORT" "$BIN" >"$LOG" 2>&1 &
 PID=$!
 
-# Readiness: poll until GET / answers; fail fast (with the exit status) if the server dies,
-# e.g. a V8 platform segfault on x86_64 (PKU) shows up as status 139 here.
+# Readiness: poll until GET / answers; fail fast (with the exit status) if the server dies.
+# GET / never touches V8, so a PKU crash normally surfaces at the first PATCH instead (see
+# server_exit_note, which every failure runs).
 ready=0
 body=""
 for _ in $(seq 1 60); do
   if ! kill -0 "$PID" 2>/dev/null; then
     status=0; wait "$PID" || status=$?
     PID=""
-    fail "server exited during startup (status ${status})"
+    fail "server exited during startup $(status_msg "$status")"
   fi
   if body=$(curl -s --fail --max-time 2 "$BASE/"); then ready=1; break; fi
   sleep 0.5
