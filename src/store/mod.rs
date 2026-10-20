@@ -68,6 +68,11 @@ impl Store {
             .ok_or_else(|| StoreError::NotFound(key.to_owned()))
     }
 
+    /// Owned snapshot of every entry, sorted by key.
+    pub fn list(&self) -> Vec<(String, String)> {
+        Vec::new() // RED stub
+    }
+
     /// Number of stored entries.
     pub fn len(&self) -> usize {
         self.map.len()
@@ -155,6 +160,20 @@ mod tests {
             Err(StoreError::NotFound("missing".into()))
         );
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn list_empty() {
+        assert_eq!(Store::new().list(), Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn list_sorted_by_key() {
+        let store = Store::new();
+        store.insert("b".into(), "2".into());
+        store.insert("a".into(), "1".into());
+        store.insert("c".into(), "3".into());
+        assert_eq!(store.list(), vec![kv("a", "1"), kv("b", "2"), kv("c", "3")]);
     }
 
     #[test]

@@ -36,9 +36,40 @@ pub fn format_insert_echo(entries: &[(String, String)]) -> String {
     Value::Object(map).to_string()
 }
 
+/// Format entries as the rs3 v0 `/list` text `[{"k" : "v"},...]`; Phase 2 replaces this shape.
+pub fn format_list(entries: &[(String, String)]) -> String {
+    let _ = entries;
+    String::new() // RED stub
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn format_list_empty_is_brackets() {
+        assert_eq!(format_list(&[]), "[]");
+    }
+
+    #[test]
+    fn format_list_shape() {
+        assert_eq!(
+            format_list(&pairs(&[("a", "1"), ("b", "2")])),
+            r#"[{"a" : "1"},{"b" : "2"}]"#
+        );
+    }
+
+    #[test]
+    fn format_list_keeps_legacy_replace_quirk() {
+        assert_eq!(format_list(&pairs(&[("k", "x,]")])), r#"[{"k" : "x]"}]"#);
+    }
 
     fn is_invalid_input(r: Result<Vec<(String, String)>, StoreError>) -> bool {
         matches!(r, Err(StoreError::InvalidInput(_)))
