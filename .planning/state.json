@@ -1,0 +1,43 @@
+{
+  "contract": "1.0.0",
+  "flavor": "core",
+  "milestone": null,
+  "phases": [
+    {
+      "number": "1",
+      "name": "Toolchain, Dependencies & Foundation",
+      "status": "pending"
+    },
+    {
+      "number": "2",
+      "name": "HTTP API Port & Error Handling",
+      "status": "pending"
+    },
+    {
+      "number": "3",
+      "name": "JavaScript Runtime Port",
+      "status": "pending"
+    },
+    {
+      "number": "4",
+      "name": "CI Gate on x86_64",
+      "status": "pending"
+    },
+    {
+      "number": "5",
+      "name": "JS Execution Limits",
+      "status": "pending"
+    },
+    {
+      "number": "6",
+      "name": "Docker Image & Documentation",
+      "status": "pending"
+    }
+  ],
+  "next": {
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 1 of 6 · 0% · executing"
+  },
+  "updated_at": "2026-10-20T16:38:03.111Z"
+}
