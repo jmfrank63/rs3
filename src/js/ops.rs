@@ -23,6 +23,10 @@ pub struct ExecCtx {
     /// Test hook: make runtime creation fail at this depth.
     #[cfg(test)]
     pub(crate) fail_runtime_at_depth: Option<u32>,
+    /// Test hook: make runtime creation fail for the script with this name
+    /// (the key `op_rs3_patch` runs), at any depth.
+    #[cfg(test)]
+    pub(crate) fail_runtime_for_key: Option<&'static str>,
 }
 
 impl ExecCtx {
@@ -34,6 +38,8 @@ impl ExecCtx {
             host_fault: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             fail_runtime_at_depth: None,
+            #[cfg(test)]
+            fail_runtime_for_key: None,
         }
     }
 
@@ -46,6 +52,8 @@ impl ExecCtx {
             host_fault: Arc::clone(&self.host_fault),
             #[cfg(test)]
             fail_runtime_at_depth: self.fail_runtime_at_depth,
+            #[cfg(test)]
+            fail_runtime_for_key: self.fail_runtime_for_key,
         }
     }
 
@@ -310,6 +318,12 @@ mod tests {
         ctx
     }
 
+    fn failing_for(store: &Store, key: &'static str) -> ExecCtx {
+        let mut ctx = ExecCtx::new(store.clone());
+        ctx.fail_runtime_for_key = Some(key);
+        ctx
+    }
+
     fn is_internal(r: &Result<String, ExecError>) -> bool {
         matches!(r, Err(ExecError::Internal(_)))
     }
@@ -338,6 +352,27 @@ mod tests {
         let r = run_ctx(failing_at(&store, 1), src);
         assert!(is_internal(&r), "{r:?}");
         assert_eq!(store.get("seen"), Ok("internal error".to_owned()));
+    }
+
+    #[test]
+    fn a_fault_recorded_before_a_run_is_not_blamed_on_it() {
+        let ctx = ExecCtx::new(Store::new());
+        ctx.note_host_fault();
+        assert_eq!(run_ctx(ctx, "6*7"), ok("42"));
+    }
+
+    #[test]
+    fn healthy_patch_after_a_caught_fault_keeps_its_result() {
+        let store = Store::new();
+        store.insert("bad".into(), "1".into());
+        store.insert("good".into(), "'fine'".into());
+        let src = "try { Deno.core.ops.op_rs3_patch('bad') } catch (e) {} \
+                   let r; try { r = Deno.core.ops.op_rs3_patch('good') } \
+                   catch (e) { r = 'threw: ' + e.message } \
+                   Deno.core.ops.op_rs3_insert(JSON.stringify({good_result: r}))";
+        let r = run_ctx(failing_for(&store, "bad"), src);
+        assert!(is_internal(&r), "{r:?}");
+        assert_eq!(store.get("good_result"), Ok("fine".to_owned()));
     }
 
     #[test]
