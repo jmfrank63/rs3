@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: JavaScript Runtime Port
 status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-10-20T20:12:58.968Z"
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-10-20T20:17:22.203Z"
 last_activity: 2026-10-20
 last_activity_desc: Phase 03 execution started
-state_head: b7d508088a405641fd358ae97cce8c39cdf042a6
+state_head: e2bb8361b720acdc6d01778670d8526be36779df
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 8
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-20)
 ## Current Position
 
 Phase: 03 (JavaScript Runtime Port) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-10-20 — Phase 03 execution started
 
@@ -60,6 +60,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02 P02 | 5 min | 2 tasks | 3 files |
 | Phase 02 P03 | 5 min | 3 tasks | 6 files |
 | Phase 03 P01 | 9 min | 3 tasks | 10 files |
+| Phase 03 P02 | 3 min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -88,6 +89,8 @@ Recent decisions affecting current work:
 - [Phase 03]: [03-01] D-04 holds on deno_core 0.412: nested JsRuntime inside #[op2(reentrant)] op_rs3_patch works on the same thread (debug profile); op_panic disabled via rs3_ext middleware
 - [Phase 03]: [03-01] String op args use FromV8 newtype StrArg: strings unchanged, primitives via String(..) (no arg -> undefined, 5 -> 5), objects/symbols throw TypeError; deno_core #[string] maps non-strings to empty string
 - [Phase 03]: [03-01] JsExecutor: bounded rs3-js-* pool (available_parallelism workers, x16 queue, 16 MiB), tokio current_thread per worker, catch_unwind per job, Unavailable when closed; shared cfg(test) LazyLock executor
+- [Phase 03]: [03-02] docs/js-ops.md documents the as-built StrArg rule: primitives coerced like String(..), objects/symbols throw TypeError without running toString; insert objects via JSON.stringify
+- [Phase 03]: [03-02] All JS artefacts migrated by deleting the bootstrap call and renaming the op call only; JSRT-05 stays open until 03-03 (shared-ID gate), JSRT-06 marked complete
 
 ### Pending Todos
 
@@ -124,6 +127,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T20:12:58.850Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-10-20T20:17:22.089Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None

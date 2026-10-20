@@ -54,7 +54,7 @@ Requirements for the modernization milestone. Each maps to roadmap phases.
 - [x] **JSRT-03**: A missing key or invalid input inside an op surfaces as a catchable JS exception, not a process abort
 - [ ] **JSRT-04**: JS execution runs off the actix worker threads (dedicated JS threads) with V8 platform initialised once in `main` before other threads spawn
 - [ ] **JSRT-05**: All JS artefacts (`requests/*.js`, `requests/*.txt`, `requests/*.http`, `src/example.js`, test scripts) use the new `Deno.core.ops.op_rs3_*(...)` syntax with `Deno.core.ops();` calls removed
-- [ ] **JSRT-06**: The old→new op name mapping is documented
+- [x] **JSRT-06**: The old→new op name mapping is documented
 
 ### Testing
 
@@ -163,7 +163,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | JSRT-03 | Phase 3 | Complete |
 | JSRT-04 | Phase 3 | Pending |
 | JSRT-05 | Phase 3 | Pending |
-| JSRT-06 | Phase 3 | Pending |
+| JSRT-06 | Phase 3 | Complete |
 | TEST-01 | Phase 2 | Complete |
 | TEST-02 | Phase 2 | Complete |
 | TEST-03 | Phase 3 | Pending |
