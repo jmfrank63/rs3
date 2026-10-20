@@ -5,4 +5,5 @@
 pub mod config;
 pub mod http;
 pub mod js;
+pub mod state;
 pub mod store;

@@ -1,14 +1,11 @@
 //! Store-backed routes: `POST /insert`, `GET /key/{key}`, `DELETE /key/{key}` and `GET /list`.
-use std::sync::LazyLock;
-
 use actix_web::{HttpResponse, Responder, delete, get, post, web};
 
-use crate::store::{Store, legacy};
+use super::error::ApiError;
+use crate::state::AppState;
+use crate::store::legacy;
 
-// TODO(phase-2): inject via web::Data
-pub(crate) static STORE: LazyLock<Store> = LazyLock::new(Store::new);
-
-/// Register the store routes.
+/// Register the store routes. The shared `AppState` is registered by `http::configure`.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(insert)
         .service(get_key)
@@ -18,46 +15,43 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 
 /// `POST /insert` stores every key/value of a JSON object of strings and echoes it.
 ///
-/// Phase 1 keeps the legacy behaviour of panicking on a bad body; Phase 2 adds 400/422.
+/// The body is fully parsed and validated before anything is written; a bad
+/// body becomes a JSON error response instead of a panic.
 #[post("/insert")]
-pub async fn insert(body: String) -> impl Responder {
-    let entries = legacy::parse_insert_body(&body).unwrap();
+pub async fn insert(state: web::Data<AppState>, body: String) -> Result<HttpResponse, ApiError> {
+    let entries = legacy::parse_insert_body(&body)?;
     let echo = legacy::format_insert_echo(&entries);
-    STORE.insert_many(entries.into_iter().map(Ok)).unwrap();
-    HttpResponse::Ok().json(echo)
+    state.store.insert_many(entries.into_iter().map(Ok))?;
+    Ok(HttpResponse::Ok().json(echo))
 }
 
-/// `GET /key/{key}` returns the stored value.
-///
-/// Phase 1 keeps the legacy semantics: `"[]"` while the store is empty, and a
-/// panic on a missing key. Phase 2 replaces both with 404.
+/// `GET /key/{key}` returns the stored value, or a 404 JSON error for a missing key.
 #[get("/key/{key}")]
-pub async fn get_key(path: web::Path<String>) -> impl Responder {
-    let key = path.into_inner();
-    if STORE.is_empty() {
-        HttpResponse::Ok().json("[]")
-    } else {
-        HttpResponse::Ok().json(STORE.get(&key).unwrap())
-    }
+pub async fn get_key(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    Ok(HttpResponse::Ok().json(state.store.get(&path.into_inner())?))
 }
 
-/// `DELETE /key/{key}` removes the key and returns the value it held.
-///
-/// Phase 1 keeps the legacy semantics of panicking on a missing key; Phase 2 adds 404.
+/// `DELETE /key/{key}` removes the key and returns the value it held, or a 404 JSON error.
 #[delete("/key/{key}")]
-pub async fn delete_key(path: web::Path<String>) -> impl Responder {
-    HttpResponse::Ok().json(STORE.remove(&path.into_inner()).unwrap())
+pub async fn delete_key(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    Ok(HttpResponse::Ok().json(state.store.remove(&path.into_inner())?))
 }
 
 /// `GET /list` returns every stored pair, sorted by key, in the legacy list shape.
 #[get("/list")]
-pub async fn list() -> impl Responder {
-    HttpResponse::Ok().json(legacy::format_list(&STORE.list()))
+pub async fn list(state: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(legacy::format_list(&state.store.list()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::state::test_state;
     use crate::store::StoreError;
     use actix_web::{App, http::StatusCode, test as atest, web};
 
@@ -70,7 +64,9 @@ mod tests {
 
     #[actix_web::test]
     async fn test_insert_is_ok() {
-        let app = atest::init_service(App::new().service(insert)).await;
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
         let resp = atest::call_service(
             &app,
             insert_request(r#"{"insert_test":"John Doe"}"#).to_request(),
@@ -85,7 +81,9 @@ mod tests {
 
     #[actix_web::test]
     async fn test_insert_map_entry_is_ok() {
-        let app = atest::init_service(App::new().service(insert)).await;
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
         let body = atest::call_and_read_body(
             &app,
             insert_request(r#"{"insert_test":"John Doe"}"#).to_request(),
@@ -95,12 +93,15 @@ mod tests {
             body,
             web::Bytes::from_static(br#""{\"insert_test\":\"John Doe\"}""#)
         );
+        assert_eq!(state.store.get("insert_test"), Ok("John Doe".to_owned()));
     }
 
     #[actix_web::test]
     async fn test_get_is_ok() {
-        STORE.insert("get_test".into(), "John Doe".into());
-        let app = atest::init_service(App::new().service(get_key)).await;
+        let state = test_state();
+        state.store.insert("get_test".into(), "John Doe".into());
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
         let req = atest::TestRequest::get()
             .uri("/key/get_test")
             .insert_header(("Content-Type", "application/json"))
@@ -111,9 +112,25 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn get_missing_is_404_json() {
+        let state = test_state();
+        state.store.insert("other".into(), "v".into());
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        let resp = atest::call_service(
+            &app,
+            atest::TestRequest::get().uri("/key/nope").to_request(),
+        )
+        .await;
+        crate::http::tests::assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+    }
+
+    #[actix_web::test]
     async fn test_delete_is_ok() {
-        STORE.insert("delete_test".into(), "John Doe".into());
-        let app = atest::init_service(App::new().service(delete_key)).await;
+        let state = test_state();
+        state.store.insert("delete_test".into(), "John Doe".into());
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
         let req = atest::TestRequest::delete()
             .uri("/key/delete_test")
             .to_request();
@@ -124,15 +141,17 @@ mod tests {
             web::Bytes::from_static(br#""John Doe""#)
         );
         assert_eq!(
-            STORE.get("delete_test"),
+            state.store.get("delete_test"),
             Err(StoreError::NotFound("delete_test".into()))
         );
     }
 
     #[actix_web::test]
     async fn test_list_is_ok() {
-        STORE.insert("list_test".into(), "John Doe".into());
-        let app = atest::init_service(App::new().service(list)).await;
+        let state = test_state();
+        state.store.insert("list_test".into(), "John Doe".into());
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
         let req = atest::TestRequest::get().uri("/list").to_request();
         let resp = atest::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -143,7 +162,9 @@ mod tests {
 
     #[actix_web::test]
     async fn test_insert_same_body_twice_is_idempotent() {
-        let app = atest::init_service(App::new().service(insert)).await;
+        let state = test_state();
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
         let first =
             atest::call_and_read_body(&app, insert_request(r#"{"idem_test":"v"}"#).to_request())
                 .await;
@@ -155,6 +176,7 @@ mod tests {
             web::Bytes::from_static(br#""{\"idem_test\":\"v\"}""#)
         );
         assert_eq!(first, second);
-        assert_eq!(STORE.get("idem_test"), Ok("v".to_owned()));
+        assert_eq!(state.store.get("idem_test"), Ok("v".to_owned()));
+        assert_eq!(state.store.len(), 1);
     }
 }

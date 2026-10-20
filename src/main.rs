@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use actix_web::{App, HttpServer, web};
+use actix_web::{App, HttpServer};
 use rs3::config::Settings;
 
 #[actix_web::main]
@@ -12,19 +12,14 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Main thread, before actix spawns its workers.
     rs3::js::init_platform();
     let host = settings.server.host.clone();
     let port = settings.server.port;
-    println!("Starting Http server at host address: {host}, with port: {port}!");
-    // Created outside the factory closure so every worker shares one instance.
-    let settings = web::Data::new(settings);
-    let server = match HttpServer::new(move || {
-        App::new()
-            .app_data(settings.clone())
-            .configure(rs3::http::configure)
-    })
-    .bind(&(host.clone(), port))
+    // One AppState for the whole process; each worker only clones the closure.
+    let state = rs3::state::AppState::new(settings);
+    let cfg = rs3::http::configure(state);
+    let server = match HttpServer::new(move || App::new().configure(cfg.clone()))
+        .bind((host.as_str(), port))
     {
         Ok(s) => s,
         Err(e) => {
@@ -32,6 +27,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    println!("Starting Http server at host address: {host}, with port: {port}!");
     match server.run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
