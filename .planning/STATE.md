@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 01
-current_phase_name: Toolchain, Dependencies & Foundation
-status: executing
-stopped_at: Phase 1 context gathered
-last_updated: "2026-10-20T16:39:44.922Z"
+current_phase: 2
+current_phase_name: HTTP API Port & Error Handling
+status: planning
+stopped_at: Phase 1 complete, ready to plan Phase 2
+last_updated: "2026-10-20T17:16:34.909Z"
 last_activity: 2026-10-20
-last_activity_desc: Phase 01 execution started
-state_head: 77660881b4c8a4828d2963cab8d3febf350b6901
+last_activity_desc: Phase 1 complete, transitioned to Phase 2
+state_head: 18e5167c02b4a89ef8dff680369504b5076667b2
 progress:
   total_phases: 6
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 3
-  completed_plans: 0
-  percent: 0
+  completed_plans: 3
+  percent: 17
 ---
 
 # Project State
@@ -23,21 +23,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-20)
 
 **Core value:** rs3 builds, tests and lints cleanly on current stable Rust (edition 2024) with only released dependencies, while every existing HTTP route and the JS-executes-against-the-store behaviour keep working with the same semantics.
-**Current focus:** Phase 01 — Toolchain, Dependencies & Foundation
+**Current focus:** Phase 2 — HTTP API Port & Error Handling
 
 ## Current Position
 
-Phase: 01 (Toolchain, Dependencies & Foundation) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 01
-Last activity: 2026-10-20 — Phase 01 execution started
+Phase: 2 — HTTP API Port & Error Handling
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-20 — Phase 1 complete, transitioned to Phase 2
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██░░░░░░░░] 17%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
+- Total plans completed: 3
 - Average duration: -
 - Total execution time: 0.0 hours
 
@@ -45,7 +45,7 @@ Progress: [░░░░░░░░░░] 0%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 1 | 3 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -65,10 +65,14 @@ Recent decisions affecting current work:
 - [Roadmap]: Every phase is in MVP mode, with user-story goals.
 - [Research]: Stack is Rust 1.99.1, deno_core 0.412 (no direct `v8`), actix-web 4.17, papaya 0.2.5, config 0.15 + dotenvy, thiserror 2.
 - [Research]: Status codes are 404 missing key, 400 malformed JSON, 422 bad shape / JS error / depth limit, 504 timeout. Ops throw on a missing key.
+- [Phase 1]: papaya `Store` facade (owned `String`s), lib + thin main, sorted `/list` already shipped, PATCH answers 501 until Phase 3 (two parked PATCH tests).
+- [Phase 1 UAT]: dotenv path verified by operator; rustup auto-install concurrency accepted as risk (override); v8x lock-entry disclosure accepted.
 
 ### Pending Todos
 
-None yet.
+- [Phase 2]: Fix review WR-01 (malformed `.env` half-loaded, error swallowed) and WR-02 (dotenvy `set_var` under a safe API) — operator directive.
+- [Phase 4]: Add a CI grep check that fails on new `#[allow(..)]` / `#[cfg_attr(.., allow(..))]` suppression attributes — operator directive (01-UAT test 4).
+- [Phase 4]: Do NOT push; validate the workflow locally (actionlint/YAML lint) and record the remote x86_64 CI run as a pending human UAT item.
 
 ### Blockers/Concerns
 
@@ -89,6 +93,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T15:53:31.021Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/01-toolchain-dependencies-foundation/01-CONTEXT.md
+Last session: 2026-10-20T17:45:00Z
+Stopped at: Phase 1 complete, ready to plan Phase 2
+Resume file: None

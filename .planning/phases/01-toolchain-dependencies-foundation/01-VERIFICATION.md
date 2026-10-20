@@ -1,8 +1,8 @@
 ---
 phase: 01-toolchain-dependencies-foundation
 verified: 2026-10-20T17:09:26Z
-status: human_needed
-score: 41/43 must-haves verified
+status: passed
+score: 43/43 must-haves verified (1 via operator UAT, 1 via override)
 covered_files:
   - ".planning/phases/01-toolchain-dependencies-foundation/01-01-PLAN.md"
   - ".planning/phases/01-toolchain-dependencies-foundation/01-01-SUMMARY.md"
@@ -22,12 +22,19 @@ covered_files:
   - "src/store/legacy.rs"
   - "src/store/mod.rs"
 covered_digest: "v3:sha256:a782c455a0f3f3ed4c623419ca9a6ed7b0b82f89ea52d22f2cfc4b9292abc660"
-behavior_unverified: 1
-overrides_applied: 0
+behavior_unverified: 0
+overrides_applied: 1
+overrides:
+  - must_have: "(backstop) Concurrent cargo invocations all select 1.99.1, the rustup auto-install of the pin is idempotent, and the target lock serialises builds"
+    reason: "Accepted risk (operator, 01-UAT test 2 skipped): verifying the auto-install clause requires uninstalling the 1.99.1 toolchain, which is not worth it. Toolchain selection and target-lock serialisation were observed directly; CI (Phase 4) installs the pin explicitly via dtolnay/rust-toolchain@1.99.1."
+    accepted_by: "user operator (jmfrank63)"
+    accepted_at: "2026-10-20T17:40:00Z"
+human_verification_resolved: "2026-10-20T17:40:00Z (01-UAT.md: 3 passed, 1 skipped as accepted risk, 0 issues)"
 behavior_unverified_items:
   - truth: "SC-4 (DEPS-04 clause): the config loader still reads SERVER.HOST / SERVER.PORT from a dotenv file in the working directory (not only from the process environment)"
     test: "In an empty scratch directory, create a dotenv file containing SERVER.HOST=127.0.0.1 and SERVER.PORT=18461 (dotted names, as in env.example). Run /home/t3code/rs3/Projects/rs3/target/debug/rs3 from that directory with `env -i PATH=$PATH`, then `curl -s http://127.0.0.1:18461/ip`. Stop the server afterwards."
     expected: "The server starts, prints the startup banner with 127.0.0.1 and 18461, and /ip answers 200 with \"{'IP' : '127.0.0.1'}\"."
+    resolved: "PASS — operator UAT 2026-10-20 (01-UAT.md test 1)"
     why_human: "No test and no recorded smoke exercises the dotenv-file path. `dotenvy::dotenv().ok()` is present and wired in Settings::load (src/config.rs:25), and dotenvy 0.15.7's parser accepts '.' in key names (parse.rs:85), but a project hook blocks the verifier from creating or naming the dotenv file, so the runtime path could not be exercised here."
 human_verification:
   - test: "Dotenv-file config source (DEPS-04 / SC-4): run the binary from a directory that holds a dotenv file with SERVER.HOST=127.0.0.1 and SERVER.PORT=18461, under `env -i PATH=$PATH`, then curl /ip"
@@ -48,7 +55,7 @@ human_verification:
 
 **Phase Goal:** As a developer on rs3, I want to build, lint and test the crate on Rust 1.99.1 with edition 2024 and only released dependencies on top of a modular store and config foundation, so that every later port lands on a compiling, current tree.
 **Verified:** 2026-10-20T17:09:26Z
-**Status:** human_needed
+**Status:** passed (after operator UAT, 2026-10-20; originally human_needed)
 **Re-verification:** No, initial verification
 **Mode:** mvp (the user-story goal is valid according to `user-story.validate`)
 
@@ -262,6 +269,21 @@ The status is `human_needed` rather than `passed` because four items need a pers
 - Two prohibitions are flagged by policy (one judgment-tier, one test-tier with no wired enforcement), although the verifier's evidence for both is clean.
 
 Review warnings WR-01/WR-02 (dotenvy error handling and `set_var` soundness) are still open in 01-REVIEW-DISPOSITION.md. They are advisory and worth triaging before Phase 2 touches config injection (ARCH-03).
+
+### Human Verification Results (operator, 2026-10-20)
+
+Recorded in `01-UAT.md` (status: complete):
+
+| # | Item | Result | Evidence / disposition |
+|---|------|--------|------------------------|
+| 1 | Dotenv-file config source (DEPS-04 / SC-4b) | ✓ PASS | Operator ran the binary under `env -i` from a directory with a `.env` holding `SERVER.HOST=127.0.0.1` / `SERVER.PORT=18461`; `GET /ip` → 200 `"{'IP' : '127.0.0.1'}"`. SC-4b and DEPS-04 are now VERIFIED. |
+| 2 | rustup auto-install idempotency (backstop 1-24) | ⏭ SKIPPED — accepted risk | Not worth uninstalling the toolchain. Recorded as `PASSED (override)` in frontmatter `overrides`. |
+| 3 | v8x pre-release lock-entry disclosure | ✓ PASS | Operator confirmed the disclosure is adequate. |
+| 4 | No gate-greening by suppression | ✓ PASS | Operator accepted the grep evidence and requested a wired CI grep check for new `#[allow]` / `#[cfg_attr(.., allow(..))]` in Phase 4. |
+
+Follow-ups routed from this verification:
+- Phase 2: address review warnings WR-01 (malformed `.env` half-loaded, error swallowed) and WR-02 (dotenvy `set_var` under a safe API).
+- Phase 4: CI step that fails on new allow/cfg_attr-allow suppression attributes.
 
 ---
 

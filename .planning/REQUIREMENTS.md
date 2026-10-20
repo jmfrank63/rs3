@@ -9,23 +9,23 @@ Requirements for the modernization milestone. Each maps to roadmap phases.
 
 ### Toolchain
 
-- [ ] **TOOL-01**: Developer running any `cargo` command in the repo gets Rust 1.99.1 with `rustfmt` and `clippy` via `rust-toolchain.toml`; the legacy `rust-toolchain` file is deleted
-- [ ] **TOOL-02**: `Cargo.toml` declares `edition = "2024"` and `rust-version = "1.99"`
-- [ ] **TOOL-03**: `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` all pass on a clean checkout
+- [x] **TOOL-01**: Developer running any `cargo` command in the repo gets Rust 1.99.1 with `rustfmt` and `clippy` via `rust-toolchain.toml`; the legacy `rust-toolchain` file is deleted
+- [x] **TOOL-02**: `Cargo.toml` declares `edition = "2024"` and `rust-version = "1.99"`
+- [x] **TOOL-03**: `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` all pass on a clean checkout
 
 ### Dependencies
 
-- [ ] **DEPS-01**: All dependencies are released crates.io versions — no git, path or pre-release (beta/rc) dependencies
-- [ ] **DEPS-02**: `Cargo.lock` is regenerated from scratch and `cargo tree -d` shows a single V8 (no direct `v8`/`rusty_v8` dependency; `deno_core::v8` used)
-- [ ] **DEPS-03**: `lazy_static`, `dotenv` and `flurry` are removed (replaced by injected state / `LazyLock`, `dotenvy`, and a maintained concurrent map such as `papaya`)
-- [ ] **DEPS-04**: Configuration uses the current `config` crate builder API and still reads `SERVER.HOST` / `SERVER.PORT` from `.env` or the environment
+- [x] **DEPS-01**: All dependencies are released crates.io versions — no git, path or pre-release (beta/rc) dependencies
+- [x] **DEPS-02**: `Cargo.lock` is regenerated from scratch and `cargo tree -d` shows a single V8 (no direct `v8`/`rusty_v8` dependency; `deno_core::v8` used)
+- [x] **DEPS-03**: `lazy_static`, `dotenv` and `flurry` are removed (replaced by injected state / `LazyLock`, `dotenvy`, and a maintained concurrent map such as `papaya`)
+- [x] **DEPS-04**: Configuration uses the current `config` crate builder API and still reads `SERVER.HOST` / `SERVER.PORT` from `.env` or the environment
 
 ### Architecture
 
-- [ ] **ARCH-01**: Code is split into separate store, JS runtime, HTTP and config modules (`lib.rs` + thin `main.rs`, single package) with dependencies pointing one way (http → js → store)
+- [x] **ARCH-01**: Code is split into separate store, JS runtime, HTTP and config modules (`lib.rs` + thin `main.rs`, single package) with dependencies pointing one way (http → js → store)
 - [ ] **ARCH-02**: The store is created once in `main` and injected into HTTP handlers (`web::Data`) and JS ops (`OpState`); there is no global map
 - [ ] **ARCH-03**: Config is loaded once at startup and injected; handlers do not re-read the environment per request
-- [ ] **ARCH-04**: Startup errors (bad config, port bind failure) are reported and exit non-zero instead of panicking
+- [x] **ARCH-04**: Startup errors (bad config, port bind failure) are reported and exit non-zero instead of panicking
 
 ### HTTP API
 
@@ -133,17 +133,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| TOOL-01 | Phase 1 | Pending |
-| TOOL-02 | Phase 1 | Pending |
-| TOOL-03 | Phase 1 | Pending |
-| DEPS-01 | Phase 1 | Pending |
-| DEPS-02 | Phase 1 | Pending |
-| DEPS-03 | Phase 1 | Pending |
-| DEPS-04 | Phase 1 | Pending |
-| ARCH-01 | Phase 1 | Pending |
+| TOOL-01 | Phase 1 | Complete |
+| TOOL-02 | Phase 1 | Complete |
+| TOOL-03 | Phase 1 | Complete |
+| DEPS-01 | Phase 1 | Complete |
+| DEPS-02 | Phase 1 | Complete |
+| DEPS-03 | Phase 1 | Complete |
+| DEPS-04 | Phase 1 | Complete |
+| ARCH-01 | Phase 1 | Complete |
 | ARCH-02 | Phase 2 | Pending |
 | ARCH-03 | Phase 2 | Pending |
-| ARCH-04 | Phase 1 | Pending |
+| ARCH-04 | Phase 1 | Complete |
 | HTTP-01 | Phase 2 | Pending |
 | HTTP-02 | Phase 2 | Pending |
 | HTTP-03 | Phase 2 | Pending |

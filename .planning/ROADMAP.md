@@ -23,7 +23,7 @@ Phase 1 and must still pass at the end of every later phase.
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Toolchain, Dependencies & Foundation** - Rust 1.99.1 / edition 2024, released deps only, lib + thin main with store and config layers; tree compiles (PATCH may answer 501)
+- [x] **Phase 1: Toolchain, Dependencies & Foundation** - Rust 1.99.1 / edition 2024, released deps only, lib + thin main with store and config layers; tree compiles (PATCH may answer 501) (completed 2026-10-20)
 - [ ] **Phase 2: HTTP API Port & Error Handling** - Six non-JS routes on actix-web 4.x with injected state, byte-identical bodies, 404/400/422 errors, isolated tests
 - [ ] **Phase 3: JavaScript Runtime Port** - PATCH and the five `op_rs3_*` ops on current deno_core (`#[op2]` + `extension!`), dedicated JS threads, all JS artefacts migrated
 - [ ] **Phase 4: CI Gate on x86_64** - GitHub Actions workflow gating fmt/clippy/test on an x86_64 runner; archived actions-rs workflow removed
@@ -45,7 +45,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The crate is a `lib.rs` plus a thin `main.rs` with separate `store`, `config`, `http` and `js` modules; the papaya-backed store and the config loader (current `config` builder API + `dotenvy`, still reading `SERVER.HOST` / `SERVER.PORT` from `.env` or the environment) have passing unit tests, and `store` imports nothing from actix-web or deno_core
   5. Starting the binary with invalid configuration or an already-bound port prints an error and exits non-zero instead of panicking
 
-**Plans:** 3/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 **Wave 1**
@@ -147,7 +147,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Toolchain, Dependencies & Foundation | 3/3 | In Progress | - |
+| 1. Toolchain, Dependencies & Foundation | 3/3 | Complete    | 2026-10-20 |
 | 2. HTTP API Port & Error Handling | 0/TBD | Not started | - |
 | 3. JavaScript Runtime Port | 0/TBD | Not started | - |
 | 4. CI Gate on x86_64 | 0/TBD | Not started | - |
