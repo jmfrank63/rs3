@@ -117,7 +117,7 @@ def lines_errors(text):
     errs = []
     lines = text.split("\n")
     # Only "\n" separates lines here, and nothing else may hide in a line: YAML and Python
-    # disagree on other line breaks (\x85,  , \x0c, ...), and a tab or CR is never needed.
+    # disagree on other line breaks (\x85, \u2028, \x0c, ...), and a tab or CR is never needed.
     bad = [n for n, line in enumerate(lines, 1) if any(not " " <= ch <= "~" for ch in line)]
     if bad:
         errs.append(f"non-printable or non-ASCII characters (tab, CR, ...) on lines {bad}")
