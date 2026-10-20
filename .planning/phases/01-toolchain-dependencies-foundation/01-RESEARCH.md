@@ -600,16 +600,16 @@ Handler renames (`delete`→`delete_key` etc.) are optional. The old names shado
 | A3 | Keeping the handler's `.replace(",]", "]")` for byte parity is wanted until Phase 2 | Code Examples §2 | Low. It only affects values containing `,]`. [ASSUMED] |
 | A4 | CI on x86_64 behaves like this aarch64 host for Phase 1 (no JS execution yet; `init_platform` in `main` is not exercised by tests) | Pattern 5 | Low in Phase 1. The PKU risk applies when tests create runtimes (Phase 3/4). [ASSUMED] |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Lockfile pre-release entry (`v8x`)**
+1. **Lockfile pre-release entry (`v8x`)**: RESOLVED by CONTEXT.md D-21. DEPS-01 is verified on the manifest plus the active graph (`cargo tree -e all --target all` shows zero pre-releases), and the inert `v8x` lock entry is recorded in the phase SUMMARY (plan 01-01).
    - What we know: It is an optional dependency of `deno_v8 0.4.0`, enabled only by `quickjs`. It is recorded in Cargo.lock but absent from every `cargo tree` view, and never compiled or downloaded.
    - What's unclear: whether the user reads DEPS-01 as applying to Cargo.lock text.
    - Recommendation: Define the DEPS-01 check as manifest + `cargo tree -e all --target all` (zero pre-releases). Record the `v8x` lock entry in PROJECT.md Key Decisions or the phase SUMMARY as an accepted artifact.
-2. **Calling `init_platform()` in `main` now**
+2. **Calling `init_platform()` in `main` now**: RESOLVED by CONTEXT.md D-23. `main` calls `rs3::js::init_platform()` on the main thread before `HttpServer` starts (plan 01-01).
    - What we know: It works, it is on the main thread before workers start, and it adds no link cost.
    - Recommendation: Call it (discretion item). It makes the V8 init path real in Phase 1, and `cargo run` smoke covers it.
-3. **The existing `.github/workflows/actions-rs.yml` will run on push with the new tree**
+3. **The existing `.github/workflows/actions-rs.yml` will run on push with the new tree**: RESOLVED by CONTEXT.md D-24. The workflow is left untouched in Phase 1 and noted in the SUMMARY; Phase 4 replaces it.
    - Recommendation: Ignore in Phase 1 (Phase 4 replaces it). Note it in the phase SUMMARY.
 
 ## Environment Availability

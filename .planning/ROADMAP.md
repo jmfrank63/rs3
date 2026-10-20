@@ -33,6 +33,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Phase Details
 
 ### Phase 1: Toolchain, Dependencies & Foundation
+
 **Goal:** As a developer on rs3, I want to build, lint and test the crate on Rust 1.99.1 with edition 2024 and only released dependencies on top of a modular store and config foundation, so that every later port lands on a compiling, current tree.
 **Mode:** mvp
 **Depends on**: Nothing (first phase)
@@ -43,10 +44,24 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. `Cargo.toml` lists only released crates.io versions (no git, path, beta or rc), `lazy_static`, `dotenv` and `flurry` are gone, and `cargo tree -d` on the freshly regenerated `Cargo.lock` shows a single V8 reached only through `deno_core`
   4. The crate is a `lib.rs` plus a thin `main.rs` with separate `store`, `config`, `http` and `js` modules; the papaya-backed store and the config loader (current `config` builder API + `dotenvy`, still reading `SERVER.HOST` / `SERVER.PORT` from `.env` or the environment) have passing unit tests, and `store` imports nothing from actix-web or deno_core
   5. Starting the binary with invalid configuration or an already-bound port prints an error and exits non-zero instead of panicking
-**Plans**: TBD
+
+**Plans:** 3 plans
+
+Plans:
+**Wave 1**
+- [ ] 01-01-PLAN.md: Walking skeleton (wave 1). Toolchain, manifest and lockfile reset; lib + thin main; serve GET / and an insert-to-get round trip through the papaya Store; exit 1 on bad config
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 01-02-PLAN.md: Key-value slice (wave 2). DELETE /key/{key} and GET /list via Store::remove, sorted Store::list and the shared legacy codec, with store unit tests
+- [ ] 01-03-PLAN.md: Config and service slice (wave 2). GET /ip from injected Settings, Settings::from_map with config tests, ARCH-04 startup smokes, PATCH 501 with parked PATCH tests, full phase gate
+
+**Cross-cutting constraints:**
+- cargo build, cargo test, cargo clippy --all-targets -- -D warnings and cargo fmt --check all exit 0 at the end of this plan (TOOL-03).
+
 **Notes**: Delete the legacy `rust-toolchain` file and the old `Cargo.lock` first, because the legacy file takes precedence. Don't run `cargo fix --edition` (nothing compiles). Don't add a direct `v8` dependency. Write `deno_error = "0.7"` by hand. The first V8 build is slow, and `target/` must stay under the project dir (`/tmp` is nearly full). A temporary `LazyLock` bridge is fine here; Phase 2 removes the global.
 
 ### Phase 2: HTTP API Port & Error Handling
+
 **Goal:** As a client of the rs3 HTTP API, I want to call every non-JavaScript route and get the same success bodies as before plus clear 4xx errors for missing keys and bad input, so that existing integrations keep working and bad requests can no longer crash the server.
 **Mode:** mvp
 **Depends on**: Phase 1
@@ -56,10 +71,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. `GET`, `DELETE` or `PATCH` on a missing key returns 404 with a JSON error body, also on an empty store (no more `"[]"`); `POST /insert` returns 400 for malformed JSON and 422 for a non-object or non-string values, and nothing is inserted on either error
   3. The store and config are created once in `main` (outside the `HttpServer::new` closure) and injected through `web::Data`: a key inserted by one request is visible to the next on any worker, `GET /ip` reports the host loaded at startup without re-reading the environment, and no global map remains
   4. The HTTP tests use `#[actix_web::test]` and current actix test utilities through the same `configure(state)` helper as `main`; each test builds its own store and config in code with no `thread::sleep` and no `SERVER.*` environment variables, and the suite passes repeatedly under default parallel `cargo test`
+
 **Plans**: TBD
 **Notes**: Use a raw-body parse for `/insert`, not `web::Json`. `web::Json` rejects requests without a JSON content type and collapses the 400/422 split. ARCH-02 forbids a global map, so Phase 3's ops have to reach this same store through `OpState`.
 
 ### Phase 3: JavaScript Runtime Port
+
 **Goal:** As a user storing scripts in rs3, I want to PATCH a key and have its JavaScript run on current deno_core with the five store ops, so that the JS-executes-against-the-store behaviour works again and no script or op error can abort the server.
 **Mode:** mvp
 **Depends on**: Phase 2
@@ -70,6 +87,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A script that throws or has a syntax error makes PATCH return 422 with a JSON body containing the JS error message; an op called on a missing key or with invalid input raises an exception the script can `try/catch`, and the server keeps serving later requests (no `unwrap`/`expect` on request data in handlers, store or ops)
   4. JS runs on dedicated JS threads, not actix worker threads, with the V8 platform initialised once in `main` before any other thread spawns, and the full suite passes under default parallel `cargo test`
   5. Every JS artefact (`requests/*.js`, `requests/*.txt`, `requests/*.http`, `src/example.js`, test scripts) uses `Deno.core.ops.op_rs3_*(...)` with no `Deno.core.ops();` or `opSync` calls left, and the old `rs3_*` to new `op_rs3_*` mapping (including "a missing key throws") is documented
+
 **Plans**: TBD
 **Notes**: This is the highest-risk phase. Spike these early:
 - a nested `JsRuntime` inside a `#[op2(reentrant)]` `op_rs3_patch`
@@ -79,6 +97,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 `web::block` is an acceptable stepping stone, but the phase must end on the bounded, dedicated JS thread pool with large stacks.
 
 ### Phase 4: CI Gate on x86_64
+
 **Goal:** As a maintainer of rs3, I want to gate every push with a GitHub Actions workflow on an x86_64 runner that fails on any fmt, clippy or test failure, so that regressions and x86-only V8 crashes are caught before they land.
 **Mode:** mvp
 **Depends on**: Phase 3
@@ -87,10 +106,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   1. Pushing `modernize-toolchain` to GitHub runs a workflow on an x86_64 Linux runner using `actions/checkout` v4+, `dtolnay/rust-toolchain` and `Swatinem/rust-cache`, and it finishes green with the V8-backed JS tests run at the default test-thread count
   2. The workflow runs `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and a failure in any of them fails the build (no `continue-on-error`, no `SERVER.*` env in the workflow)
   3. The archived `actions-rs` workflow is deleted, and the new workflow is the only one in `.github/workflows`
+
 **Plans**: TBD
 **Notes**: Verifying this phase requires pushing the branch to `origin` (github.com/jmfrank63/rs3). If the x86 run hits a V8 platform/PKU segfault, apply the documented fallback (`new_unprotected_default_platform` in a `Once`) and re-run. Optional: a `cargo tree -d` step that fails on a duplicate `v8`.
 
 ### Phase 5: JS Execution Limits
+
 **Goal:** As a server operator running rs3, I want to rely on a nesting depth limit and an execution timeout for stored scripts, so that a self-patching or never-ending script can neither crash the server nor starve other requests.
 **Mode:** mvp
 **Depends on**: Phase 4 (builds on Phase 3's JS thread pool; the limits are verified under the CI gate)
@@ -100,10 +121,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. A non-terminating script such as `while(true){}` is terminated after the configured timeout and PATCH returns 504, while other requests, including other PATCHes, keep being answered
   3. The execution timeout comes from settings, so tests set a short timeout in code without environment variables
   4. Every error path has a passing test (404 missing key, 400 malformed insert, 422 bad insert shape, 422 JS exception, 422 depth limit, 504 timeout), both locally and in CI
+
 **Plans**: TBD
 **Notes**: Research flag: the native stack needed per nesting level (about 16 MiB per JS thread; tune it with a recursion test), and classifying termination by reason rather than by message string. The heap limit, cancel-on-disconnect and 503 backpressure are v2 (JSHD-*).
 
 ### Phase 6: Docker Image & Documentation
+
 **Goal:** As a new developer or deployer of rs3, I want to run it from a slim, non-root Docker image and learn the toolchain, JS op syntax and behaviour changes from the README, so that I can build, run and extend the modernized server without reading the source.
 **Mode:** mvp
 **Depends on**: Phase 5
@@ -113,6 +136,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. `docker run` with `SERVER.HOST=0.0.0.0` starts a slim, non-root container, and `curl` to `GET /` from the host returns `"Welcome to rs3"`
   3. Following only `Readme.md`, a developer can set up Rust 1.99.1 / edition 2024, expect the slow first V8 build, and build, run and test the server
   4. `Readme.md` documents the `Deno.core.ops.op_rs3_*` syntax with the old-to-new op mapping and a working example, the HTTP error status codes, and a "Behaviour changes" section (404 instead of `"[]"`, 400/422 on insert, escaped `/list`)
+
 **Plans**: TBD
 **Notes**: Docker is not installed on the dev host, so the image build and the `docker run` + `curl /` smoke test must run where Docker is available (a CI job or the user's machine). Use a builder image that is not `-slim` (the V8 build.rs needs curl). Leave `docker_rs3/`, `aws/` and the `Vagrantfile` alone apart from trivial Rust-version references.
 
