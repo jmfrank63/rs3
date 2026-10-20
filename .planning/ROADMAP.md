@@ -100,7 +100,7 @@ Plans:
   4. JS runs on dedicated JS threads, not actix worker threads, with the V8 platform initialised once in `main` before any other thread spawns, and the full suite passes under default parallel `cargo test`
   5. Every JS artefact (`requests/*.js`, `requests/*.txt`, `requests/*.http`, `src/example.js`, test scripts) uses `Deno.core.ops.op_rs3_*(...)` with no `Deno.core.ops();` or `opSync` calls left, and the old `rs3_*` to new `op_rs3_*` mapping (including "a missing key throws") is documented
 
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans executed
 
 Plans:
 **Wave 1**
@@ -108,7 +108,7 @@ Plans:
 - [x] 03-02-PLAN.md: Samples and migration guide (wave 1, parallel). Every requests/* artefact and src/example.js moves to Deno.core.ops.op_rs3_*, with behaviour checked under a node stub. docs/js-ops.md gives the old-to-new mapping, error rules, PATCH stringification and the Phase 5 limits
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 03-03-PLAN.md: PATCH over HTTP (wave 2). main starts the pool after init_platform, AppState gains js, and patch_key awaits the pool. Script errors answer 422 js_error and host faults 500 internal (IN-01). The parked PATCH tests return, fac/sum/bin/store run as fixtures, PATCH of op_rs3_list equals GET /list, and all seven routes have success tests. Also IN-04/IN-05 and the full phase gate with live smokes
+- [x] 03-03-PLAN.md: PATCH over HTTP (wave 2). main starts the pool after init_platform, AppState gains js, and patch_key awaits the pool. Script errors answer 422 js_error and host faults 500 internal (IN-01). The parked PATCH tests return, fac/sum/bin/store run as fixtures, PATCH of op_rs3_list equals GET /list, and all seven routes have success tests. Also IN-04/IN-05 and the full phase gate with live smokes
 
 **Cross-cutting constraints:**
 - cargo build --locked, cargo test, cargo clippy --all-targets -- -D warnings and cargo fmt --check all exit 0 at the end of every plan (TOOL-03). No lint-suppression attributes, and no self-patching script in any test or smoke (that is the Phase 5 depth limit's job).
@@ -173,7 +173,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 |-------|----------------|--------|-----------|
 | 1. Toolchain, Dependencies & Foundation | 3/3 | Complete    | 2026-10-20 |
 | 2. HTTP API Port & Error Handling | 3/3 | In Progress | - |
-| 3. JavaScript Runtime Port | 2/3 | In Progress | - |
+| 3. JavaScript Runtime Port | 3/3 | In Progress | - |
 | 4. CI Gate on x86_64 | 0/TBD | Not started | - |
 | 5. JS Execution Limits | 0/TBD | Not started | - |
 | 6. Docker Image & Documentation | 0/TBD | Not started | - |
