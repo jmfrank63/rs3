@@ -26,6 +26,11 @@ impl Settings {
         Self::from_env_source(Environment::default())
     }
 
+    /// Build settings from an explicit map instead of the process environment (for tests: edition 2024 makes env mutation unsafe, and unsafe code is forbidden here).
+    pub fn from_map(vars: ::config::Map<String, String>) -> Result<Self, ::config::ConfigError> {
+        Self::from_env_source(Environment::default().source(Some(vars)))
+    }
+
     fn from_env_source(env: Environment) -> Result<Self, ConfigError> {
         Config::builder().add_source(env).build()?.try_deserialize()
     }
