@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: HTTP API Port & Error Handling
-status: executing
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-10-20T18:26:33.974Z"
+status: verifying
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-10-20T18:34:56.951Z"
 last_activity: 2026-10-20
 last_activity_desc: Phase 02 execution started
-state_head: 93c0895fac64d426dd496f024779f8b60675ebfb
+state_head: 6ad0452c286fdb1754412f36ad767e6763091c78
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
   percent: 17
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-20)
 
 Phase: 02 (HTTP API Port & Error Handling) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-20 — Phase 02 execution started
 
 Progress: [██░░░░░░░░] 17%
@@ -58,6 +58,7 @@ Progress: [██░░░░░░░░] 17%
 |------|----------|-------|-------|
 | Phase 02 P01 | 5 min | 2 tasks | 6 files |
 | Phase 02 P02 | 5 min | 2 tasks | 3 files |
+| Phase 02 P03 | 5 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,10 @@ Recent decisions affecting current work:
 - [Phase 02]: [02-02] Settings::load() reads dotenv via dotenvy::dotenv_iter() and env via std::env::vars_os(), never writes the environment; env wins, first duplicate wins in the file
 - [Phase 02]: [02-02] Missing dotenv ignored; any other dotenv error is 'error: invalid configuration: .env: <detail>' exit 1, never half-loaded; raw line kept (T-02-10)
 - [Phase 02]: [02-02] Only keys whose lowercased name starts with 'server.' enter the config map; BOM-prefixed .env is now a startup error (Phase 6 README must document)
+- [Phase 02]: [02-03] POST /insert reads web::Bytes; serde_json classify() splits 400 malformed_json (Syntax/Eof/Io, invalid UTF-8) from 422 invalid_input (shape checks); nothing written on either
+- [Phase 02]: [02-03] Store::insert_all (infallible, one guard, returns count) replaces insert_many; partial-batch visibility documented; Phase 3 op_rs3_insert reuses parse-then-insert_all
+- [Phase 02]: [02-03] /list escapes keys and values via serde_json Value Display in the legacy envelope; ,] quirk dropped; codec shared with op_rs3_list
+- [Phase 02]: [02-03] [lints.clippy] unwrap_used/expect_used = deny with clippy.toml test allowances; no suppression attributes
 
 ### Pending Todos
 
@@ -103,6 +108,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T18:26:33.900Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-10-20T18:34:56.877Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None

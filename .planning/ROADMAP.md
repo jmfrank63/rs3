@@ -72,7 +72,7 @@ Plans:
   3. The store and config are created once in `main` (outside the `HttpServer::new` closure) and injected through `web::Data`: a key inserted by one request is visible to the next on any worker, `GET /ip` reports the host loaded at startup without re-reading the environment, and no global map remains
   4. The HTTP tests use `#[actix_web::test]` and current actix test utilities through the same `configure(state)` helper as `main`; each test builds its own store and config in code with no `thread::sleep` and no `SERVER.*` environment variables, and the suite passes repeatedly under default parallel `cargo test`
 
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans executed
 
 Plans:
 **Wave 1**
@@ -80,7 +80,7 @@ Plans:
 - [x] 02-02-PLAN.md: Config loader hardening (wave 1, parallel). load() via dotenv_iter + vars_os with no env mutation; dotenv errors stop startup; server.* allow-list; in-memory unit tests (dotenv-file live checks are operator human-checks)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 02-03-PLAN.md: Insert validation, escaped /list and lint gate (wave 2). Raw-bytes insert with 400 malformed_json / 422 invalid_input and nothing inserted; infallible insert_all; serde_json-escaped /list in the legacy envelope; unwrap/expect deny lints + clippy.toml; full phase gate
+- [x] 02-03-PLAN.md: Insert validation, escaped /list and lint gate (wave 2). Raw-bytes insert with 400 malformed_json / 422 invalid_input and nothing inserted; infallible insert_all; serde_json-escaped /list in the legacy envelope; unwrap/expect deny lints + clippy.toml; full phase gate
 
 **Cross-cutting constraints:**
 - cargo build --locked, cargo test, cargo clippy --all-targets -- -D warnings and cargo fmt --check all exit 0 at the end of every plan (TOOL-03); no lint-suppression attributes anywhere.
@@ -160,7 +160,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Toolchain, Dependencies & Foundation | 3/3 | Complete    | 2026-10-20 |
-| 2. HTTP API Port & Error Handling | 2/3 | In Progress | - |
+| 2. HTTP API Port & Error Handling | 3/3 | In Progress | - |
 | 3. JavaScript Runtime Port | 0/TBD | Not started | - |
 | 4. CI Gate on x86_64 | 0/TBD | Not started | - |
 | 5. JS Execution Limits | 0/TBD | Not started | - |
