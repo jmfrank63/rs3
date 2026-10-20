@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: JavaScript Runtime Port
 status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-10-20T20:01:26.514Z"
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-10-20T20:12:58.968Z"
 last_activity: 2026-10-20
-last_activity_desc: Phase 02 execution started
-state_head: b5b43c6130593e6cf6753114eb84f150bb4d3e5f
+last_activity_desc: Phase 03 execution started
+state_head: b7d508088a405641fd358ae97cce8c39cdf042a6
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 6
+  completed_plans: 7
   percent: 17
 ---
 
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-20)
 
 **Core value:** rs3 builds, tests and lints cleanly on current stable Rust (edition 2024) with only released dependencies, while every existing HTTP route and the JS-executes-against-the-store behaviour keep working with the same semantics.
-**Current focus:** Phase 02 — HTTP API Port & Error Handling
+**Current focus:** Phase 03 — JavaScript Runtime Port
 
 ## Current Position
 
-Phase: 03 (JavaScript Runtime Port) — READY TO EXECUTE
-Plan: 3 of 3
+Phase: 03 (JavaScript Runtime Port) — EXECUTING
+Plan: 2 of 3
 Status: Ready to execute
-Last activity: 2026-10-20 — Phase 02 execution started
+Last activity: 2026-10-20 — Phase 03 execution started
 
 Progress: [██░░░░░░░░] 17%
 
@@ -59,6 +59,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02 P01 | 5 min | 2 tasks | 6 files |
 | Phase 02 P02 | 5 min | 2 tasks | 3 files |
 | Phase 02 P03 | 5 min | 3 tasks | 6 files |
+| Phase 03 P01 | 9 min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,9 @@ Recent decisions affecting current work:
 - [Phase 02]: [02-03] /list escapes keys and values via serde_json Value Display in the legacy envelope; ,] quirk dropped; codec shared with op_rs3_list
 - [Phase 02]: [02-03] [lints.clippy] unwrap_used/expect_used = deny with clippy.toml test allowances; no suppression attributes
 - [Phase 02 review-fix]: config keys lowercased before precedence (env always wins over .env); config map restricted to exactly server.host/server.port; /insert: syntax/EOF/invalid-UTF-8/unpaired-surrogate-escape → 400, out-of-range number / valid over-deep nesting → 422 naming the key
+- [Phase 03]: [03-01] D-04 holds on deno_core 0.412: nested JsRuntime inside #[op2(reentrant)] op_rs3_patch works on the same thread (debug profile); op_panic disabled via rs3_ext middleware
+- [Phase 03]: [03-01] String op args use FromV8 newtype StrArg: strings unchanged, primitives via String(..) (no arg -> undefined, 5 -> 5), objects/symbols throw TypeError; deno_core #[string] maps non-strings to empty string
+- [Phase 03]: [03-01] JsExecutor: bounded rs3-js-* pool (available_parallelism workers, x16 queue, 16 MiB), tokio current_thread per worker, catch_unwind per job, Unavailable when closed; shared cfg(test) LazyLock executor
 
 ### Pending Todos
 
@@ -120,6 +124,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T18:34:56.877Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-10-20T20:12:58.850Z
+Stopped at: Completed 03-01-PLAN.md
 Resume file: None

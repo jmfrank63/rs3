@@ -49,9 +49,9 @@ Requirements for the modernization milestone. Each maps to roadmap phases.
 
 ### JavaScript Runtime
 
-- [ ] **JSRT-01**: The embedded engine uses current released `deno_core` with ops defined via `#[op2]` and registered through `extension!`
-- [ ] **JSRT-02**: JS can call five store ops — `Deno.core.ops.op_rs3_list()`, `op_rs3_get(key)`, `op_rs3_insert(json)`, `op_rs3_delete(key)`, `op_rs3_patch(key)` — with the same semantics as the old `rs3_*` ops
-- [ ] **JSRT-03**: A missing key or invalid input inside an op surfaces as a catchable JS exception, not a process abort
+- [x] **JSRT-01**: The embedded engine uses current released `deno_core` with ops defined via `#[op2]` and registered through `extension!`
+- [x] **JSRT-02**: JS can call five store ops — `Deno.core.ops.op_rs3_list()`, `op_rs3_get(key)`, `op_rs3_insert(json)`, `op_rs3_delete(key)`, `op_rs3_patch(key)` — with the same semantics as the old `rs3_*` ops
+- [x] **JSRT-03**: A missing key or invalid input inside an op surfaces as a catchable JS exception, not a process abort
 - [ ] **JSRT-04**: JS execution runs off the actix worker threads (dedicated JS threads) with V8 platform initialised once in `main` before other threads spawn
 - [ ] **JSRT-05**: All JS artefacts (`requests/*.js`, `requests/*.txt`, `requests/*.http`, `src/example.js`, test scripts) use the new `Deno.core.ops.op_rs3_*(...)` syntax with `Deno.core.ops();` calls removed
 - [ ] **JSRT-06**: The old→new op name mapping is documented
@@ -158,9 +158,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ROBU-04 | Phase 3 | Pending |
 | ROBU-05 | Phase 5 | Pending |
 | ROBU-06 | Phase 5 | Pending |
-| JSRT-01 | Phase 3 | Pending |
-| JSRT-02 | Phase 3 | Pending |
-| JSRT-03 | Phase 3 | Pending |
+| JSRT-01 | Phase 3 | Complete |
+| JSRT-02 | Phase 3 | Complete |
+| JSRT-03 | Phase 3 | Complete |
 | JSRT-04 | Phase 3 | Pending |
 | JSRT-05 | Phase 3 | Pending |
 | JSRT-06 | Phase 3 | Pending |
