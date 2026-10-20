@@ -39,11 +39,14 @@ created: "2026-10-20"
 
 ## Per-Task Verification Map
 
-Filled by the planner/executor as tasks are created; requirement → command map lives in `04-RESEARCH.md` § Validation Architecture (CI-01, CI-02, CI-03, D-05, D-06, D-08, D-09).
+Rows filled by the planner. Plan 04-02 Task 2 flips each Status cell to green once its commands have passed. The requirement-to-command map is in `04-RESEARCH.md` § Validation Architecture (CI-01, CI-02, CI-03, D-05, D-06, D-08, D-09).
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 04-xx-xx | — | — | (see research map) | — | — | — | — | — | ⬜ pending |
+| 04-01-01 | 01 | 1 | CI-01, CI-02, CI-03 | T-04-02, T-04-03 | single workflow, read-only token, no event-context interpolation | static + local workflow replay | `python3 -I scripts/check-workflow.py` and a replay of every ci.yml `run:` line in order | ❌ W0 | ⬜ pending |
+| 04-01-02 | 01 | 1 | CI-02 | T-04-04, T-04-05 | the gate cannot be greened by suppression; the unprotected platform stays dev-only | planted-violation self-test | `bash scripts/test-ci-guards.sh` and `bash scripts/ci-guards.sh` | ❌ W0 | ⬜ pending |
+| 04-02-01 | 02 | 2 | CI-03 | T-04-08, T-04-09, T-04-11 | loopback-only smoke with trap cleanup; a crash is reported as status 139 | live smoke + failure modes | `cargo build --release --locked && bash scripts/ci-smoke.sh` | ❌ W0 | ⬜ pending |
+| 04-02-02 | 02 | 2 | CI-01, CI-02, CI-03 | T-04-10 | no fabricated remote result; no push | full local suite | the full suite command above, plus TOOL-03 | ✅ | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
