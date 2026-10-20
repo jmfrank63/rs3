@@ -330,6 +330,16 @@ fi
 # --- (h) repo cargo config ------------------------------------------------------------------
 expect_fail h '.cargo/config.toml sets rustflags with cap-lints' \
   'mkdir -p .cargo && printf "[build]\nrustflags = [\"--cap-lints\", \"allow\"]\n" > .cargo/config.toml'
+expect_fail h 'rustfmt.toml with disable_all_formatting = true' \
+  'echo "disable_all_formatting = true" > rustfmt.toml' 'rustfmt config present'
+expect_fail h '.rustfmt.toml with ignore = ["src"]' \
+  'echo "ignore = [\"src\"]" > .rustfmt.toml' 'rustfmt config present'
+expect_fail h 'rustfmt.toml inside src/http/' \
+  'echo "disable_all_formatting = true" > src/http/rustfmt.toml' 'rustfmt config present'
+expect_fail h '#![rustfmt::skip] in src/main.rs' \
+  'sed -i "1i #![rustfmt::skip]" src/main.rs && grep -qx "#!\[rustfmt::skip\]" src/main.rs' 'rustfmt::skip found'
+expect_fail h '#[rustfmt::skip] on an item' \
+  'printf "#[rustfmt::skip]\nfn planted() {   }\n" >> src/lib.rs' 'rustfmt::skip found'
 
 rm -rf "$SCRATCH"
 echo "test-ci-guards: ${cases} cases, ${missed} missed"

@@ -236,12 +236,29 @@ if [[ -n $g_errs ]]; then fail g "${g_errs#$'\n'}"
 elif [[ -n $g_skip ]]; then pass g "single ci.yml, no forbidden content$g_skip"
 else pass g "single ci.yml, no forbidden content, structure ok"; fi
 
-# (h) no repo-level cargo config that could lower lints (rustflags, cap-lints).
+# (h) no repo-level config that could lower lints (rustflags, cap-lints) or disable the
+# `cargo fmt --check` gate. The project uses rustfmt defaults, so any rustfmt.toml or
+# .rustfmt.toml (at the root, or in a source dir, where rustfmt also looks) fails, e.g.
+# `disable_all_formatting = true` makes cargo fmt --check pass unformatted code. So does a
+# #[rustfmt::skip] / #![rustfmt::skip] attribute in the Rust roots.
+h_errs=""
 shopt -s nullglob
 cfg=(.cargo/config*)
 shopt -u nullglob
-if (( ${#cfg[@]} )); then fail h "repo cargo config present: ${cfg[*]}"
-else pass h "no .cargo/config*"; fi
+if (( ${#cfg[@]} )); then h_errs+=$'\n'"repo cargo config present: ${cfg[*]}"; fi
+fmtcfg=$( { find -L . -maxdepth 1 \( -name rustfmt.toml -o -name .rustfmt.toml \) -print \
+  && find -L "${rs_roots[@]}" \( -name rustfmt.toml -o -name .rustfmt.toml \) -print; } 2>&1) \
+  && rc=0 || rc=$?
+if (( rc )); then h_errs+=$'\n'"find failed (exit $rc):"$'\n'"$fmtcfg"
+elif [[ -n $fmtcfg ]]; then h_errs+=$'\n'"rustfmt config present (the project uses rustfmt defaults):"$'\n'"$fmtcfg"; fi
+h_src=$(ml_grep '\brustfmt\s*::\s*skip\b' "${rs_roots[@]}" 2>&1) && rc=0 || rc=$?
+case $rc in
+  0) h_errs+=$'\n'"rustfmt::skip found:"$'\n'"$h_src" ;;
+  1) ;;
+  *) h_errs+=$'\n'"ml_grep failed (exit $rc):"$'\n'"$h_src" ;;
+esac
+if [[ -z $h_errs ]]; then pass h "no .cargo/config*, no rustfmt config, no rustfmt::skip"
+else fail h "${h_errs#$'\n'}"; fi
 
 if (( failures )); then echo "ci-guards: $failures guard(s) failed" >&2; exit 1; fi
 echo "ci-guards: all guards passed"
