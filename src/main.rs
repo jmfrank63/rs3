@@ -12,11 +12,19 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // V8 is initialised once on the main thread before any other thread (JS pool, actix workers) spawns.
     rs3::js::init_platform();
+    let js = match rs3::js::executor::JsExecutor::start(&rs3::js::JsSettings::default()) {
+        Ok(js) => js,
+        Err(e) => {
+            eprintln!("error: cannot start JS runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let host = settings.server.host.clone();
     let port = settings.server.port;
     // One AppState for the whole process; each worker only clones the closure.
-    let state = rs3::state::AppState::new(settings);
+    let state = rs3::state::AppState::new(settings, js);
     let cfg = rs3::http::configure(state);
     let server = match HttpServer::new(move || App::new().configure(cfg.clone()))
         .bind((host.as_str(), port))

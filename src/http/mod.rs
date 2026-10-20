@@ -38,18 +38,20 @@ pub async fn status(state: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(format!("{{'IP' : '{}'}}", state.settings.server.host))
 }
 
-/// `PATCH /key/{key}` answers a 404 JSON error for a missing key, and a 501
-/// `not_implemented` JSON error for an existing key until the JavaScript
-/// runtime returns in Phase 3.
+/// `PATCH /key/{key}` runs the stored value as JavaScript on the dedicated JS
+/// pool; the actix worker only awaits the reply.
+///
+/// Success is 200 with the JSON string of `String(completion value)`. A
+/// missing key is a 404 JSON error, answered before anything is queued.
 #[patch("/key/{key}")]
 pub async fn patch_key(
     state: web::Data<AppState>,
     path: web::Path<String>,
 ) -> Result<HttpResponse, ApiError> {
-    state.store.get(&path.into_inner())?;
-    Err(ApiError::NotImplemented(
-        "PATCH /key/{key} runs the stored JavaScript from Phase 3".into(),
-    ))
+    let key = path.into_inner();
+    let source = state.store.get(&key)?;
+    let out = state.js.execute(state.store.clone(), key, source).await?;
+    Ok(HttpResponse::Ok().json(out))
 }
 
 #[cfg(test)]
@@ -144,15 +146,32 @@ pub(crate) mod tests {
     }
 
     #[actix_web::test]
-    async fn test_patch_existing_is_501() {
+    async fn test_patch_existing_runs_script() {
         let state = test_state();
         state.store.insert("p".into(), "1".into());
         let app = atest::init_service(App::new().configure(configure(state.clone()))).await;
         let req = atest::TestRequest::patch().uri("/key/p").to_request();
         let resp = atest::call_service(&app, req).await;
-        let body = assert_json_error(resp, StatusCode::NOT_IMPLEMENTED, "not_implemented").await;
-        assert!(body.is_object(), "body is not an object: {body}");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""1""#)
+        );
         assert_eq!(state.store.get("p"), Ok("1".to_owned()));
+    }
+
+    #[actix_web::test]
+    async fn test_patch_runs_script_200() {
+        let state = test_state();
+        state.store.insert("m".into(), "6*20".into());
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let req = atest::TestRequest::patch().uri("/key/m").to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""120""#)
+        );
     }
 
     #[actix_web::test]
@@ -184,7 +203,6 @@ pub(crate) mod tests {
     const LIST_SCRIPT: &str = "Deno.core.ops.op_rs3_list().toString();";
 
     #[actix_web::test]
-    #[ignore = "re-enabled in Phase 3 (JS runtime port)"]
     async fn test_patch_is_ok() {
         let state = test_state();
         state.store.insert("code".into(), LIST_SCRIPT.into());
@@ -195,7 +213,6 @@ pub(crate) mod tests {
     }
 
     #[actix_web::test]
-    #[ignore = "re-enabled in Phase 3 (JS runtime port)"]
     async fn test_patch_body_is_listing() {
         let state = test_state();
         state.store.insert("code_body".into(), LIST_SCRIPT.into());
