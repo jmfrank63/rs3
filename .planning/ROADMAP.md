@@ -28,7 +28,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 2: HTTP API Port & Error Handling** - Six non-JS routes on actix-web 4.x with injected state, byte-identical bodies, 404/400/422 errors, isolated tests
 - [ ] **Phase 3: JavaScript Runtime Port** - PATCH and the five `op_rs3_*` ops on current deno_core (`#[op2]` + `extension!`), dedicated JS threads, all JS artefacts migrated
 - [ ] **Phase 4: CI Gate on x86_64** - GitHub Actions workflow gating fmt/clippy/test on an x86_64 runner; archived actions-rs workflow removed
-- [ ] **Phase 5: JS Execution Limits** - PATCH nesting depth limit (422) and execution timeout (504) so no script can crash or pin the server
+- [x] **Phase 5: JS Execution Limits** - PATCH nesting depth limit (422) and execution timeout (504) so no script can crash or pin the server (completed 2026-10-21)
 - [ ] **Phase 6: Native Deployment & Documentation** - Docker artefacts removed; native release build and an example hardened systemd unit; README for toolchain, config, HTTP API, op syntax, behaviour changes and the MIT license
 
 ## Phase Details
@@ -158,7 +158,7 @@ Plans:
   3. The execution timeout comes from settings, so tests set a short timeout in code without environment variables
   4. Every error path has a passing test (404 missing key, 400 malformed insert, 422 bad insert shape, 422 JS exception, 422 depth limit, 504 timeout), both locally and in CI
 
-**Plans:** 3/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 **Wave 1**
@@ -202,5 +202,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 2. HTTP API Port & Error Handling | 3/3 | In Progress | - |
 | 3. JavaScript Runtime Port | 3/3 | In Progress | - |
 | 4. CI Gate on x86_64 | 2/2 | In Progress | - |
-| 5. JS Execution Limits | 3/3 | In Progress | - |
+| 5. JS Execution Limits | 3/3 | Complete    | 2026-10-21 |
 | 6. Native Deployment & Documentation | 0/TBD | Not started | - |

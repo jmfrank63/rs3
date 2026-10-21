@@ -1,43 +1,43 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 05
-current_phase_name: JS Execution Limits
+current_phase: 2
+current_phase_name: HTTP API Port & Error Handling
 status: verifying
-stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-10-21T09:26:17.890Z"
+stopped_at: Phase 5 complete, ready to verify Phase 2
+last_updated: "2026-10-21T09:30:43.888Z"
 last_activity: 2026-10-21
-last_activity_desc: Phase 05 execution started
-state_head: 5c28ddefd9b667a86ed66325c5f40be144fd0aad
+last_activity_desc: Phase 5 complete, transitioned to Phase 2
+state_head: 952f1d6251b4cf5b97925ed181061bcd39afa510
 progress:
   total_phases: 6
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 14
   completed_plans: 14
-  percent: 17
+  percent: 33
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-10-20)
+See: .planning/PROJECT.md (updated 2026-10-21)
 
 **Core value:** rs3 builds, tests and lints cleanly on current stable Rust (edition 2024) with only released dependencies, while every existing HTTP route and the JS-executes-against-the-store behaviour keep working with the same semantics.
-**Current focus:** Phase 05 — JS Execution Limits
+**Current focus:** Phase 06 — Native Deployment & Documentation
 
 ## Current Position
 
-Phase: 05 (JS Execution Limits) — EXECUTING
-Plan: 3 of 3
+Phase: 2 — HTTP API Port & Error Handling
+Plan: 3
 Status: Phase complete — ready for verification
-Last activity: 2026-10-21 — Phase 05 execution started
+Last activity: 2026-10-21 — Phase 5 complete, transitioned to Phase 2
 
-Progress: [██░░░░░░░░] 17%
+Progress: [███░░░░░░░] 33%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
+- Total plans completed: 6
 - Average duration: -
 - Total execution time: 0.0 hours
 
@@ -46,6 +46,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 3 | - | - |
+| 5 | 3 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -119,6 +120,8 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-03: op_print writes and flushes through write_all_retrying / flush_retrying (Interrupted retries, WouldBlock yields, Ok(0) is WriteZero, no unwrap); an undrained pipe stalls the worker behind the backstop 504 (documented residual)
 - [Phase 05]: 05-03: Worker stacks are clamped to MIN_STACK_BYTES (2 MiB) via effective_stack_bytes, like workers, queue capacity, depth and timeout
 - [Phase 05]: 05-03: Remote x86_64 CI confirmation of the watchdog on the protected PKU platform (A1) is a pending UAT item; nothing was pushed
+- [Operator UAT 2026-10-21]: CI run 39527188207 at 40afeb7 (ubuntu-26.04 x86_64) green with 0 annotations and 216 tests, so the hardened guards, the watchdog and the release smoke hold on the protected V8 platform. 03/04/05 UAT complete (late-registration path an accepted-risk follow-up; docs/js-ops.md readability a deferred user review); 02 items 1 and 4 pass.
+- [Phase 6 re-scope 2026-10-21]: Docker dropped. rs3 ships as a native binary on a single Linux server (release build plus an example hardened systemd unit); DOCK-01..03 replaced by DEPL-01..03, DOCS-04 adds the MIT license. Stale experiments/web_scrape_s3_api/Cargo.lock removed (5c28dde).
 
 ### Pending Todos
 
@@ -126,7 +129,6 @@ Recent decisions affecting current work:
 
 ### Blockers/Concerns
 
-- [Phase 4 → operator]: the hardened CI scripts at HEAD still need one remote run (push `modernize-toolchain`); the earlier run on fd8f43f was green on ubuntu-26.04 x86_64 (no PKU crash).
 - [Phase 6]: systemd (255 on the dev host) ignores dotted names such as `SERVER.HOST` in `Environment=` / `EnvironmentFile=`, so the example unit must bridge them (see the ROADMAP Phase 6 notes).
 - [Env]: `/tmp` is about 96% full. Keep `target/` under the project dir, since a debug build with V8 is about 2.6 GB.
 - [Open]: The user should confirm the behaviour changes (`/list` escaping + sort order — legacy `" : "` whitespace is now preserved; 404 replacing `"[]"`; 400/422 inserts; BOM/malformed .env now fail startup; the op rename) and have them recorded in PROJECT.md Key Decisions.
@@ -140,19 +142,16 @@ Recent decisions affecting current work:
 | Phase | State | Resume |
 |-------|-------|--------|
 | 02 | verification_deferred_human | /gsd-verify-work 02 |
-| 03 | verification_deferred_human | /gsd-verify-work 03 |
-| 04 | verification_deferred_human | /gsd-verify-work 04 |
-| 05 | verification_deferred_human | /gsd-verify-work 05 |
 
 Phase 01 (roadmap-complete): VERIFICATION.md reads `stale` because Phase 02 intentionally evolved files it covered (STORE bridge → injected AppState, `dotenv()` → `dotenv_iter()`, legacy codec). Re-verification of every stale earlier phase is scheduled once, against the final tree, immediately before the milestone audit (`/gsd-execute-phase N` resumes at the verification gates).
 
-Phase 02: all automated must-haves verified (18/18, 13/13 requirements). 4 human items are in `02-UAT.md`: three live dotenv-file binary checks (a project hook blocks agents from creating the file) and the no-suppression prohibition (Phase 4 CI grep will wire it). Per operator directive the autonomous run continues to Phase 3.
+Phase 02: all automated must-haves verified (18/18, 13/13 requirements). Operator UAT 2026-10-21: item 1 (malformed dotenv stops startup) and item 4 (no suppression, now guard-wired) pass. Items 2 and 3, the live dotenv-file checks (stray keys; env overrides the file), are still pending with the operator, because agents never create or name the dotenv file. Report is also `stale`, so it is re-verified with the others.
 
-Phase 03: all automated must-haves verified (22/22, 12/12 requirements; live smokes plus a probe of all 98 other built-in ops clean). 3 policy-driven human items are in `03-UAT.md`: unwired test-tier prohibitions (Phase 4 CI grep), the judgment-tier "no self-patching script" rule, and docs/js-ops.md readability. The autonomous run continues to Phase 4.
+Phase 03: UAT complete (operator 2026-10-21: items 1 and 2 pass, item 3 docs/js-ops.md readability deferred to a later user review). VERIFICATION.md reads `stale` (later phases evolved covered files); re-verified before the audit.
 
-Phase 04: all automated must-haves verified (29/29). Remote evidence exists: GitHub Actions run 39507141932 (operator push of `fd8f43f`) green on ubuntu-26.04 x86_64, so there is no PKU crash and the D-07 fallback is not needed. 4 human items are in `04-UAT.md`: re-run CI on the hardened HEAD scripts (the autonomous run does not push), confirm the operator push, plus two policy prohibitions. The guards now wire the earlier suppression/ignore/feature/legacy-syntax UAT items (01-UAT 4, 02-UAT 4, 03-UAT 1 code parts). The autonomous run continues to Phase 5.
+Phase 04: UAT complete (operator 2026-10-21: all 4 pass; CI runs 39507141932 and 39527188207 green on ubuntu-26.04 x86_64 with 0 annotations). VERIFICATION.md reads `stale` (Phase 5 evolved Cargo.toml and scripts/ci-smoke.sh); re-verified before the audit.
 
-Phase 05: 35/38 must-haves verified locally. The depth limit gives 422 with the exact chain, `while(true)` gives 504 via the watchdog, other requests keep being answered, and settings are in code. 4 human items are in `05-UAT.md`: the CI run of HEAD (same push as 04-UAT 1), two code paths present but untested (late-registered runtime termination, client disconnect), and judgment-tier prohibitions. The autonomous run continues to Phase 6.
+Phase 05: complete (2026-10-21). UAT complete (3 pass, late-registration path an accepted-risk follow-up) and VERIFICATION.md canonicalized to `passed`.
 
 ## Deferred Items
 
@@ -164,6 +163,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T00:49:01.742Z
-Stopped at: Completed 05-03-PLAN.md
+Last session: 2026-10-21T09:35:00.000Z
+Stopped at: Phase 5 complete; Phase 6 re-scoped to native deployment, starting discuss
 Resume file: None

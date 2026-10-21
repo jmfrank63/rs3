@@ -36,6 +36,7 @@ behaviour keep working with the same semantics.
 - ✓ `config` crate on the 0.15 builder API, still reading dotted `SERVER.HOST` / `SERVER.PORT` from `.env` or the environment — Phase 1
 - ✓ `lib.rs` + thin `main.rs` with separate `store`, `config`, `http`, `js` modules; startup errors exit 1 instead of panicking — Phase 1
 - ✓ `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` all pass (gate held at every later phase) — Phase 1
+- ✓ No script can crash or pin the server: a PATCH nesting depth limit (default 4) stops self-patching chains and cycles with 422 `js_depth_limit` and the key chain, and an execution timeout (default 5000 ms, per-worker watchdog) ends runaway scripts with 504 `js_timeout` while other requests keep being answered; both limits are set in code and verified on x86_64 CI (run 39527188207) and by an operator client-disconnect test — Phase 5
 
 ### Active
 
@@ -92,6 +93,7 @@ behaviour keep working with the same semantics.
 | `GET /list` sorted by key | Legacy order was arbitrary hash order; deterministic output for tests | ✓ Shipped in Phase 1 (only visible store-route change in Phase 1) |
 | Accept inert `v8x 149.4.0-rc.4` optional lock entry | Optional dep of `deno_v8`, never built; DEPS-01 verified on manifest + active graph (D-21) | ✓ Accepted (operator UAT, Phase 1) |
 | Toolchain auto-install concurrency left unverified | Needs uninstalling 1.99.1; CI installs the pin explicitly | ⚠️ Accepted risk (operator, Phase 1) |
+| JS limits are hard stops set in code: depth 4 (clamped 1..=64) → 422, timeout 5000 ms via a per-worker watchdog → 504, decided by reason (job phase CAS), never by message text | A self-patching or never-ending script must neither crash nor starve the server; tests set short limits without env vars | ✓ Good (Phase 5: CI green on x86_64, operator client-disconnect test; late-registration path an accepted risk) |
 | Drop Docker: ship rs3 as a native binary on a single Linux server (release build plus an example hardened systemd unit); delete the root `Dockerfile` and the `docker_rs3/` Docker/Ansible multi-container setup, add no `.dockerignore`, and re-word the Docker requirements (DOCK-01..03 → DEPL-01..03) | User decision 2026-10-21: one server for now, so a container runtime adds nothing; the multi-container setup was obsolete. The MSc-era version stays at git tag `msc` | — Pending (Phase 6) |
 
 ## Evolution
@@ -112,4 +114,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-21: Phase 6 re-scoped from Docker to native deployment*
+*Last updated: 2026-10-21 after Phase 5 (and the Phase 6 re-scope from Docker to native deployment)*
