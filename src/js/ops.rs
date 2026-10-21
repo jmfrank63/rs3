@@ -249,7 +249,12 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 /// thread and returns `String(completion value)`. Throws
 /// `Error: key not found: <key>` when the key is missing, and an `Error` with
 /// the nested exception message (one leading "Uncaught " removed) when the
-/// nested script fails.
+/// nested script fails. When the calling script used up so much stack that the
+/// nested runtime cannot boot, it throws
+/// `Error: RangeError: not enough stack to start a nested script`, a script
+/// error and not a host fault (see `runtime::boot_failed_for_lack_of_stack`);
+/// that close to the limit deno_core may throw the bare message string
+/// instead, because building the `Error` needs stack too.
 ///
 /// When the job already runs `max_patch_depth` levels, it records a depth stop
 /// for the job (logged once), throws
@@ -258,9 +263,10 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 /// js_depth_limit even if the script caught the error, and every later op of
 /// the job throws the same error and touches nothing.
 ///
-/// A host fault in the nested runtime (such as a runtime creation failure) is
-/// logged once, by the level where it happened, recorded in the job state and
-/// thrown as a plain `Error: internal error`; the top-level run then answers
+/// Any other host fault in the nested runtime (such as a runtime creation
+/// failure) is logged once, by the level where it happened, recorded in the
+/// job state and thrown as a plain `Error: internal error`; the top-level run
+/// then answers
 /// `ExecError::Internal` even if the script caught it, and every later op of
 /// the job throws the same error.
 ///
@@ -926,6 +932,83 @@ mod tests {
         let src = "try { Deno.core.ops.op_rs3_patch('ghost'); 'no throw' } \
                    catch (e) { e.message }";
         assert_eq!(run_js(&store, src), ok("key not found: ghost"));
+    }
+
+    /// A script that recurses until V8's stack guard throws (so the recursion
+    /// is bounded), then calls `op_rs3_patch(next)` from as deep as it can
+    /// get into the op: a frame whose call overflows in JS rethrows the
+    /// `RangeError` so its parent retries with more room. Its completion
+    /// value is `value: <nested result>` or `error: <message the op threw>`.
+    /// Near the stack limit deno_core may throw an op error as its bare
+    /// message string instead of an `Error` (its error builder overflowed),
+    /// so both forms are read.
+    fn patch_at_stack_limit(next: &str) -> String {
+        format!(
+            "let out = null; \
+             function f() {{ try {{ f(); }} catch (e) {{ \
+               if (out !== null) return; \
+               try {{ out = 'value: ' + Deno.core.ops.op_rs3_patch('{next}'); }} \
+               catch (e2) {{ if (e2 instanceof RangeError) throw e2; \
+                 out = 'error: ' + (typeof e2 === 'string' ? e2 : e2.message); }} \
+             }} }} \
+             f(); out"
+        )
+    }
+
+    const NO_STACK: &str = "error: RangeError: not enough stack to start a nested script";
+
+    #[test]
+    fn nested_boot_without_stack_is_a_catchable_script_error() {
+        let store = Store::new();
+        store.insert("leaf".into(), "'leaf'".into());
+        store.insert("k".into(), "v".into());
+        // One level, the script caught the error: not a host fault, and the
+        // job's later ops still work.
+        let ctx = ctx_for(&store);
+        let job = Arc::clone(&ctx.job);
+        let src = format!(
+            "{}; out + '|' + Deno.core.ops.op_rs3_get('k')",
+            patch_at_stack_limit("leaf")
+        );
+        assert_eq!(run_ctx(ctx, &src), Ok(format!("{NO_STACK}|v")));
+        assert!(!job.host_fault());
+        // Two keys: the PATCHed script nests normally, and its nested key
+        // recurses to the limit before nesting again.
+        store.insert("k1".into(), patch_at_stack_limit("leaf"));
+        assert_eq!(
+            run_js(&store, "Deno.core.ops.op_rs3_patch('k1')"),
+            ok(NO_STACK)
+        );
+    }
+
+    #[test]
+    fn uncaught_nested_boot_without_stack_is_a_script_error() {
+        let store = Store::new();
+        store.insert("leaf".into(), "'leaf'".into());
+        // Only stack RangeErrors are caught; the op's Error propagates.
+        let src = "function f() { try { return f(); } catch (e) { \
+                     if (!(e instanceof RangeError)) throw e; \
+                     return Deno.core.ops.op_rs3_patch('leaf'); } } f()";
+        // An `Error` object, or its bare message where deno_core's error
+        // builder itself ran out of stack.
+        let is_no_stack = |r: &Result<String, ExecError>| {
+            matches!(r, Err(ExecError::Script { message }) if [
+                "Uncaught Error: RangeError: not enough stack to start a nested script",
+                "Uncaught RangeError: not enough stack to start a nested script",
+            ]
+            .contains(&message.as_str()))
+        };
+        let r = run_js(&store, src);
+        assert!(is_no_stack(&r), "{r:?}");
+        // The same on the 2 MiB stack floor.
+        let small = dedicated_executor(JsSettings {
+            workers: 1,
+            queue_capacity: 4,
+            stack_bytes: 0,
+            ..JsSettings::default()
+        });
+        let r = block_on(small.execute(store, "test".to_owned(), src.to_owned()));
+        assert!(is_no_stack(&r), "{r:?}");
     }
 
     #[test]

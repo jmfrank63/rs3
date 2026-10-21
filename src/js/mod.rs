@@ -227,7 +227,8 @@ pub struct JsSettings {
     /// code and never read from the environment. The executor clamps it to
     /// 1..=64: 1 allows no nested PATCH, and 64 is the depth verified on the
     /// smallest worker stack (2 MiB); far above that V8's own stack guard would
-    /// end the chain first, as a 500.
+    /// end the chain first: a nested runtime that cannot start for lack of
+    /// stack is a script error (422 js_error when uncaught), not a host fault.
     pub max_patch_depth: u32,
     /// How long one job may run, in milliseconds, counted from the moment a
     /// JS worker picks it up (time waiting in the queue does not count). Built

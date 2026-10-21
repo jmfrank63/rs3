@@ -26,7 +26,7 @@ Neither exists any more. Rewrite old scripts with this table:
 | `Deno.core.opSync("rs3_get", key)` | `Deno.core.ops.op_rs3_get(key)` | the key, coerced to a string | the value | the key is missing: `Error` with message `key not found: <key>` (legacy: the server panicked); after a nested host fault: `Error: internal error` (see Errors) |
 | `Deno.core.opSync("rs3_insert", json)` | `Deno.core.ops.op_rs3_insert(json)` | a JSON object whose values are all strings, passed as a string | the compact echo, such as `{"k":"v"}` | malformed JSON: `TypeError` whose message starts with `malformed JSON:`; wrong shape: `TypeError` whose message starts with `invalid input:`; nothing is written on error; after a nested host fault: `Error: internal error` (see Errors) |
 | `Deno.core.opSync("rs3_delete", key)` | `Deno.core.ops.op_rs3_delete(key)` | the key | the value the key held | the key is missing: `Error` with message `key not found: <key>`; after a nested host fault: `Error: internal error` (see Errors) |
-| `Deno.core.opSync("rs3_patch", key)` | `Deno.core.ops.op_rs3_patch(key)` | the key | `String(completion value)` of that key's script, run in a fresh nested runtime | the key is missing; the nested script fails, rethrown as `Error` with the nested message minus its leading `Uncaught `; the nested runtime hits a host fault, thrown as `Error: internal error`; the whole PATCH then answers 500 even if the script catches it, and every later op throws the same error; the call would nest deeper than the depth limit (4 scripts, counting the PATCHed key), thrown as `Error` with the message `PATCH nesting depth limit (4) exceeded: <key chain>` before the key is read; the whole PATCH then answers 422 `js_depth_limit` even if the script catches it. After the execution timeout it returns an empty string and runs nothing; the whole PATCH answers 504 `js_timeout` |
+| `Deno.core.opSync("rs3_patch", key)` | `Deno.core.ops.op_rs3_patch(key)` | the key | `String(completion value)` of that key's script, run in a fresh nested runtime | the key is missing; the nested script fails, rethrown as `Error` with the nested message minus its leading `Uncaught `; the calling script used up so much stack that the nested runtime cannot start, thrown as `Error` with the message `RangeError: not enough stack to start a nested script` (a script error, 422 `js_error` when uncaught); the nested runtime hits a host fault, thrown as `Error: internal error`; the whole PATCH then answers 500 even if the script catches it, and every later op throws the same error; the call would nest deeper than the depth limit (4 scripts, counting the PATCHed key), thrown as `Error` with the message `PATCH nesting depth limit (4) exceeded: <key chain>` before the key is read; the whole PATCH then answers 422 `js_depth_limit` even if the script catches it. After the execution timeout it returns an empty string and runs nothing; the whole PATCH answers 504 `js_timeout` |
 
 The legacy `Deno.core.opSync` function no longer exists either, and calling it
 throws a `TypeError`. The old example script also called an op named `op_list`
@@ -69,8 +69,19 @@ table is the migration path.
   A nested `throw new RangeError("inner boom")` arrives as an `Error` with the
   message `RangeError: inner boom`. A nested missing key arrives as
   `key not found: <key>`.
-- **Nested host faults.** If the nested runtime itself fails, for example
-  because it cannot be created, that is a server fault, not a script error.
+- **Not enough stack for a nested script.** Every script of a PATCH runs on
+  the same thread and shares its stack. A script that recurses close to the
+  stack limit and then calls `op_rs3_patch` leaves the nested runtime too
+  little stack to start. That is the script's doing, not a server fault: the
+  caller sees an `Error` with the message
+  `RangeError: not enough stack to start a nested script`, which it can catch
+  like any nested error. Uncaught, the PATCH answers 422 `js_error`. So close
+  to the limit, the runtime may throw the bare message string instead of an
+  `Error` object, because building the error object needs stack too; uncaught,
+  the message is then `Uncaught RangeError: not enough stack to start a nested script`.
+- **Nested host faults.** If the nested runtime itself fails for any other
+  reason, for example because it cannot be created, that is a server fault,
+  not a script error.
   The caller sees an `Error` with the fixed message `internal error` and no
   host details. Catching it does not help: once any nested level has hit a
   host fault, the whole PATCH answers 500 (see PATCH results). From then on,
@@ -128,7 +139,9 @@ table is the migration path.
 - **Host fault: 500.** If the JS executor is unavailable or a runtime cannot be
   created, the answer is `{"error":"internal","message":"internal error"}`.
   This includes a nested runtime started by `op_rs3_patch` at any depth, even
-  when the script caught the error the op threw. Writes made before the fault
+  when the script caught the error the op threw. A nested runtime that cannot
+  start because the calling script used up the stack is a script error
+  instead (422 `js_error` when uncaught, see Errors). Writes made before the fault
   stay; ops called after it are refused. The details go to the server log
   only.
 - **Depth limit: 422.** A chain of `op_rs3_patch` calls more than 4 scripts

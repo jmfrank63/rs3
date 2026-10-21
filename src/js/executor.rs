@@ -38,7 +38,9 @@ struct Limits {
 impl Limits {
     /// Clamp `max_patch_depth` to 1..=64: 1 allows no nested PATCH, and 64 is
     /// the depth verified on the smallest worker stack (2 MiB). Far above it
-    /// V8's own stack guard would end the chain first, as a 500. Clamp
+    /// V8's own stack guard would end the chain first: a nested runtime that
+    /// cannot start for lack of stack is a script error (422 js_error when
+    /// uncaught), not a host fault. Clamp
     /// `timeout_ms` to at least 1 ms, like the other zero settings.
     fn from_settings(settings: &JsSettings) -> Limits {
         Limits {

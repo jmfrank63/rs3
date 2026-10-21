@@ -1,6 +1,6 @@
 //! Runs one script on a fresh `JsRuntime` and stringifies its completion value.
 //! This module is free of actix-web.
-use deno_core::error::JsError;
+use deno_core::error::{CoreError, CoreErrorKind, JsError};
 use deno_core::{JsRuntime, RuntimeOptions, v8};
 
 use super::ops::{ExecCtx, rs3_ext};
@@ -19,7 +19,10 @@ use super::{ExecError, Registered};
 ///
 /// A host fault in a nested runtime started by `op_rs3_patch` during this run
 /// makes the run answer `ExecError::Internal`, even if the script caught the
-/// error the op threw. The detail was logged where the fault happened.
+/// error the op threw. The detail was logged where the fault happened. A
+/// nested runtime that cannot boot because the calling script used up the
+/// stack is not a host fault: it fails as `ExecError::Script` with
+/// `NESTED_STACK_MESSAGE` (see `boot_failed_for_lack_of_stack`).
 ///
 /// Only a fault recorded while this run was in progress is blamed on it. A
 /// fault already recorded when the run started is not. That case is
@@ -72,11 +75,12 @@ fn run_fresh(
             "cannot create JS runtime: injected test failure".into(),
         ));
     }
+    let depth = ctx.depth;
     let mut rt = JsRuntime::try_new(RuntimeOptions {
         extensions: vec![rs3_ext::init(ctx)],
         ..Default::default()
     })
-    .map_err(|e| ExecError::Internal(format!("cannot create JS runtime: {e}")))?;
+    .map_err(|e| creation_error(watch, depth, name, &e))?;
     let _registered = Registered::new(&watch.job, rt.v8_isolate().thread_safe_handle());
     let global = rt.execute_script(name.to_owned(), source).map_err(|e| {
         // Debug-format the script-controlled name and error text (message and
@@ -102,6 +106,54 @@ fn run_fresh(
             message: e.exception_message.clone(),
         }
     })
+}
+
+/// The message a script sees when the runtime for its `op_rs3_patch` call
+/// cannot boot for lack of stack. `op_rs3_patch` throws it as an `Error`, like
+/// a nested `RangeError`; uncaught, the request answers 422 js_error.
+pub(crate) const NESTED_STACK_MESSAGE: &str =
+    "RangeError: not enough stack to start a nested script";
+
+/// Whether a failed `JsRuntime::try_new` at nesting `depth` is the calling
+/// script's doing rather than a host fault: a nested runtime (depth > 0) whose
+/// built-in boot JavaScript failed to compile or run.
+///
+/// Every runtime of a thread shares that thread's V8 stack limit, so a script
+/// that recurses close to the limit and then calls `op_rs3_patch` leaves the
+/// nested runtime too little stack to run deno_core's built-in boot scripts
+/// (`ext:core/00_primordials.js` and the rest). deno_core reports that as a
+/// `Parse` or `Execute` error (or `Js` for an exception it captured) and
+/// carries no more detail, so the kind is all there is to go on. Those
+/// scripts are fixed and run at depth 0 on every request, so at depth > 0 a
+/// JS-level boot failure can only come from the stack the caller used up.
+/// Every other kind, and any failure at depth 0 (which starts on a fresh
+/// worker stack), stays a host fault.
+fn boot_failed_for_lack_of_stack(depth: u32, e: &CoreError) -> bool {
+    depth > 0
+        && matches!(
+            &*e.0,
+            CoreErrorKind::Parse(_) | CoreErrorKind::Execute(_) | CoreErrorKind::Js(_)
+        )
+}
+
+/// Map a failed runtime creation to the run's error. A nested runtime that
+/// could not boot for lack of stack is a script error (logged like one while
+/// the job is not stopped) carrying `NESTED_STACK_MESSAGE` and no host
+/// details; everything else is `ExecError::Internal`, a host fault.
+fn creation_error(watch: &ExecCtx, depth: u32, name: &str, e: &CoreError) -> ExecError {
+    if !boot_failed_for_lack_of_stack(depth, e) {
+        return ExecError::Internal(format!("cannot create JS runtime: {e}"));
+    }
+    if !watch.job.stopped() {
+        // Debug-format the script-controlled name so it cannot forge log lines.
+        watch.log_error(format_args!(
+            "js error in {name:?}: {NESTED_STACK_MESSAGE} ({:?})",
+            e.to_string()
+        ));
+    }
+    ExecError::Script {
+        message: format!("Uncaught {NESTED_STACK_MESSAGE}"),
+    }
 }
 
 /// `String(value)` with JS semantics. A symbol becomes `Symbol(description)`,
@@ -248,6 +300,37 @@ mod tests {
             block_on(test_executor().execute(Store::new(), "ключ/🔑".into(), "1+1".into())),
             Ok("2".to_owned())
         );
+    }
+
+    #[test]
+    fn only_a_nested_js_boot_failure_is_blamed_on_the_stack() {
+        use deno_core::ascii_str;
+        use deno_core::error::{
+            CoreError, CoreErrorKind, CoreModuleExecuteError, CoreModuleParseError,
+        };
+
+        use super::boot_failed_for_lack_of_stack as lack_of_stack;
+
+        let parse = || {
+            CoreError::from(CoreModuleParseError(ascii_str!(
+                "ext:core/00_primordials.js"
+            )))
+        };
+        let execute = || {
+            CoreError::from(CoreModuleExecuteError(ascii_str!(
+                "ext:core/00_primordials.js"
+            )))
+        };
+        // The boot scripts failing in a nested runtime: the caller's stack.
+        assert!(lack_of_stack(1, &parse()));
+        assert!(lack_of_stack(3, &execute()));
+        // At depth 0 the runtime starts on a fresh worker stack: a host fault.
+        assert!(!lack_of_stack(0, &parse()));
+        assert!(!lack_of_stack(0, &execute()));
+        // Failures that are not JavaScript stay host faults at any depth.
+        let io = CoreError::from(CoreErrorKind::Io(std::io::Error::other("x")));
+        assert!(!lack_of_stack(1, &io));
+        assert!(!lack_of_stack(1, &CoreError::from(CoreErrorKind::TLA)));
     }
 
     #[test]
