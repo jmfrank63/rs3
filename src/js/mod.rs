@@ -131,11 +131,17 @@ pub struct JsSettings {
     /// smallest worker stack (2 MiB); far above that V8's own stack guard would
     /// end the chain first, as a 500.
     pub max_patch_depth: u32,
+    /// How long one job may run, in milliseconds, counted from the moment a
+    /// JS worker picks it up (time waiting in the queue does not count). Built
+    /// in code and never read from the environment (D-05). The executor
+    /// clamps it to at least 1 ms.
+    pub timeout_ms: u64,
 }
 
 impl Default for JsSettings {
     /// One worker per available core (at least 1), 16 queued jobs per worker,
-    /// 16 MiB of stack per worker and a PATCH depth limit of 4.
+    /// 16 MiB of stack per worker, a PATCH depth limit of 4 and a 5000 ms
+    /// execution timeout.
     fn default() -> Self {
         let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         Self {
@@ -143,6 +149,7 @@ impl Default for JsSettings {
             queue_capacity: workers * 16,
             stack_bytes: 16 * 1024 * 1024,
             max_patch_depth: 4,
+            timeout_ms: 5000,
         }
     }
 }
@@ -160,6 +167,14 @@ pub(crate) fn test_executor() -> executor::JsExecutor {
         executor::JsExecutor::start(&JsSettings::default()).expect("test JS executor")
     });
     EXEC.clone()
+}
+
+/// A dedicated executor with `settings`, for tests that need short limits.
+/// Never share it: the shared `test_executor()` keeps the defaults.
+#[cfg(test)]
+pub(crate) fn dedicated_executor(settings: JsSettings) -> executor::JsExecutor {
+    init_platform();
+    executor::JsExecutor::start(&settings).expect("dedicated JS executor")
 }
 
 /// Drive `f` to completion on a fresh current_thread runtime.

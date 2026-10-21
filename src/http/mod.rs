@@ -331,6 +331,60 @@ pub(crate) mod tests {
         assert_eq!(body, web::Bytes::from_static(br#""120""#));
     }
 
+    /// A state seeded with `pairs` whose JS pool is a dedicated executor with
+    /// `workers` workers and a `timeout_ms` execution limit.
+    fn timeout_state(workers: usize, timeout_ms: u64, pairs: &[(&str, &str)]) -> AppState {
+        let state = AppState {
+            js: crate::js::dedicated_executor(crate::js::JsSettings {
+                workers,
+                queue_capacity: 16,
+                timeout_ms,
+                ..crate::js::JsSettings::default()
+            }),
+            ..test_state()
+        };
+        for (k, v) in pairs {
+            state.store.insert((*k).to_owned(), (*v).to_owned());
+        }
+        state
+    }
+
+    /// The exact `js_timeout` body for a `ms` limit.
+    fn timeout_body(ms: u64) -> web::Bytes {
+        web::Bytes::from(format!(
+            r#"{{"error":"js_timeout","message":"script exceeded the {ms} ms execution limit"}}"#
+        ))
+    }
+
+    #[actix_web::test]
+    async fn timeout_bounded_busy_loop_is_504() {
+        // Bounded (D-11): without a watchdog this answers 200 "undefined" after 1.5 s.
+        let state = timeout_state(
+            1,
+            300,
+            &[(
+                "busy",
+                "const end = Date.now() + 1500; while (Date.now() < end) {}",
+            )],
+        );
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let start = std::time::Instant::now();
+        let resp = atest::call_service(&app, patch_req("busy").to_request()).await;
+        let elapsed = start.elapsed();
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .map(|v| v.as_bytes().to_vec()),
+            Some(b"application/json".to_vec())
+        );
+        assert_eq!(atest::read_body(resp).await, timeout_body(300));
+        assert!(
+            elapsed < std::time::Duration::from_millis(1500),
+            "{elapsed:?}"
+        );
+    }
+
     #[actix_web::test]
     async fn test_patch_stringify_exception_is_422_js_error() {
         let src = "({ toString() { throw new Error('x') } })";
