@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 6
 current_phase_name: Native Deployment & Documentation
 status: executing
-stopped_at: Phase 5 complete, ready to verify Phase 2
-last_updated: "2026-10-21T10:35:52.328Z"
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-10-21T10:52:19.420Z"
 last_activity: 2026-10-21
-last_activity_desc: Phase 5 complete, transitioned to Phase 2
-state_head: 90d06ecba465c75b18729d237eb2a09cc395dfff
+last_activity_desc: Phase 6 execution started
+state_head: d1de9d6f57e0f9f7c2c69e5a591a0cd2d92bb0a3
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 16
-  completed_plans: 14
+  completed_plans: 15
   percent: 33
 ---
 
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-21)
 
 **Core value:** rs3 builds, tests and lints cleanly on current stable Rust (edition 2024) with only released dependencies, while every existing HTTP route and the JS-executes-against-the-store behaviour keep working with the same semantics.
-**Current focus:** Phase 06 — Native Deployment & Documentation
+**Current focus:** Phase 6 — Native Deployment & Documentation
 
 ## Current Position
 
-Phase: 6 (Native Deployment & Documentation) — READY TO EXECUTE
-Plan: 3
+Phase: 6 (Native Deployment & Documentation) — EXECUTING
+Plan: 2 of 2
 Status: Ready to execute
-Last activity: 2026-10-21 — Phase 5 complete, transitioned to Phase 2
+Last activity: 2026-10-21 — Phase 6 execution started
 
 Progress: [███░░░░░░░] 33%
 
@@ -68,6 +68,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P01 | 8 min | 3 tasks | 6 files |
 | Phase 05 P02 | 11 min | 3 tasks | 13 files |
 | Phase 05 P03 | 8 min | 3 tasks | 9 files |
+| Phase 06 P01 | 11 min | 3 tasks | 20 files |
 
 ## Accumulated Context
 
@@ -122,6 +123,10 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-03: Remote x86_64 CI confirmation of the watchdog on the protected PKU platform (A1) is a pending UAT item; nothing was pushed
 - [Operator UAT 2026-10-21]: CI run 39527188207 at 40afeb7 (ubuntu-26.04 x86_64) green with 0 annotations and 216 tests, so the hardened guards, the watchdog and the release smoke hold on the protected V8 platform. 03/04/05 UAT complete (late-registration path an accepted-risk follow-up; docs/js-ops.md readability a deferred user review); 02 items 1 and 4 pass.
 - [Phase 6 re-scope 2026-10-21]: Docker dropped. rs3 ships as a native binary on a single Linux server (release build plus an example hardened systemd unit); DOCK-01..03 replaced by DEPL-01..03, DOCS-04 adds the MIT license. Stale experiments/web_scrape_s3_api/Cargo.lock removed (5c28dde).
+- [Phase 06]: 06-01: deploy/rs3.service ships the verified research unit unchanged (env(1) bridge RS3_* -> SERVER.*, DynamicUser, no capabilities, @system-service @pkey, start limit 5/60 s, SyslogIdentifier=rs3); verify clean, exposure 1.5
+- [Phase 06]: 06-01: seccomp proven under the user manager (bridge + kill-action run with nested PATCH, 422, 504, no SIGSYS); root-only directives and x86_64 PKU are pending operator UAT in 06-01-SUMMARY.md
+- [Phase 06]: 06-01: LICENSE not created on this branch (arrives from main 9d1596b with the merge); README reset-failed recovery is cited from systemd.unit 255, not live-run
+- [Phase 06]: 06-01: Dockerfile and docker_rs3/ deleted (2021 setup at tag msc), brief item 9 re-scoped; Vagrantfile keeps its dangling references (ruling 5)
 
 ### Pending Todos
 
@@ -163,6 +168,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T09:35:00.000Z
-Stopped at: Phase 5 complete; Phase 6 re-scoped to native deployment, starting discuss
+Last session: 2026-10-21T10:52:19.189Z
+Stopped at: Completed 06-01-PLAN.md
 Resume file: None

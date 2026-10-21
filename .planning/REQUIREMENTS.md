@@ -73,16 +73,16 @@ Requirements for the modernization milestone. Each maps to roadmap phases.
 
 ### Deployment
 
-- [ ] **DEPL-01**: The obsolete container deployment is removed: the root `Dockerfile` and the `docker_rs3/` directory are deleted (the MSc-era version stays at git tag `msc`), no `.dockerignore` is added, and the docs, requirements and CI scripts no longer refer to it
-- [ ] **DEPL-02**: `Readme.md` documents the native release build (`cargo build --release --locked`) and a short install section for running the binary on a single Linux server
-- [ ] **DEPL-03**: An example hardened systemd unit (`deploy/rs3.service`) runs rs3 as an unprivileged user, takes `SERVER.HOST` / `SERVER.PORT` from an `EnvironmentFile`, restarts on failure, and applies sandboxing directives compatible with V8
+- [x] **DEPL-01**: The obsolete container deployment is removed: the root `Dockerfile` and the `docker_rs3/` directory are deleted (the MSc-era version stays at git tag `msc`), no `.dockerignore` is added, and the docs, requirements and CI scripts no longer refer to it
+- [x] **DEPL-02**: `Readme.md` documents the native release build (`cargo build --release --locked`) and a short install section for running the binary on a single Linux server
+- [x] **DEPL-03**: An example hardened systemd unit (`deploy/rs3.service`) runs rs3 as an unprivileged user, takes `SERVER.HOST` / `SERVER.PORT` from an `EnvironmentFile`, restarts on failure, and applies sandboxing directives compatible with V8
 
 ### Documentation
 
 - [ ] **DOCS-01**: `Readme.md` documents the toolchain (Rust 1.99.1 / edition 2024), first-build V8 note, configuration (`SERVER.HOST` / `SERVER.PORT`), and build/run/test instructions
 - [ ] **DOCS-02**: `Readme.md` documents the new JS op syntax with the old→new op mapping and an example, linking `docs/js-ops.md`
 - [ ] **DOCS-03**: `Readme.md` documents the HTTP API with its error status codes and a "Behaviour changes" section versus the 2021 version (sorted and escaped `/list`, 404 instead of `"[]"` for missing keys, 400/422 inserts and other 4xx errors, op renames, PATCH depth limit and timeout)
-- [ ] **DOCS-04**: `Cargo.toml` declares `license = "MIT"` and `Readme.md` states the MIT license
+- [x] **DOCS-04**: `Cargo.toml` declares `license = "MIT"` and `Readme.md` states the MIT license
 
 ## v2 Requirements
 
@@ -175,13 +175,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CI-01 | Phase 4 | Complete |
 | CI-02 | Phase 4 | Complete |
 | CI-03 | Phase 4 | Complete |
-| DEPL-01 | Phase 6 | Pending |
-| DEPL-02 | Phase 6 | Pending |
-| DEPL-03 | Phase 6 | Pending |
+| DEPL-01 | Phase 6 | Complete |
+| DEPL-02 | Phase 6 | Complete |
+| DEPL-03 | Phase 6 | Complete |
 | DOCS-01 | Phase 6 | Pending |
 | DOCS-02 | Phase 6 | Pending |
 | DOCS-03 | Phase 6 | Pending |
-| DOCS-04 | Phase 6 | Pending |
+| DOCS-04 | Phase 6 | Complete |
 
 **Coverage:**
 - v1 requirements: 47 total

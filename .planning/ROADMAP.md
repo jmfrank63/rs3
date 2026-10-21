@@ -188,11 +188,11 @@ Plans:
   4. `Readme.md` documents the HTTP API with its status codes, the `Deno.core.ops.op_rs3_*` syntax with the legacy-to-new op mapping and a working example (linking `docs/js-ops.md`), and a "Behaviour changes" section versus the 2021 version (sorted and escaped `/list`, 404 for missing keys, 400/422 errors, op renames, PATCH depth limit and timeout); it states the MIT license, and `Cargo.toml` declares `license = "MIT"`
   5. CI stays green with zero annotations: `scripts/ci-guards.sh`, `scripts/check-workflow.py` and `scripts/test-ci-guards.sh` stay consistent with every change and pass, and the TOOL-03 gate passes
 
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 
 Plans:
 **Wave 1**
-- [ ] 06-01-PLAN.md: Native deployment slice (wave 1). The tracer adds license = "MIT", deploy/rs3.service (the D-05..D-08 unit plus StartLimitIntervalSec/StartLimitBurst, SyslogIdentifier and ProtectProc) with deploy/rs3.conf, and the README overview, Deployment and License sections. It proves them under the systemd user manager: the unit's own ExecStart and EnvironmentFile serve GET / and a V8 PATCH with seccomp active, systemd-analyze verify is clean, the exposure is 1.5, and an install dry-run succeeds. Then the failure modes, proven and documented: a seccomp kill-action run with nested PATCH, 422 and 504; the start limit on a broken or missing env file; install over a running binary; and the root-only directives handed to operator UAT. Then the removal of Dockerfile and docker_rs3/ and the dead ignore line, the brief re-scope, and the D-17 gate
+- [x] 06-01-PLAN.md: Native deployment slice (wave 1). The tracer adds license = "MIT", deploy/rs3.service (the D-05..D-08 unit plus StartLimitIntervalSec/StartLimitBurst, SyslogIdentifier and ProtectProc) with deploy/rs3.conf, and the README overview, Deployment and License sections. It proves them under the systemd user manager: the unit's own ExecStart and EnvironmentFile serve GET / and a V8 PATCH with seccomp active, systemd-analyze verify is clean, the exposure is 1.5, and an install dry-run succeeds. Then the failure modes, proven and documented: a seccomp kill-action run with nested PATCH, 422 and 504; the start limit on a broken or missing env file; install over a running binary; and the root-only directives handed to operator UAT. Then the removal of Dockerfile and docker_rs3/ and the dead ignore line, the brief re-scope, and the D-17 gate
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 06-02-PLAN.md: Developer documentation slice (wave 2). The tracer writes Requirements, Quick start, Configuration and HTTP API from live output and adds a replay script that diffs every documented body, status and startup line against the release binary. Then JavaScript ops, Limits and Behaviour changes (413 and Content-Type stated as unchanged), replayed, plus the docs/js-ops.md review fixes (IN-02, IN-03, IN-07). Then the Development section, the IN-05 comment, the D-17 gate with the replay and unit run on the final tree, and the validation map
@@ -214,4 +214,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 3. JavaScript Runtime Port | 3/3 | In Progress | - |
 | 4. CI Gate on x86_64 | 2/2 | In Progress | - |
 | 5. JS Execution Limits | 3/3 | Complete    | 2026-10-21 |
-| 6. Native Deployment & Documentation | 0/2 | Planned | - |
+| 6. Native Deployment & Documentation | 1/2 | In Progress | - |
