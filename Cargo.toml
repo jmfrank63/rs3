@@ -4,6 +4,7 @@ version = "0.2.0"
 authors = ["johannes"]
 edition = "2024"
 rust-version = "1.99"
+license = "MIT"
 
 # One package: the rs3 library (src/lib.rs) and the rs3 binary (src/main.rs) are
 # auto-discovered. See https://doc.rust-lang.org/cargo/reference/manifest.html

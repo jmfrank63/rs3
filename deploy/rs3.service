@@ -1,0 +1,59 @@
+# Example hardened systemd unit for rs3. Install: see "Deployment" in Readme.md.
+[Unit]
+Description=rs3 key/value store with embedded JavaScript
+Documentation=https://github.com/jmfrank63/rs3
+After=network-online.target
+Wants=network-online.target
+# Give up after 5 failed starts in 60 s (a broken /etc/rs3/rs3.conf), instead
+# of restarting every 2 s forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+# systemd drops variable names that contain a dot, so /etc/rs3/rs3.conf holds
+# RS3_HOST/RS3_PORT and env(1) hands them to rs3 as SERVER.HOST/SERVER.PORT.
+EnvironmentFile=/etc/rs3/rs3.conf
+ExecStart=/usr/bin/env SERVER.HOST=${RS3_HOST} SERVER.PORT=${RS3_PORT} /usr/local/bin/rs3
+# Tag journal lines "rs3" rather than "env".
+SyslogIdentifier=rs3
+Restart=on-failure
+RestartSec=2
+
+# Unprivileged: a transient "rs3" user (an existing static rs3 user is reused).
+# No capabilities, so the port must be 1024 or above. For a lower port, set
+# CapabilityBoundingSet= and AmbientCapabilities= to CAP_NET_BIND_SERVICE.
+DynamicUser=yes
+User=rs3
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+# Sandboxing. Never add MemoryDenyWriteExecute=yes: V8's JIT needs writable
+# and executable memory, and rs3 crashes at the first PATCH.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+# @pkey: V8 uses memory protection keys on x86_64 CPUs that have them, and
+# @system-service does not include pkey_alloc/pkey_free/pkey_mprotect.
+SystemCallFilter=@system-service @pkey
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
