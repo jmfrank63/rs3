@@ -79,9 +79,9 @@ Requirements for the modernization milestone. Each maps to roadmap phases.
 
 ### Documentation
 
-- [ ] **DOCS-01**: `Readme.md` documents the toolchain (Rust 1.99.1 / edition 2024), first-build V8 note, configuration (`SERVER.HOST` / `SERVER.PORT`), and build/run/test instructions
-- [ ] **DOCS-02**: `Readme.md` documents the new JS op syntax with the old→new op mapping and an example, linking `docs/js-ops.md`
-- [ ] **DOCS-03**: `Readme.md` documents the HTTP API with its error status codes and a "Behaviour changes" section versus the 2021 version (sorted and escaped `/list`, 404 instead of `"[]"` for missing keys, 400/422 inserts and other 4xx errors, op renames, PATCH depth limit and timeout)
+- [x] **DOCS-01**: `Readme.md` documents the toolchain (Rust 1.99.1 / edition 2024), first-build V8 note, configuration (`SERVER.HOST` / `SERVER.PORT`), and build/run/test instructions
+- [x] **DOCS-02**: `Readme.md` documents the new JS op syntax with the old→new op mapping and an example, linking `docs/js-ops.md`
+- [x] **DOCS-03**: `Readme.md` documents the HTTP API with its error status codes and a "Behaviour changes" section versus the 2021 version (sorted and escaped `/list`, 404 instead of `"[]"` for missing keys, 400/422 inserts and other 4xx errors, op renames, PATCH depth limit and timeout)
 - [x] **DOCS-04**: `Cargo.toml` declares `license = "MIT"` and `Readme.md` states the MIT license
 
 ## v2 Requirements
@@ -178,9 +178,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DEPL-01 | Phase 6 | Complete |
 | DEPL-02 | Phase 6 | Complete |
 | DEPL-03 | Phase 6 | Complete |
-| DOCS-01 | Phase 6 | Pending |
-| DOCS-02 | Phase 6 | Pending |
-| DOCS-03 | Phase 6 | Pending |
+| DOCS-01 | Phase 6 | Complete |
+| DOCS-02 | Phase 6 | Complete |
+| DOCS-03 | Phase 6 | Complete |
 | DOCS-04 | Phase 6 | Complete |
 
 **Coverage:**

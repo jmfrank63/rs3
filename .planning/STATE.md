@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 6
 current_phase_name: Native Deployment & Documentation
-status: executing
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-10-21T10:52:19.420Z"
+status: verifying
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-10-21T11:05:15.009Z"
 last_activity: 2026-10-21
 last_activity_desc: Phase 6 execution started
-state_head: d1de9d6f57e0f9f7c2c69e5a591a0cd2d92bb0a3
+state_head: a9e720b8673a669cb3376b6bccd04c03f39e9f8a
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 16
-  completed_plans: 15
+  completed_plans: 16
   percent: 33
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-21)
 
 Phase: 6 (Native Deployment & Documentation) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-21 — Phase 6 execution started
 
 Progress: [███░░░░░░░] 33%
@@ -69,6 +69,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P02 | 11 min | 3 tasks | 13 files |
 | Phase 05 P03 | 8 min | 3 tasks | 9 files |
 | Phase 06 P01 | 11 min | 3 tasks | 20 files |
+| Phase 06 P02 | 11 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,9 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-01: seccomp proven under the user manager (bridge + kill-action run with nested PATCH, 422, 504, no SIGSYS); root-only directives and x86_64 PKU are pending operator UAT in 06-01-SUMMARY.md
 - [Phase 06]: 06-01: LICENSE not created on this branch (arrives from main 9d1596b with the merge); README reset-failed recovery is cited from systemd.unit 255, not live-run
 - [Phase 06]: 06-01: Dockerfile and docker_rs3/ deleted (2021 setup at tag msc), brief item 9 re-scoped; Vagrantfile keeps its dangling references (ruling 5)
+- [Phase 06]: 06-02: README complete in D-12 order; every body/status/startup line replayed byte for byte against the release binary (readme-replay, 130 checks); only 500 internal and the dotenv-file rules are code-derived and labelled
+- [Phase 06]: 06-02: 413/262144 limit and any Content-Type documented as unchanged since 2021 in HTTP API, not under Behaviour changes; body must be UTF-8
+- [Phase 06]: 06-02: docs/js-ops.md says stdout is raw, unescaped (IN-03) with the V8 RangeError exception (IN-07); IN-02 table/limits gaps closed; IN-05 executor comment fixed (comment only)
 
 ### Pending Todos
 
@@ -168,6 +172,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T10:52:19.189Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-10-21T11:05:14.796Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None
