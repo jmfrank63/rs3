@@ -3,8 +3,8 @@ phase: "06"
 slug: "native-deployment-documentation"
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
 # audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: false) (#2117)
-status: draft
-nyquist_compliant: false
+status: validated
+nyquist_compliant: true
 wave_0_complete: true
 created: "2026-10-21"
 ---
@@ -75,7 +75,16 @@ Filled by the planner/executor as tasks are created. The requirement → command
 - [x] Sampling continuity: no 3 consecutive tasks without automated verify
 - [x] Wave 0 covers all MISSING references
 - [x] No watch-mode flags
-- [ ] Feedback latency < 240s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] Feedback latency < 240s (quick run command: about 1 s; full suite about 4 min warm, run per wave)
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved 2026-10-21 (validate-phase audit: 0 automatable gaps; `unit-live.sh bridge` and `readme-replay.sh` (130 checks) re-run green on the final tree; DEPL-03 root-only directives stay manual-only)
+
+## Validation Audit 2026-10-21
+
+| Metric | Count |
+|---|---|
+| Gaps found | 0 |
+| Resolved | 0 |
+| Escalated | 0 |
+| Manual-only (pre-existing) | 1 |
