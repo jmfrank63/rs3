@@ -3,7 +3,7 @@ status: complete
 phase: 03-javascript-runtime-port
 source: [03-VERIFICATION.md]
 started: 2026-10-20T21:20:00Z
-updated: 2026-10-21T09:29:30.682Z
+updated: 2026-10-21T09:30:17.242Z
 ---
 
 ## Current Test
@@ -34,7 +34,7 @@ evidence: "Operator accepted the verifier's verdict (all 20 call sites clean), r
 expected: Read docs/js-ops.md as someone migrating a legacy rs3 script. The mapping table, error rules, PATCH result rules and limits should be clear enough to migrate fac/sum/bin/store-style scripts without reading the Rust source. The verifier confirmed every documented message matches the code and the live binary.
 result: skipped
 source: operator
-reason: "Skipped by the user on 2026-10-21: they will review docs/js-ops.md later. Not a blocker."
+reason: "Deferred follow-up: the user will review docs/js-ops.md later; not a blocker (operator, 2026-10-21)."
 
 ## Summary
 
@@ -46,3 +46,9 @@ skipped: 1
 blocked: 0
 
 ## Gaps
+
+## Deferred Follow-Ups
+
+- test: 3
+  idea: "The user reviews docs/js-ops.md for readability as a script author (not a blocker)."
+  deferred_at: 2026-10-21
