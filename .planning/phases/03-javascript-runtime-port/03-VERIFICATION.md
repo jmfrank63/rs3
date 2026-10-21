@@ -1,9 +1,10 @@
 ---
 phase: 03-javascript-runtime-port
-verified: 2026-10-20T21:08:05Z
-status: human_needed
-score: 22/22 must-haves verified
+verified: 2026-10-21T11:54:15Z
+status: passed
+score: 26/26 must-haves verified
 covered_files:
+  - ".github/workflows/ci.yml"
   - ".planning/phases/03-javascript-runtime-port/03-01-PLAN.md"
   - ".planning/phases/03-javascript-runtime-port/03-01-SUMMARY.md"
   - ".planning/phases/03-javascript-runtime-port/03-02-PLAN.md"
@@ -24,6 +25,8 @@ covered_files:
   - "requests/store.txt"
   - "requests/sum.js"
   - "requests/sum.txt"
+  - "scripts/ci-guards.sh"
+  - "scripts/ci-smoke.sh"
   - "src/example.js"
   - "src/http/error.rs"
   - "src/http/kv.rs"
@@ -35,237 +38,229 @@ covered_files:
   - "src/main.rs"
   - "src/state.rs"
   - "src/store/legacy.rs"
-covered_digest: "v3:sha256:f6c0e3e0444ee19d504091db60dc42f94184d275a526bdf764cbc6a8c3577871"
+covered_digest: "v3:sha256:20b6b0f6e0f673c0b7423eed701ed3393f77d37654188a4c8667f666d4bf563b"
 behavior_unverified: 0
-overrides_applied: 0
-human_verification:
-  - test: "unverified-prohibition — human review recommended. Test-tier prohibitions with no repo-resident enforcement: (a) 03-01 ROBU-04 and 03-03 TEST-03 'MUST NOT make a gate green by suppression' (no allow/expect/cfg_attr lint attribute in src/, no lowered lint, no #[ignore], no weakened golden, no production code under cfg(test)); (b) 03-01 JSRT-04 'unsafe_use_unprotected_platform only on the [dev-dependencies] deno_core entry'; (c) 03-02 JSRT-05 'no compatibility shim, alias or wrapper for the legacy op API'; (d) 03-02 JSRT-06 'docs/js-ops.md must not omit or soften the known limits'. Review `git diff 9209f76..HEAD -- src Cargo.toml clippy.toml docs requests` and confirm."
-    expected: "Zero suppression attributes and zero #[ignore] in src/; unwrap_used/expect_used stay at deny; `cargo tree -e features,normal -i deno_core` shows no unsafe_use_unprotected_platform while `cargo tree -e features -i deno_core` shows it (dev edge only); no opSync/Deno.core.ops()/rs3_* alias anywhere outside the migration table in docs/js-ops.md; docs/js-ops.md lists op_panic disabled, unbounded nesting (235/778 levels, ~800 MB, 2.7 s), non-terminating scripts, unawaited Promises and Deno.core.print output."
-    why_human: "Fail-closed rule: no wired, repo-resident test or CI check enforces these yet (the Phase 4 CI grep does not exist), so they cannot be marked green automatically. The verifier's own checks at this commit are all clean: grep found no suppression or #[ignore], the normal-edge feature count is 0 and the all-edge count is 1, the legacy-syntax grep hits only docs/js-ops.md migration rows, and every limit is stated in docs/js-ops.md 'Sandbox and known limits'."
-  - test: "unverified-prohibition — human review recommended. Judgment-tier prohibition (03-01 JSRT-02, 03-03 HTTP-07): 'MUST NOT store or PATCH a self-patching (unboundedly recursive) script in any test, fixture or live smoke in this phase.' Review every op_rs3_patch use in src/ (`grep -n op_rs3_patch src/js/*.rs src/http/*.rs`)."
-    expected: "Every nested chain ends at a key that does not patch (inner, mid->inner, a->b->c with c='1', throws, bad/good, ghost); no key patches itself directly or through a cycle."
-    why_human: "Judgment-tier prohibitions get only a non-authoritative LLM verdict. Verifier verdict: satisfied. The verifier inspected all 20 op_rs3_patch call sites and its own live smokes used only the non-recursive outer->inner chain."
-  - test: "Read docs/js-ops.md as a script author migrating a legacy rs3 script."
-    expected: "The mapping table, error rules, PATCH results and limits are clear enough to migrate fac/sum/bin/store-style scripts without reading the Rust source."
-    why_human: "03-02-SUMMARY coverage D4 flags this as human_judgment: the docs gate proves the required statements exist and the verifier confirmed every documented message against the code and live binary, but readability for a user is a human call."
+overrides_applied: 4
+overrides:
+  - must_have: "docs/js-ops.md discloses the sandbox and the known limits: until Phase 5, nesting through op_rs3_patch is unbounded (about 235 debug / 778 release levels, about 800 MB, 2.7 s), and a non-terminating script such as while(true){} occupies a JS worker until the Phase 5 timeout exists"
+    reason: "Superseded by Phase 5 decision D-12 (05-CONTEXT.md): rewrite the docs/js-ops.md limits section with no more 'until Phase 5'. Phase 5 added the depth limit (4, commit 92c6198) and the 5000 ms timeout (commit 7d704f7). The current docs state both limits, the 422 js_depth_limit and 504 js_timeout bodies, that writes made before a stop are kept, and the remaining heap-exhaustion limit (v2 JSHD-01). The intent of the must-have (no undisclosed limit) still holds, and operator UAT 03-UAT.md test 1 confirmed the limits are disclosed without being softened."
+    accepted_by: "gsd-verifier (orchestrator-directed re-verification; Phase 5 D-12)"
+    accepted_at: "2026-10-21T11:54:15Z"
+  - must_have: "actix workers never run V8: the live binary has as many threads named rs3-js-* as nproc reports"
+    reason: "Superseded in its thread-count detail by Phase 5 D-06 and commit 7d704f7: each worker rs3-js-{i} now spawns a watchdog thread rs3-js-{i}-wd, so a rs3-js-* glob matches 2 x nproc threads. There is still exactly one rs3-js-{i} worker per available_parallelism (JsSettings::default, JsExecutor::start). The substance (V8 runs only on the pool and patch_key only awaits the executor) is verified in truth SC4."
+    accepted_by: "gsd-verifier (orchestrator-directed re-verification; Phase 5 D-06)"
+    accepted_at: "2026-10-21T11:54:15Z"
+  - must_have: "tokio 1.54.0 with features rt and sync is the only new direct dependency and resolves to the tokio already in Cargo.lock; compared with commit 9209f76 the only lockfile change is one added tokio line"
+    reason: "Feature set superseded by Phase 5 D-07 (the handler backstop uses tokio::time::timeout; 'time' feature added in commit 3e2a16e) and a dev-only 'macros' feature for tokio::join! concurrency tests. tokio is still the only new direct dependency, still 1.54.0, and `git diff 9209f76 HEAD -- Cargo.lock` is still exactly the one line `+ \"tokio\",` (re-checked at HEAD)."
+    accepted_by: "gsd-verifier (orchestrator-directed re-verification; Phase 5 D-07)"
+    accepted_at: "2026-10-21T11:54:15Z"
+  - must_have: "MUST NOT store or PATCH a self-patching (unboundedly recursive) script in any test, fixture or live smoke in this phase (03-01 JSRT-02, 03-03 HTTP-07 prohibitions)"
+    reason: "Scoped to Phase 3 by its own wording. Phase 5 D-11 replaced it once the depth limit existed: self-patching and cyclic scripts are now tested deliberately on the depth-limited path (src/http/mod.rs depth_limit_self_patch_is_422, depth_limit_cycle_is_422; scripts/ci-smoke.sh PATCH /key/me -> 422 js_depth_limit). For the Phase 3 window the operator accepted the verifier's verdict (03-UAT.md test 2, pass)."
+    accepted_by: "gsd-verifier (orchestrator-directed re-verification; Phase 5 D-11)"
+    accepted_at: "2026-10-21T11:54:15Z"
+re_verification:
+  previous_status: human_needed
+  previous_score: 22/22
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
+  reason: "Previous report went stale (covered files changed by Phases 5 and 6). The three human items it raised are resolved in 03-UAT.md: test 1 pass, test 2 pass, test 3 skipped as a deferred follow-up (docs readability, not a blocker)."
 ---
 
 # Phase 3: JavaScript Runtime Port Verification Report
 
 **Phase Goal:** As a user storing scripts in rs3, I want to PATCH a key and have its JavaScript run on current deno_core with the five store ops, so that the JS-executes-against-the-store behaviour works again and no script or op error can abort the server.
-**Verified:** 2026-10-20T21:08:05Z
-**Status:** human_needed
-**Re-verification:** No — initial verification
-**Mode:** mvp (user-story format validated: `user-story.validate` → true)
+**Verified:** 2026-10-21T11:54:15Z
+**Status:** passed
+**Re-verification:** Yes. The previous report (2026-10-20, human_needed, 22/22) went stale after Phases 5 and 6 changed the covered files. This run judges the final milestone tree (HEAD a4a8069).
+**Mode:** mvp (`user-story.validate` returned true)
+
+## Evidence basis
+
+- **Shared gate run (not re-run here, per orchestrator):** on HEAD a4a8069 (source identical to the final tree) `bash scripts/ci-guards.sh` passed guards a to h, and `check-workflow.py`, `test-ci-guards.sh` (99 cases, 0 missed), `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings` all passed. `cargo test --locked` gave 216 passed, 0 failed, 0 ignored. The one ignored doctest is the one deno_core's `extension!` macro generates. `cargo build --release --locked` and `bash scripts/ci-smoke.sh` both succeeded. The log is `target/tmp/d17-a4a8069.log`. Remote CI run 39527188207 passed on ubuntu-26.04 x86_64.
+- **This verifier's own read-only checks:**
+  - Source reads of every covered Rust file, the samples and docs/js-ops.md.
+  - Grep checks for every plan-named test, every key-link pattern, layering, unwrap/expect outside tests, legacy syntax, `#[ignore]` and debt markers.
+  - `cargo tree --offline` for the feature edges and the v8 count.
+  - `git diff 9209f76 HEAD -- Cargo.lock`.
+  - `verify.artifacts` for all three plans.
+- **Operator UAT (03-UAT.md):**
+  - Test 1 (the test-tier prohibitions, re-run by the operator) passed.
+  - Test 2 (no self-patching script in the Phase 3 window) passed.
+  - Test 3 (docs readability) was skipped as a deferred follow-up the user will review later. It is not a blocker and is not raised again here.
 
 ## User Flow Coverage
 
-| # | Step of the user story | Expected | Evidence in codebase / live binary | Status |
-|---|------------------------|----------|------------------------------------|--------|
-| 1 | User stores a script with `POST /insert` | key holds the source | live 18520: `{"m":"6*20"}` echoed; the four `requests/*.txt` payloads inserted unchanged | ✓ |
-| 2 | User PATCHes the key | 200, JSON string of `String(completion value)` | `src/http/mod.rs` `patch_key` → `state.js.execute(..)`; live: `PATCH /key/m` → `200 "120"` | ✓ |
-| 3 | Script runs on current deno_core | deno_core 0.412.0 from crates.io, `#[op2]` + `extension!` | `Cargo.toml` `deno_core = "0.412.0"`; `src/js/ops.rs` `deno_core::extension!(rs3_ext, ops = [...5 ops])`; single v8 150.4.0 through deno_v8 | ✓ |
-| 4 | Script uses the five store ops against the same store | list/get/insert/delete/patch reach the injected store | live: fac `"120"`, sum `"10"`, bin tree JSON, store echo then `GET /key/res` → `"1111"`; nested `outer` → `"11"`; JS `op_rs3_delete("num")` → `"5"` then `GET /key/num` → 404; PATCH of `op_rs3_list().toString()` equals `GET /list` byte for byte | ✓ |
-| 5 | Outcome: "no script or op error can abort the server" | script/op errors → 422 or caught; server keeps serving | live: op_panic, throw, syntax error, uncaught op error → 422 js_error; caught op error → 200; `GET /` still 200 after; 32 parallel PATCHes all 200; process alive. Verifier probe: all 98 other exposed built-in ops (every op in `Deno.core.ops` except op_panic and the five rs3 ops) called with 12 argument patterns each, plus callback-setting probes (format-exception, promise hooks, rejection handler, wasm streaming) → no abort, no panic | ✓ |
+| # | Step of the user story | Expected | Evidence in the final tree | Status |
+|---|------------------------|----------|----------------------------|--------|
+| 1 | User stores a script with `POST /insert` | The key holds the source | `test_insert_is_ok` (exact echo bytes). `txt_payload_*` tests insert the four `requests/*.txt` payloads unchanged | ✓ |
+| 2 | User PATCHes the key | 200 with the JSON string of `String(completion value)` | `patch_key` (src/http/mod.rs:46-55): `store.get` (404 before queueing), then `state.js.execute(..).await`. `test_patch_runs_script_200` gives `"120"`. ci-smoke on the release binary also gives `PATCH /key/m -> 200 "120"` | ✓ |
+| 3 | Script runs on current deno_core | deno_core 0.412.0 from crates.io, `#[op2]` and `extension!` | Cargo.toml `deno_core = "0.412.0"`. Single `v8 v150.4.0` reached only through deno_v8 and deno_core. `deno_core::extension!(rs3_ext, ops = [5 ops], ..)` | ✓ |
+| 4 | Script uses the five store ops against the same store | list, get, insert, delete and patch reach the injected store | `ExecCtx.store` is the `state.store.clone()` passed by `patch_key`. Fixture tests fac `"120"`, sum `"10"`, bin tree JSON, store echo then `GET /key/res` `"1111"`. TEST-06 byte equality holds | ✓ |
+| 5 | Outcome: no script or op error can abort the server | Errors give 422 or are caught, and the server keeps serving | op_panic disabled by middleware. Throw, syntax and uncaught op errors give 422 `js_error` (tests). `test_patch_op_panic_is_422_and_server_keeps_serving` then answers `GET /` 200 and another PATCH 200. Panicking jobs are isolated by catch_unwind. Clippy denies unwrap/expect. ci-smoke shows 422 `js_error` and the server alive | ✓ |
 
 ## Goal Achievement
 
 ### Observable Truths
 
-Roadmap success criteria (the contract) first, then plan-specific truths grouped by concern.
+The table lists the roadmap success criteria (the contract) first, then the plan truths grouped by concern, then the superseded plan items carried by overrides.
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| SC1 | PATCH runs the stored script on released deno_core and returns 200 with the stringified completion value; fac/sum/bin run as fixtures; every one of the seven routes has a success test asserting status and body bytes | ✓ VERIFIED | `patch_key` (src/http/mod.rs:46-55); tests `fixture_fac_is_120`, `fixture_sum_is_10`, `fixture_bin_is_tree_json`, `fixture_store_writes_res` use `include_str!("../../requests/*.js")`; route tests `test_index_body_is_welcome`, `test_ip_body_is_ip`, `test_insert_is_ok`, `test_get_is_ok`, `test_delete_is_ok`, `list_golden_sorted`, `test_patch_runs_script_200` all assert status plus exact bytes; live smoke matches |
-| SC2 | Scripts call `Deno.core.ops.op_rs3_list/get/insert/delete/patch` (`#[op2]`, `extension!`) against the same injected store; PATCH of `op_rs3_list()` yields the same content as `GET /list` | ✓ VERIFIED | src/js/ops.rs: five `#[op2]` fns, `op_rs3_patch` is `#[op2(reentrant)]`; `extension!(rs3_ext, options = { ctx: ExecCtx }, state = put(ctx))`; ExecCtx carries `state.store.clone()` from `patch_key`; `op_rs3_list` = `legacy::format_list(&store.list())`; tests `test_patch_body_is_listing`, `test_patch_listing_matches_list_with_escapes_and_order` (byte equality including `"` and `\`, B<a<b order, script key included); live `LIST EQUAL` |
-| SC3 | Throw / syntax error → 422 JSON with the JS message; op on missing key / invalid input raises a catchable exception; server keeps serving; no unwrap/expect on request data | ✓ VERIFIED | `From<ExecError> for ApiError` (Script → JsError 422); tests `test_patch_throw_is_422_js_error`, `..._syntax_error_...`, `..._non_error_throw_...`, `..._uncaught_op_error_...`, `test_patch_op_panic_is_422_and_server_keeps_serving`, `get_missing_key_throws_catchable_error`, `insert_malformed_throws_type_error_and_writes_nothing`; clippy `unwrap_used`/`expect_used = deny` passes with `-D warnings`; verifier scan: every `unwrap()`/`expect(` in src/js, src/http, src/store, src/state.rs is inside `#[cfg(test)]`; built-in op probe found no abort path |
-| SC4 | JS on dedicated JS threads, V8 platform initialised once in main before other threads spawn; full suite passes under default parallel `cargo test` | ✓ VERIFIED | src/main.rs: `Settings::load` → `rs3::js::init_platform()` → `JsExecutor::start` → `AppState::new(settings, js)` → `HttpServer::new` (sequential code, nothing spawns before line 16); `#[actix_web::main]` builds a current-thread runtime; src/http has no deno_core import; live: 4 `rs3-js-*` threads, nproc 4; `cargo test`: 171 passed, 0 failed, 0 ignored (parallel); also 171 passed under `env -i ... cargo test -- --test-threads=1` |
-| SC5 | Every JS artefact uses `Deno.core.ops.op_rs3_*(...)`, no `Deno.core.ops();` / `opSync`; old→new mapping (incl. "missing key throws") documented | ✓ VERIFIED | grep over requests/ and src/: zero `opSync`, `Deno.core.ops()` or unprefixed `rs3_*` calls; all 4 `.txt` payloads and both `.http` files use `op_rs3_*`; src/example.js uses `op_rs3_list()`; docs/js-ops.md mapping table has one row per op plus the bootstrap row, and states `key not found: <key>` |
-| 6 | Nested `op_rs3_patch`: reentrant nested JsRuntime on the same thread, own top-level scope, same store, nested errors catchable with one `Uncaught ` stripped, missing key throws | ✓ VERIFIED | tests `nested_patch_returns_inner_result`, `nested_patch_has_own_top_level_scope` (71), `nested_throw_is_catchable_without_uncaught_prefix` (`true\|RangeError: inner boom`), `nested_patch_of_missing_key_throws`, `exec_ctx_nested_increments_depth_and_shares_store`; live outer→inner `"11"` |
-| 7 | `op_panic` disabled by extension middleware: catchable `op is disabled`; uncaught → 422 `Uncaught Error: op is disabled`; process keeps running | ✓ VERIFIED | `middleware = \|op\| match op.name { "op_panic" => op.disable(), ... }`; tests `op_panic_is_disabled_and_catchable`, `uncaught_op_panic_is_a_script_error`, HTTP test above; live 422 then `GET /` 200 |
-| 8 | Op semantics: list uses the shared codec (sorted, `[]` empty, extra args ignored); get/delete missing → `Error` `key not found: <k>`; insert validates whole body, TypeError `malformed JSON:` / `invalid input:`, nothing written; string coercion (`undefined`, `5`); idempotency | ✓ VERIFIED | src/js/ops.rs `to_js`, `StrArg`; tests `list_matches_shared_codec_sorted`, `list_on_empty_store_is_brackets`, `list_ignores_an_extra_argument`, `get_coerces_its_argument`, `numeric_key_never_aliases_the_empty_key`, `object_and_symbol_arguments_throw_type_error`, `insert_*`, `delete_returns_old_value_then_throws`, `get_twice_returns_the_same_value`; live caught insert error → `TypeError\|malformed JSON: ...` |
-| 9 | `run_script`: `JsRuntime::try_new` only, `deno_core::scope!` in the runtime's own context, stringification per D-10 (incl. Symbol and exceptions during ToString → 422, CR-01 fix) | ✓ VERIFIED | src/js/runtime.rs: no `JsRuntime::new(` in src/; `stringify` under `v8::tc_scope!`; tests `completion_values_are_stringified` (120, undefined, [object Object], [object Promise], null, "", undefined), `symbol_completion_values_match_js_string`, `exception_while_stringifying_is_a_script_error`, HTTP `test_patch_stringifies_completion_values`, `test_patch_stringify_exception_is_422_js_error`, `test_patch_symbol_result_is_200` |
-| 10 | Script errors carry `JsError.exception_message`; non-ASCII preserved; stack only on stderr (escaped) | ✓ VERIFIED | `ExecError::Script { message: e.exception_message }`; `log_error` with Debug-escaped name and text; tests `thrown_errors_become_script_errors`, `error_messages_keep_non_ascii`, `test_patch_error_message_keeps_non_ascii`; live stderr shows `js error in "t": "Error: boom\n    at t:1:7"` and the 422 body has no stack |
-| 11 | JsExecutor: bounded pool of `rs3-js-{i}` threads, explicit 16 MiB stack, tokio current_thread per worker with runtimes created inside it, fresh runtime per job, full queue makes callers wait, zero settings clamped, JsSettings built in code | ✓ VERIFIED | src/js/executor.rs `start`, `worker_loop` (`rt.enter()` before the job); tests `job_runs_on_a_named_js_thread`, `every_job_gets_a_fresh_runtime`, `full_queue_makes_callers_wait`, `zero_settings_are_clamped`, `default_settings_follow_d06` — all pass in the run above (behavior-dependent invariants exercised by tests) |
-| 12 | Panic isolation and closed pool: panicking job → `ExecError::Internal`, workers survive more panics than workers; closed executor → `Unavailable` | ✓ VERIFIED | `catch_unwind(AssertUnwindSafe(env.run))`; tests `worker_survives_panicking_jobs`, `closed_executor_is_unavailable`; no `panic = "abort"` profile in Cargo.toml |
-| 13 | Per-job store isolation on the shared executor, also in parallel | ✓ VERIFIED | test `stores_on_one_executor_are_isolated`; every HTTP test uses its own `test_state()` store over `test_executor()` |
-| 14 | Dependencies: tokio 1.54.0 (rt, sync) is the only new direct dep; lockfile differs from 9209f76 by one line; unprotected platform only on dev edges; single v8 | ✓ VERIFIED | `git diff 9209f76 -- Cargo.lock` = one `+ "tokio",` line; `cargo tree -e features,normal -i deno_core` count 0, `-e features` count 1; `cargo tree -i v8` → v8 150.4.0 only via deno_v8 ← deno_core |
-| 15 | Samples migrated and keep behaviour (fac 120, sum 10, bin tree JSON, store writes res=1111); `.txt` payloads are the same scripts; REST-client payloads `op_rs3_list().toString();`; example.js lists and prints | ✓ VERIFIED | HTTP fixture tests on the `.js` files; live 18520 ran the four unmodified `.txt` payloads through `/insert` + PATCH: `"120"`, `"10"`, tree JSON, echo, `GET /key/res` → `"1111"`; `fixtures_share_one_store_in_any_order` (sum/bin/sum, no top-level collision) |
-| 16 | docs/js-ops.md: mapping table (old call/new call/argument/returns/throws), missing-key and insert error rules, no NotFound class, PATCH results (200/422/500/404), nested errors and host faults, runtime model, argument coercion and encoding, sandbox and Phase 5 limits, re-insert after upgrade | ✓ VERIFIED | Read in full; every message (`op is disabled`, `key not found: nope`, `{"error":"js_error","message":"Uncaught Error: boom"}`, `internal error`) matches the code and the live binary; limits section states 235/778 levels, ~800 MB, 2.7 s, `while(true){}`, Phase 5 422/504 |
-| 17 | AppState gains `pub js: JsExecutor`; `test_state()` uses `js::test_executor()`; main exits 1 with `error: cannot start JS runtime:` on pool failure; main.rs ≤ 60 lines | ✓ VERIFIED | src/state.rs; src/main.rs (46 lines, `eprintln!("error: cannot start JS runtime: {e}"); return ExitCode::FAILURE`) |
-| 18 | ApiError: `JsError(String)` → js_error/422, `Internal` → 500 fixed body, `From<ExecError>` logs host faults only, NotImplemented and the 501 test removed, matches exhaustive without wildcard | ✓ VERIFIED | src/http/error.rs; grep finds no `NotImplemented`/`501` in src/; tests `test_internal_error_response_is_500_json` (Phase 2 IN-01), `test_patch_executor_down_is_500_internal` (store unchanged) |
-| 19 | Host faults (closed executor, runtime creation failure at top level or any nested depth, even if caught) answer 500; ops refuse after a nested fault; fault logged once | ✓ VERIFIED | tests `top_level_runtime_failure_is_internal`, `nested_runtime_failure_is_internal`, `deeper_nested_runtime_failure_is_internal`, `caught_nested_runtime_failure_is_still_internal_and_refuses_later_writes`, `every_op_throws_internal_error_once_the_job_faulted`, `patch_after_a_caught_fault_is_refused_without_running`, `one_nested_host_fault_is_logged_once_at_any_depth`, `a_fault_recorded_before_a_run_is_not_blamed_on_it` |
-| 20 | Script errors are repeatable and do not poison the app; parked PATCH tests run again; no `#[ignore]` in src/; GET/PATCH/DELETE on one key path hit their own handlers; empty script is a 200 | ✓ VERIFIED | `test_patch_script_error_is_repeatable`, `test_patch_is_ok`, `test_patch_body_is_listing` (not ignored; 0 ignored lib tests), `test_patch_get_delete_on_one_key_hit_their_own_handlers`, `test_patch_stringifies_completion_values` (s5 empty → `"undefined"`) |
-| 21 | D-17 housekeeping: parse_insert_body problem-order doc corrected and pinned (`{"a":1,"b":1e400}` → invalid input naming b); truncated-input tests renamed; HTTP 422 for valid deep nesting | ✓ VERIFIED | src/store/legacy.rs:29-31 doc; `parse_unrepresentable_value_beats_earlier_non_string`; `parse_rejects_truncated_deep_nesting`; src/http/kv.rs `insert_valid_deep_nesting_is_422_json` — all pass |
-| 22 | Phase gate (TOOL-03): `cargo build --locked`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` exit 0; static gates (no suppression, http→js→store direction, deno_core only in src/js, no panicking constructor, no legacy syntax) | ✓ VERIFIED | Verifier ran all four: build ok, test 171/0/0, clippy clean, fmt exit 0; grep: no `allow(`/`expect(` attributes, no deno_core/deno_error outside src/js, no `JsRuntime::new(`. The "five times in a row" repetition was not re-run (verifier runs the suite at most once per configuration); parallel and env-free serial runs both passed |
+| SC1 | PATCH runs the stored script on released deno_core and returns 200 with the stringified completion value. fac, sum and bin run as fixtures. Each of the seven routes has a success test asserting status and body bytes | ✓ VERIFIED | `patch_key` (src/http/mod.rs:46-55). `fixture_fac_is_120`, `fixture_sum_is_10`, `fixture_bin_is_tree_json` and `fixture_store_writes_res` use `include_str!("../../requests/*.js")`. Route tests, each asserting status and exact bytes: `test_index_body_is_welcome`, `test_ip_body_is_ip`, `test_insert_is_ok`, `test_get_is_ok`, `test_delete_is_ok`, `list_golden_sorted` (status checked in `list_body`) and `test_patch_runs_script_200`. The suite passed (216/0) |
+| SC2 | Scripts call `Deno.core.ops.op_rs3_list/get/insert/delete/patch` (`#[op2]`, `extension!`) against the same injected store, and PATCH of `op_rs3_list()` equals `GET /list` | ✓ VERIFIED | src/js/ops.rs:194-358 has five `#[op2]` fns, and `op_rs3_patch` is `#[op2(reentrant)]`. `extension!(rs3_ext, options = { ctx: ExecCtx }, state = put(ctx))` at :416-431. `op_rs3_list` = `legacy::format_list(&ctx.store.list())`. `test_patch_body_is_listing` and `test_patch_listing_matches_list_with_escapes_and_order` check byte equality including `"` and `\`, B<a<b order, and that the listing contains the script key |
+| SC3 | A throw or syntax error gives 422 JSON with the JS message. An op on a missing key or with invalid input raises a catchable exception. The server keeps serving. No unwrap/expect on request data | ✓ VERIFIED | `From<ExecError> for ApiError` maps Script to `JsError`, which is 422 `js_error`. Tests: `test_patch_throw_is_422_js_error` (exact body), the syntax, non-Error-throw and uncaught-op-error 422 tests, `test_patch_op_panic_is_422_and_server_keeps_serving`, `test_patch_script_error_is_repeatable`, `get_missing_key_throws_catchable_error` and `insert_malformed_throws_type_error_and_writes_nothing`. Cargo.toml `unwrap_used`/`expect_used = "deny"` with clippy `-D warnings` green, and ci-guards (c) enforces it. The verifier grep found every non-test `.unwrap(`/`.expect(` hit inside `#[cfg(test)]` items |
+| SC4 | JS runs on dedicated JS threads, not actix workers. The V8 platform is initialised once in main before other threads spawn. The full suite passes under default parallel `cargo test` | ✓ VERIFIED | src/main.rs runs `Settings::load` (no threads), then `rs3::js::init_platform()`, then `JsExecutor::start`, then `AppState::new(settings, js)`, then `HttpServer::new`. src/http imports no deno_core, and `patch_key` only awaits the executor future. `job_runs_on_a_named_js_thread` asserts the `rs3-js-` prefix. `cargo test --locked` passed 216/0 in the default parallel run, and CI is green on x86_64. ci-guards (d) pins `init_platform(None)` and the protected platform in the release build |
+| SC5 | Every JS artefact uses `Deno.core.ops.op_rs3_*`, with no `Deno.core.ops();` or `opSync` left, and the old-to-new mapping (including "missing key throws") is documented | ✓ VERIFIED | All 4 `.js`, 4 `.txt` and 2 `.http` files and src/example.js use `op_rs3_*` (read in full). ci-guards (f) found no `opSync`, `Deno.core.ops()` or unprefixed `rs3_*` in requests/ or src/. The docs/js-ops.md mapping table has a bootstrap row and one row per op, and documents `key not found: <key>` |
+| 6 | Nested `op_rs3_patch`: reentrant nested JsRuntime on the same thread, its own top-level scope, the same store, nested errors catchable with one `Uncaught ` stripped, a missing key throws | ✓ VERIFIED | ops.rs:285-358 runs `run_script(ctx.nested(&key), ..)` and does `strip_prefix("Uncaught ")`. Tests: `nested_patch_returns_inner_result`, `nested_patch_has_own_top_level_scope`, `nested_throw_is_catchable_without_uncaught_prefix`, `nested_patch_of_missing_key_throws` and `exec_ctx_nested_increments_depth_and_shares_store`. `nested(&key)` now also extends the key chain (Phase 5 D-02). Depth + 1 and the same store are unchanged |
+| 7 | `op_panic` is disabled by extension middleware: catchable `op is disabled`; uncaught it gives 422 `Uncaught Error: op is disabled`; the process keeps running | ✓ VERIFIED | `middleware = \|op\| match op.name { "op_panic" => op.disable(), .. }` (ops.rs:423-427). Tests: `op_panic_is_disabled_and_catchable`, `uncaught_op_panic_is_a_script_error` and the HTTP test from SC3 |
+| 8 | Op semantics. list uses the shared codec: sorted, `[]` when empty, extra arguments ignored. get/delete on a missing key throw `Error` `key not found: <k>`. insert validates the whole body, throws TypeError `malformed JSON:` or `invalid input:`, and writes nothing on error. String coercion. Idempotency | ✓ VERIFIED | `to_js` is an exhaustive match. `StrArg` coerces primitives and rejects objects and symbols. All plan-named op tests exist: `list_matches_shared_codec_sorted`, `list_on_empty_store_is_brackets`, `get_coerces_its_argument`, the `insert_*` tests, `delete_returns_old_value_then_throws` and others. The suite is green |
+| 9 | `run_script` uses only `JsRuntime::try_new`, reads the result with `deno_core::scope!` in the runtime's own context, and stringifies per D-10 | ✓ VERIFIED | runtime.rs:79-108. There is no `JsRuntime::new(`, `Context::new` or `HandleScope::new` in src/. `stringify` handles symbols and catches exceptions thrown during ToString. Tests: `completion_values_are_stringified`, `symbol_completion_values_match_js_string`, `exception_while_stringifying_is_a_script_error` and the HTTP test `test_patch_stringifies_completion_values` |
+| 10 | Script errors carry `JsError.exception_message`, non-ASCII text survives, and the stack goes only to stderr, escaped | ✓ VERIFIED | `ExecError::Script { message: e.exception_message }`, with `log_error` using Debug-escaped name and text. Tests: `thrown_errors_become_script_errors`, `error_messages_keep_non_ascii` and `test_patch_error_message_keeps_non_ascii` |
+| 11 | JsExecutor: a bounded pool of `rs3-js-{i}` threads with an explicit stack size; a tokio current_thread runtime per worker with runtimes created inside it; a fresh runtime per job; a full queue makes callers wait; zero settings are clamped; JsSettings is built in code | ✓ VERIFIED | executor.rs:131-196 and `worker_loop` (`rt.enter()` before the job). `JsSettings::default()` gives available_parallelism workers, ×16 queue, 16 MiB stack. Phase 5 added a 2 MiB floor. main uses `JsSettings::default()` and reads nothing from the environment. Tests: `job_runs_on_a_named_js_thread`, `every_job_gets_a_fresh_runtime`, `full_queue_makes_callers_wait`, `zero_settings_are_clamped` and `default_settings_follow_d06` (all present, suite green) |
+| 12 | Panic isolation and a closed pool: a panicking job gives `ExecError::Internal` and workers survive; a closed executor gives `Unavailable` | ✓ VERIFIED | `catch_unwind(AssertUnwindSafe(run))` at executor.rs:361. Tests `worker_survives_panicking_jobs` and `closed_executor_is_unavailable`. No `panic = "abort"` profile |
+| 13 | Per-job store isolation on the shared executor, also in parallel | ✓ VERIFIED | `stores_on_one_executor_are_isolated` (8 scoped threads). Every HTTP test uses its own `test_state()` store on `test_executor()` |
+| 14 | Dependencies: the lockfile differs from 9209f76 by one line, the unprotected platform is on dev edges only, and there is a single v8 | ✓ VERIFIED | `git diff 9209f76 HEAD -- Cargo.lock` shows only `+ "tokio",`. `cargo tree -e features,normal -i deno_core` finds `unsafe_use_unprotected_platform` 0 times, and `-e features` finds it once (the dev edge). `cargo tree -i v8` shows only v8 150.4.0, via deno_v8 and deno_core. ci-guards (d) and (e) enforce this in CI. The tokio feature-set detail is superseded (override 3) |
+| 15 | The samples are migrated and keep their behaviour. The `.txt` payloads are the same scripts. The REST-client payloads are `op_rs3_list().toString();`. example.js lists and prints | ✓ VERIFIED | Fixture tests run on the `.js` files. `txt_payload_fac_is_120`, `txt_payload_sum_is_10`, `txt_payload_bin_is_tree_json` and `txt_payload_store_writes_res` (added in Phase 5) automate the former live `.txt` check. `fixtures_share_one_store_in_any_order` checks there is no top-level collision. example.js calls `Deno.core.ops.op_rs3_list()` and `Deno.core.print` |
+| 16 | docs/js-ops.md: mapping table (old call, new call, argument, returns, throws when), missing-key and insert error rules, no NotFound class, PATCH results, nested errors and host faults, runtime model, argument coercion and encoding, sandbox, re-insert after upgrade | ✓ VERIFIED | Read in full on the final tree. Every section is present. The exact strings the tests assert are in the doc: `op is disabled`, `key not found: nope`, `{"error":"js_error","message":"Uncaught Error: boom"}`, `internal error` and `TypeError: Deno.core.ops is not a function`. The limits detail is superseded (override 1) |
+| 17 | AppState has `pub js: JsExecutor`. `test_state()` uses `js::test_executor()`. main exits 1 with `error: cannot start JS runtime:` when the pool fails to start. main.rs is at most 60 lines | ✓ VERIFIED | src/state.rs and src/main.rs (46 lines). `eprintln!("error: cannot start JS runtime: {e}"); return ExitCode::FAILURE` |
+| 18 | ApiError: `JsError(String)` gives js_error/422 and `Internal` gives 500 with a fixed body. `From<ExecError>` logs host faults only. NotImplemented and the 501 test are removed. The matches are exhaustive with no wildcard | ✓ VERIFIED | src/http/error.rs. Phase 5 added `JsDepthLimit`/`JsTimeout`, and the matches are still exhaustive with no `_ =>`. No `NotImplemented`/`501` in src/. Tests `test_internal_error_response_is_500_json` and `test_patch_executor_down_is_500_internal` (store unchanged) |
+| 19 | Host faults (a closed executor, or a runtime creation failure at any depth, even when caught) answer 500. Ops refuse after a fault, and the fault is logged once | ✓ VERIFIED | `JobState.host_fault` and the `live_ctx` refusal. Tests `caught_nested_runtime_failure_is_still_internal_and_refuses_later_writes`, `every_op_throws_internal_error_once_the_job_faulted` and the others named in the plan (all present) |
+| 20 | Script errors are repeatable and do not poison the app. The parked PATCH tests run again. There is no `#[ignore]` in src/. GET, PATCH and DELETE on one key path reach their own handlers. An empty script is a 200 | ✓ VERIFIED | `test_patch_script_error_is_repeatable`, `test_patch_is_ok`, `test_patch_body_is_listing` and `test_patch_get_delete_on_one_key_hit_their_own_handlers`. The `s5` empty script gives `"undefined"`. `grep '#[ignore' src` finds 0, and ci-guards (b) enforces it |
+| 21 | D-17 housekeeping: the parse_insert_body problem-order doc is corrected and pinned, the truncated-input tests are renamed, and an HTTP test gives 422 for valid deep nesting | ✓ VERIFIED | src/store/legacy.rs:29-31. `parse_unrepresentable_value_beats_earlier_non_string`, `parse_rejects_truncated_deep_nesting` and `insert_valid_deep_nesting_is_422_json` |
+| 22 | Phase gate (TOOL-03) and static gates: no suppression, http→js→store direction, deno_core only in src/js, no panicking constructor, no legacy syntax | ✓ VERIFIED | Shared gate run: fmt, clippy `-D warnings`, `test --locked` 216/0 and `build --release --locked` all green, and ci-guards a to h passed. The verifier grep found no deno_core/deno_error outside src/js and no actix_web or `crate::(http\|config\|state)` in src/js. The `env -i`, `--test-threads=1` and five-runs variants were verified at the Phase 3 commit (previous report) and were not re-run here, per the shared-evidence instruction |
+| O1 | (03-02) docs disclose "until Phase 5" unbounded nesting (235/778 levels, about 800 MB, 2.7 s) and a non-terminating script holding a worker | PASSED (override) | Superseded by Phase 5 D-12. The docs now state the depth limit of 4, the 5000 ms timeout, and the heap-exhaustion limit (v2) |
+| O2 | (03-03) the live binary has exactly nproc threads matching `rs3-js-*` | PASSED (override) | Superseded by Phase 5 D-06 (watchdog threads `rs3-js-{i}-wd`). There is still one worker per available CPU |
+| O3 | (03-01) tokio `rt, sync` is the only new direct dependency, and the lockfile delta is one line | PASSED (override) | Phase 5 D-07 added `time` (backstop) and a dev-only `macros`. The lockfile delta is still exactly one line |
+| O4 | (03-01 JSRT-02 / 03-03 HTTP-07 prohibition) no self-patching script in tests or smokes in this phase | PASSED (override) | Scoped to Phase 3, then replaced by Phase 5 D-11 (depth-limited self-patch and cycle tests). 03-UAT test 2 passed for the Phase 3 window |
 
-**Score:** 22/22 truths verified (0 present, behavior-unverified)
+**Score:** 26/26 truths verified (22 VERIFIED, 4 PASSED by override as superseded; 0 present but behavior-unverified)
+
+Behavior-dependent truths (11, 12, 13, 19, 20) each name a test that exercises the transition or invariant: queue wait, panic survival, store isolation, fault refusal and repeatability. Every such test exists in src/ and passed in the shared 216/0 run, so none stays PRESENT_BEHAVIOR_UNVERIFIED.
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `src/js/ops.rs` | ExecCtx, five `#[op2]` ops, `to_js`, `rs3_ext` with op_panic middleware | ✓ VERIFIED | 734 lines; contains `op2(reentrant)`; used by runtime.rs |
-| `src/js/runtime.rs` | `run_script` on a fresh `JsRuntime::try_new` | ✓ VERIFIED | used by executor.rs and op_rs3_patch |
-| `src/js/executor.rs` | bounded pool, `catch_unwind`, `execute`, `closed()` | ✓ VERIFIED | used by main.rs, state.rs, http/mod.rs |
-| `src/js/mod.rs` | `ExecError`, `JsSettings`, `init_platform`, cfg(test) helpers | ✓ VERIFIED | used by error.rs, main.rs |
-| `Cargo.toml` | direct tokio; dev-only `unsafe_use_unprotected_platform` | ✓ VERIFIED | as stated |
+| `src/js/ops.rs` | ExecCtx, five `#[op2]` ops, `to_js`, `rs3_ext` with op_panic middleware | ✓ VERIFIED | contains `op2(reentrant)`. Used by runtime.rs and executor.rs |
+| `src/js/runtime.rs` | `run_script` on a fresh `JsRuntime::try_new` | ✓ VERIFIED | Used by executor.rs and `op_rs3_patch` |
+| `src/js/executor.rs` | bounded pool, `catch_unwind`, `execute`, `closed()` | ✓ VERIFIED | Used by main.rs, state.rs and http/mod.rs |
+| `src/js/mod.rs` | `ExecError`, `JsSettings`, `init_platform`, cfg(test) helpers | ✓ VERIFIED | Used by error.rs and main.rs |
+| `Cargo.toml` | direct tokio; dev-only `unsafe_use_unprotected_platform` | ✓ VERIFIED | Feature on the `[dev-dependencies]` deno_core only |
 | `docs/js-ops.md` | JSRT-06 mapping and rules | ✓ VERIFIED | contains `Deno.core.ops.op_rs3_patch(` |
-| `requests/{fac,sum,bin,store}.js`, `src/example.js` | migrated samples | ✓ VERIFIED | included by HTTP fixture tests |
-| `src/http/mod.rs` | `patch_key` + PATCH tests | ✓ VERIFIED | contains `state.js.execute(` |
+| `requests/{fac,sum,bin,store}.js`, `src/example.js` | migrated samples | ✓ VERIFIED | Pulled in by `include_str!` in 4 fixture tests |
+| `src/http/mod.rs` | `patch_key` and the PATCH tests | ✓ VERIFIED | contains `state.js.execute(` |
 | `src/http/error.rs` | `JsError`, `From<ExecError>`, `Internal` | ✓ VERIFIED | contains `js_error` |
 | `src/state.rs` | `pub js: JsExecutor` | ✓ VERIFIED | |
-| `src/main.rs` | init → start → AppState → HttpServer | ✓ VERIFIED | contains `JsExecutor::start` |
-| `src/store/legacy.rs`, `src/http/kv.rs` | IN-04/IN-05 | ✓ VERIFIED | contain `parse_rejects_truncated_deep_nesting`, `insert_valid_deep_nesting_is_422_json` |
+| `src/main.rs` | init, then start, then AppState, then HttpServer | ✓ VERIFIED | contains `JsExecutor::start` |
+| `src/store/legacy.rs`, `src/http/kv.rs` | IN-04 and IN-05 | ✓ VERIFIED | |
 
-`verify.artifacts`: 03-01 5/5, 03-02 6/6, 03-03 6/6.
+`verify.artifacts`: 03-01 5/5, 03-02 6/6 and 03-03 6/6, all with exit 0.
 
 ### Key Link Verification
 
-`verify.key-links` could not parse the plans' `from:` fields (they name symbols, e.g. "src/js/ops.rs op_rs3_patch"), so every link was checked by hand with its declared pattern.
+`verify.key-links` cannot parse `from:` fields that name a symbol after the path. It verified 2 of 13 links automatically, and the verifier checked every declared pattern by hand.
 
 | From | To | Via | Status | Details |
 |------|----|-----|--------|---------|
-| runtime.rs `run_script` | ops.rs `rs3_ext` | `rs3_ext::init(ctx)` | WIRED | 1 match |
-| ops.rs `op_rs3_patch` | runtime.rs `run_script` | `run_script(ctx.nested(), ..)` | WIRED | match + nested tests pass |
+| runtime.rs `run_script` | ops.rs `rs3_ext` | `rs3_ext::init(` | WIRED | 1 match |
+| ops.rs `op_rs3_patch` | runtime.rs `run_script` | `run_script(ctx.nested(&key), ..)` | WIRED | Match found, and the nested tests pass |
 | ops.rs `op_rs3_list` | legacy.rs `format_list` | `legacy::format_list(` | WIRED | TEST-06 byte equality holds |
 | ops.rs `op_rs3_insert` | legacy.rs `parse_insert_body` | `parse_insert_body(` before `insert_all` | WIRED | |
 | executor.rs `execute` | runtime.rs `run_script` | job closure under catch_unwind | WIRED | |
-| http/mod.rs `patch_key` | executor.rs `execute` | `state.js.execute(` after `store.get` | WIRED | 404 before queueing (live ghost → 404) |
+| http/mod.rs `patch_key` | executor.rs `execute` | `state.js.execute(` after `store.get` | WIRED | 404 is answered before queueing |
 | http/error.rs | js/mod.rs `ExecError` | `impl From<ExecError> for ApiError` | WIRED | |
 | main.rs | state.rs `AppState::new` | `AppState::new(settings, js)` | WIRED | |
 | state.rs `test_state` | js/mod.rs `test_executor` | `crate::js::test_executor()` | WIRED | |
-| http/mod.rs fixture tests | requests/*.js | `include_str!("../../requests/..")` | WIRED | 4 matches |
-| requests/*.txt | requests/*.js | same op calls and results | WIRED | 4/4 payloads contain `op_rs3_get`/`op_rs3_insert`; live results identical |
-| docs/js-ops.md | src/js/ops.rs | documented names and messages | WIRED | names and messages match code and tests |
+| http/mod.rs fixture tests | requests/*.js | `include_str!("../../requests/..")` | WIRED | 8 matches (4 `.js`, 4 `.txt`) |
+| requests/*.txt | requests/*.js | same op calls and results | WIRED | Each of the 4 payloads calls `op_rs3_get`/`op_rs3_insert`. `txt_payload_*` tests assert the same results |
+| docs/js-ops.md | src/js/ops.rs | documented names and messages | WIRED | 30 op-name matches. The asserted messages are present verbatim |
 
 ### Data-Flow Trace (Level 4)
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 |----------|---------------|--------|--------------------|--------|
-| `patch_key` response | `out` | `state.store.get(&key)` → `JsExecutor::execute` → V8 completion value | Yes (live `"120"`, fixture results) | ✓ FLOWING |
-| `op_rs3_*` results | store values | `OpState` → `ExecCtx.store` (the same `Store` handed in by `patch_key`) | Yes (JS insert visible to `GET /key/res`; JS delete visible to `GET /key/num` 404) | ✓ FLOWING |
+| `patch_key` response | `out` | `state.store.get(&key)`, then `JsExecutor::execute`, then the V8 completion value | Yes (fixture results, ci-smoke `"120"`) | ✓ FLOWING |
+| `op_rs3_*` results | store values | `OpState`, then `ExecCtx.store` (the same `Store` that `patch_key` passes in) | Yes (`fixture_store_writes_res`: a JS insert is visible to `GET /key/res`) | ✓ FLOWING |
 
 ### Behavioral Spot-Checks
 
+The orchestrator supplied the evidence. The verifier did not run cargo build or test, the smoke, or the binary.
+
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| Gate | `cargo build --locked`; `cargo test`; `cargo clippy --all-targets -- -D warnings`; `cargo fmt --check` | all exit 0; 171 passed, 0 ignored (lib) | ✓ PASS |
-| Env-free serial suite | `env -i PATH HOME cargo test -- --test-threads=1` | 171 passed | ✓ PASS |
-| PATCH success / missing | live 18520 `PATCH /key/m`, `/key/ghost` | `200 "120"`, `404 not_found` | ✓ PASS |
-| Samples via `.txt` payloads | live 18520 insert + PATCH fac/sum/bin/store | `"120"`, `"10"`, tree JSON, echo; `GET /key/res` `"1111"` | ✓ PASS |
-| Errors keep server alive | live op_panic / throw / syntax / uncaught op error / caught op error, then `GET /` | 422 ×4, 200, 200 | ✓ PASS |
-| TEST-06 live | `PATCH /key/code` vs `GET /list` | byte-equal | ✓ PASS |
-| Concurrency | 32 parallel `PATCH /key/fac` | 32 × 200 | ✓ PASS |
-| JS threads | `/proc/<pid>/task/*/comm` | 4 `rs3-js-*`, nproc 4 | ✓ PASS |
-| Nested + print | live 18521 outer→inner, caught insert error, `Deno.core.print`, JS delete | `"11"`, `TypeError\|malformed JSON: ...`, `hello` on stdout, `"5"` then 404 | ✓ PASS |
-| Built-in op abort probe | live 18524: each of 98 exposed built-in ops × 12 arg patterns in its own PATCH | no crash, no hang, no panic in stderr (only `op_dispatch_exception` → 422) | ✓ PASS |
-| Callback-op probe | live 18525: throwing format-exception callback, throwing promise hooks / rejection handler, microtasks, timer schedule, wasm streaming callback + compileStreaming | 422/200, process alive | ✓ PASS |
+| Full gate | ci-guards, check-workflow, test-ci-guards, fmt, clippy, `cargo test --locked`, release build | All OK. 216 passed, 0 failed, 0 ignored | ✓ PASS |
+| Release binary PATCH | `scripts/ci-smoke.sh` | `200 "120"`, 422 js_error, 422 js_depth_limit, 504 js_timeout, then `200 "120"` with the server alive | ✓ PASS |
+| Feature edges | `cargo tree --offline -e features[,normal] -i deno_core` | normal 0, all 1 | ✓ PASS |
+| Single v8 | `cargo tree --offline -i v8` | v8 150.4.0 only | ✓ PASS |
+| Lockfile delta | `git diff 9209f76 HEAD -- Cargo.lock` | one line `+ "tokio",` | ✓ PASS |
+| Plan-named tests exist | grep for each `fn <name>` across all three plans | 71 of 71 present (the remaining 4 hits are prose words, the intentionally removed `test_patch_existing_is_501`, and the renamed `parse_rejects_deep_nesting`) | ✓ PASS |
 
 ### Probe Execution
 
-Step 7c: not applicable. No `scripts/*/tests/probe-*.sh` exist, and no plan declares one.
+Step 7c does not apply. There are no `scripts/*/tests/probe-*.sh` files, and no plan declares one.
 
 ### Requirements Coverage
 
 | Requirement | Source Plan | Description | Status | Evidence |
 |-------------|-------------|-------------|--------|----------|
-| HTTP-07 | 03-03 | PATCH executes the stored value as JS, returns stringified completion value | ✓ SATISFIED | SC1, truths 9, 20; live |
-| JSRT-01 | 03-01 | current released deno_core, `#[op2]` + `extension!` | ✓ SATISFIED | SC2; deno_core 0.412.0 |
-| JSRT-02 | 03-01 | five ops with legacy semantics | ✓ SATISFIED | SC2, truths 6, 8 |
-| JSRT-03 | 03-01 | missing key / invalid input → catchable JS exception | ✓ SATISFIED | SC3, truth 8 |
-| JSRT-04 | 03-01, 03-03 | dedicated JS threads, platform initialised once in main first | ✓ SATISFIED | SC4, truths 11, 17 |
-| JSRT-05 | 03-02, 03-03 | all JS artefacts use `Deno.core.ops.op_rs3_*` | ✓ SATISFIED | SC5, truth 15 |
-| JSRT-06 | 03-02 | old→new mapping documented | ✓ SATISFIED | SC5, truth 16 |
-| ROBU-03 | 03-03 | throw / syntax error → 422 JSON with the JS message | ✓ SATISFIED | SC3, truth 10 |
-| ROBU-04 | 03-01, 03-03 | no unwrap/expect on request data; ops never panic | ✓ SATISFIED | SC3, truths 7, 12, 19; clippy deny gate; op probe |
+| HTTP-07 | 03-03 | PATCH executes the stored value as JS and returns the stringified completion value | ✓ SATISFIED | SC1, truths 9 and 20 |
+| JSRT-01 | 03-01 | current released deno_core, `#[op2]` and `extension!` | ✓ SATISFIED | SC2, truth 14 |
+| JSRT-02 | 03-01 | five ops with legacy semantics | ✓ SATISFIED | SC2, truths 6 and 8 |
+| JSRT-03 | 03-01 | a missing key or invalid input gives a catchable JS exception | ✓ SATISFIED | SC3, truth 8 |
+| JSRT-04 | 03-01, 03-03 | dedicated JS threads, platform initialised once in main first | ✓ SATISFIED | SC4, truths 11 and 17 |
+| JSRT-05 | 03-02, 03-03 | every JS artefact uses `Deno.core.ops.op_rs3_*` | ✓ SATISFIED | SC5, truth 15, ci-guards (f) |
+| JSRT-06 | 03-02 | the old-to-new mapping is documented | ✓ SATISFIED | SC5, truth 16 |
+| ROBU-03 | 03-03 | a throw or syntax error gives 422 JSON with the JS message | ✓ SATISFIED | SC3, truth 10 |
+| ROBU-04 | 03-01, 03-03 | no unwrap/expect on request data; ops never panic | ✓ SATISFIED | SC3, truths 7, 12 and 19; clippy deny; ci-guards (c) |
 | TEST-03 | 03-03 | every route has a success test with status and bytes | ✓ SATISFIED | SC1 (seven named tests) |
-| TEST-05 | 03-03 | fac/sum/bin run as fixtures with expected results | ✓ SATISFIED | SC1, truth 15 |
+| TEST-05 | 03-03 | fac, sum and bin run as fixtures with the expected results | ✓ SATISFIED | SC1, truth 15 |
 | TEST-06 | 03-03 | PATCH running `op_rs3_list` equals `GET /list` | ✓ SATISFIED | SC2 |
 
-All 12 phase IDs are claimed by at least one plan. REQUIREMENTS.md maps exactly these 12 to Phase 3, so none is orphaned.
+Each of the 12 phase IDs is claimed by at least one plan. REQUIREMENTS.md maps exactly these 12 to Phase 3, so none is orphaned.
 
 ### Prohibitions
 
 | Plan / Req | Statement (short) | Tier | Disposition |
 |------------|-------------------|------|-------------|
-| 03-01 ROBU-04 | no script-reachable abort path (op_panic disabled, no unwrap/expect/panic on request data, no panicking constructor) | test | ✓ enforced: `op_panic_is_disabled_and_catchable`, `uncaught_op_panic_is_a_script_error`, `worker_survives_panicking_jobs`, clippy `unwrap_used`/`expect_used = deny`. The "no `JsRuntime::new`" part is grep-only (clean). The verifier's op probe found no other abort path |
-| 03-03 ROBU-04 | no request takes the server down | test | ✓ enforced: `test_patch_op_panic_is_422_and_server_keeps_serving`, `test_patch_executor_down_is_500_internal`, `test_patch_script_error_is_repeatable` |
-| 03-01 JSRT-04 | unprotected platform only on dev edges | test | ⚠️ unverified-prohibition, flagged: no repo-resident enforcement. Verifier `cargo tree` evidence clean (human item 1) |
-| 03-01 ROBU-04 / 03-03 TEST-03 | no gate-greening by suppression | test | ⚠️ unverified-prohibition, flagged: no repo-resident enforcement (Phase 4 CI grep pending). Verifier grep clean (human item 1) |
-| 03-02 JSRT-05 | no legacy-API shim | test | ⚠️ unverified-prohibition, flagged. Grep clean (human item 1) |
-| 03-02 JSRT-06 | limits not omitted or softened | test | ⚠️ unverified-prohibition, flagged. Docs contain every limit (human item 1) |
-| 03-01 JSRT-02 / 03-03 HTTP-07 | no self-patching script in tests/smokes | judgment | ⚠️ flagged. Non-authoritative verdict: satisfied (human item 2) |
-
-### Decision Coverage
-
-All trackable CONTEXT.md decisions are honored by shipped artifacts (17/17, `check.decision-coverage-verify`).
-
-### Test Quality Audit
-
-| Test File | Linked Req | Active | Skipped | Circular | Assertion Level | Verdict |
-|-----------|-----------|--------|---------|----------|-----------------|---------|
-| src/http/mod.rs | HTTP-07, ROBU-03, ROBU-04, TEST-03, TEST-05, TEST-06 | all | 0 | no | Value (exact bytes or whole JSON body) | ✓ |
-| src/http/kv.rs | TEST-03 | all | 0 | no | Value (golden bytes) | ✓ |
-| src/js/ops.rs | JSRT-01..03, ROBU-04 | all | 0 | no | Value / Behavioral | ✓ |
-| src/js/runtime.rs | HTTP-07, ROBU-03 | all | 0 | no | Value | ✓ |
-| src/js/executor.rs | JSRT-04, ROBU-04 | all | 0 | no | Behavioral (thread name, panic survival, queue wait, isolation) | ✓ |
-
-TEST-06 compares PATCH output against `GET /list`. Both go through `format_list`, which the requirement intends. `/list` itself is pinned independently by `list_golden_sorted` (legacy golden bytes), so the check is not circular. Fixture expectations (120, 10, the 5/3/8 tree) are independent oracles.
-
-**Disabled tests on requirements:** 0. **Circular patterns detected:** 0. **Insufficient assertions:** 0. The single "ignored" doctest is generated inside deno_core's `extension!` macro (deno_core extensions.rs:486), not by this crate.
+| 03-01 ROBU-04 | no script-reachable abort path | test | ✓ Enforced by `op_panic_is_disabled_and_catchable`, `uncaught_op_panic_is_a_script_error`, `worker_survives_panicking_jobs`, clippy deny and ci-guards (c). There is no `JsRuntime::new(` in src/ |
+| 03-03 ROBU-04 | no request takes the server down | test | ✓ Enforced by `test_patch_op_panic_is_422_and_server_keeps_serving`, `test_patch_executor_down_is_500_internal`, `test_patch_script_error_is_repeatable` and ci-smoke (server alive after 422 and 504) |
+| 03-01 JSRT-04 | unprotected platform on dev edges only | test | ✓ Now enforced by a wired check: ci-guards (d) runs in the CI "Repo guards" step. It was flagged in the previous report because this enforcement did not exist yet. The operator also re-ran it (03-UAT test 1, pass) |
+| 03-01 ROBU-04 / 03-03 TEST-03 | no gate made green by suppression | test | ✓ Now enforced by ci-guards (a) (no allow/expect attribute, including cfg_attr), (b) (no `#[ignore]` or disabled targets) and (c) (lints at deny), all wired in CI |
+| 03-02 JSRT-05 | no legacy-API shim | test | ✓ Enforced by ci-guards (f) (no `opSync`, `Deno.core.ops()` or unprefixed `rs3_*` in requests/ or src/). The docs state there is no shim |
+| 03-02 JSRT-06 | limits are not omitted or softened in the docs | test | ✓ Human-resolved: no automated guard exists, and operator UAT 03-UAT test 1 passed. The verifier re-read the current docs: op_panic disabled, unawaited Promises, print to stdout, the depth limit, the timeout and heap exhaustion are all disclosed. The specific Phase 3 numbers were superseded by Phase 5 D-12 (override 1) |
+| 03-01 JSRT-02 / 03-03 HTTP-07 | no self-patching script in tests or smokes | judgment | PASSED (override 4): superseded by Phase 5 D-11. 03-UAT test 2 passed for the Phase 3 window |
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| src/store/legacy.rs | 18, 39, 71 | `XXX` match | ℹ️ Info | false positive: `\uXXXX` escape notation in doc comments, not a debt marker |
+| src/store/legacy.rs | 18, 39, 71 | `XXX` match | ℹ️ Info | False positive: the `\uXXXX` escape notation in doc comments, not a debt marker |
+| src/js/runtime.rs, src/js/executor.rs | 71, 760 | `thread::sleep` | ℹ️ Info | The 03-01 Task 2 verify grep (`! grep thread::sleep src/`) no longer holds. Both hits are test-only, bounded and added in Phase 5: the `cfg(test)` fault-after-timeout hook and the backstop test. This is a plan-level acceptance check, not a must-have, and production code has no sleep |
+| docs/js-ops.md | Heap exhaustion bullet | known limit | ℹ️ Info | A script that allocates without bound can exhaust V8's heap and abort the process. This is resource exhaustion, not a script or op error. It is disclosed in the docs and scoped to v2 JSHD-01 (REQUIREMENTS.md:93; ROADMAP Phase 5 notes). It is not a Phase 3 success criterion |
 
-No TODO/FIXME/HACK/placeholder, no stub returns, no unwrap/expect outside `#[cfg(test)]`.
-
-Remaining review info items IN-03..IN-07 (iter-3) are triaged in 03-REVIEW-DISPOSITION.md and assigned to Phases 5/6. None blocks this phase's goal. IN-06 says a panic inside an op would still abort the process. The verifier confirmed that no rs3 op can panic (lint gate) and that none of the 98 other exposed built-in ops could be made to abort.
+There are no TODO/FIXME/HACK/placeholder markers, no stub returns, and no unwrap/expect outside `#[cfg(test)]`.
 
 ### Human Verification Required
 
-#### 1. Test-tier prohibitions without repo-resident enforcement
-
-**Test:** Review `git diff 9209f76..HEAD -- src Cargo.toml clippy.toml docs requests` for: lint suppression or `#[ignore]`; the unprotected-platform feature outside `[dev-dependencies]`; any legacy-API shim; any softened limit in docs/js-ops.md.
-**Expected:** None present. The verifier's evidence is clean: no suppression or ignore found by grep; the normal-edge feature count is 0 and the dev-edge count is 1; legacy syntax appears only in the docs migration rows; all limits are stated.
-**Why human:** These are test-tier prohibitions, but no wired test or CI check enforces them yet, so the fail-closed default cannot mark them green.
-
-#### 2. Judgment-tier prohibition: no self-patching script
-
-**Test:** Inspect every `op_rs3_patch` use in src/.
-**Expected:** Every chain ends at a non-patching key. No key patches itself or forms a cycle.
-**Why human:** Judgment-tier items get only a non-authoritative verdict. The verifier's verdict is "satisfied".
-
-#### 3. docs/js-ops.md readability
-
-**Test:** Read the guide as a script author migrating a legacy script.
-**Expected:** Clear enough to migrate without reading the Rust source.
-**Why human:** Prose clarity. The content's accuracy was verified against the code and the live binary.
+None pending. The items from the previous report are resolved in 03-UAT.md:
+- Test 1 passed: the operator re-ran the test-tier prohibition checks.
+- Test 2 passed: there is no self-patching script in the Phase 3 window.
+- Test 3, docs/js-ops.md readability, was skipped by the operator as a **deferred follow-up** that the user will review later. It is not a blocker. It is recorded under "Deferred Follow-Ups" in 03-UAT.md and is not raised again here.
 
 ### Gaps Summary
 
-No gaps. All 5 roadmap success criteria and 17 grouped plan truths hold in the codebase. The verifier confirmed them with its own four-command gate run, an env-free serial run, and live-binary smokes on ports 18520-18525:
+There are no gaps. All 5 roadmap success criteria hold on the final milestone tree, and so do the 17 grouped plan truths. The verifier read the code for each one, every plan-named test exists, and the shared gate run passed: 216 tests passed with 0 failed or ignored, ci-guards a to h passed, and the release ci-smoke on the protected V8 platform passed. All 12 requirement IDs are satisfied, and none is orphaned.
 
-- PATCH success, missing key, and the four migrated `.txt` payloads.
-- Every script-error class answering 422 while the server stays up.
-- TEST-06 byte equality.
-- 32 parallel PATCHes.
-- The thread count.
+Four plan-level details were changed on purpose by Phase 5 decisions. Each is recorded as an override with its citation, not as a gap:
+- the docs limits wording (D-12)
+- the watchdog threads that share the `rs3-js-` name prefix (D-06)
+- the tokio `time` feature for the backstop (D-07)
+- the Phase-3-only ban on self-patching scripts, now tested on the depth-limited path (D-11)
 
-The verifier also ran an adversarial probe beyond the plans: all 98 other built-in ops exposed in `Deno.core.ops`, plus callback-setting paths, could not abort the process. This backs the "no script or op error can abort the server" clause beyond the op_panic case the phase targeted. All 12 requirement IDs are satisfied, and none is orphaned.
-
-The status is `human_needed` only because of policy-flagged items:
-
-- Five test-tier prohibitions have no repo-resident enforcement yet. Phase 4 CI is expected to add the grep gates.
-- One judgment-tier prohibition gets a non-authoritative "satisfied" verdict.
-- One docs-readability judgment carried over from 03-02-SUMMARY.
-
-Two items are deliberate and are not gaps: the nesting-depth limit and the execution timeout. Both are scheduled for Phase 5 and disclosed in docs/js-ops.md.
+Compared with the previous report, the five test-tier prohibitions that were flagged for lack of enforcement now have repo-resident enforcement: ci-guards (a) to (f), run in CI. The one remaining unautomated item, JSRT-06 docs limits, was resolved by the operator in 03-UAT.
 
 ---
 
-_Verified: 2026-10-20T21:08:05Z_
+_Verified: 2026-10-21T11:54:15Z_
 _Verifier: Claude (gsd-verifier)_
