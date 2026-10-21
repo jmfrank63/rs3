@@ -965,22 +965,22 @@ Proposed `Readme.md` sections, in order, with verified content:
 | A4 | Kubernetes `runAsNonRoot` rejects non-numeric image users | Pitfall 8 | Documentation nuance only |
 | A5 | GitHub-hosted runners can reach Docker Hub, gcr.io and GitHub release downloads without rate-limit failures for one build per push | docker job | A flaky pull; re-run the job |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **`USER nonroot:nonroot` (D-02, locked) or numeric `65532:65532`?**
+1. **`USER nonroot:nonroot` (D-02, locked) or numeric `65532:65532`?** — RESOLVED (orchestrator, Recommended): keep `USER nonroot:nonroot` per D-02; README notes UID 65532 for Kubernetes `runAsNonRoot`.
    - Known: both run as uid 65532 in Docker. The name resolves from distroless `/etc/passwd`.
    - Unclear: future Kubernetes use (`runAsNonRoot` wants numeric users).
    - Recommendation: **keep D-02** as locked. Guard (i) requires `nonroot:nonroot`, and the README mentions uid/gid 65532. Revisit with OPS-03.
-2. **Builder tag `latest-rust-1.99.1-trixie` (D-01) or the pinned `0.1.78-rust-1.99.1-trixie`?**
+2. **Builder tag `latest-rust-1.99.1-trixie` (D-01) or the pinned `0.1.78-rust-1.99.1-trixie`?** — RESOLVED (orchestrator, Recommended): keep `latest-rust-1.99.1-trixie` per D-01; README mentions the fully pinned tag.
    - Recommendation: **keep D-01**. Guard (i) accepts only the D-01 tag. Note the pinned tag in the README for reproducible builds; SHA pinning is OPS-03.
-3. **Add `# check=error=true` as line 1 of the Dockerfile?**
+3. **Add `# check=error=true` as line 1 of the Dockerfile?** — RESOLVED (orchestrator, Recommended): yes.
    - Known: BuildKit runs build checks by default and prints violations as warnings. The directive makes them fatal. Supported by Docker 29.4.2 / Buildx 0.38 on the runner.
    - Recommendation: **include it.** It is the only Dockerfile lint available without hadolint, and the proposed Dockerfile follows every documented rule (A3). If the remote run fails on a rule, the log names it. Guard (i) ignores comment lines, so it needs no change.
-4. **Manual alternative in 06-UAT (D-09 text uses `-p 8080:8080`).**
+4. **Manual alternative in 06-UAT (D-09 text uses `-p 8080:8080`).** — RESOLVED (orchestrator, Recommended): use loopback `-p 127.0.0.1:8080:8080` in README and the UAT manual alternative.
    - Recommendation: use `-p 127.0.0.1:8080:8080` in both the README and the UAT text, with the same `-e SERVER.HOST=0.0.0.0` and `curl http://127.0.0.1:8080/`. Functionally identical for the check and safer by default.
-5. **Plan split.**
+5. **Plan split.** — RESOLVED (orchestrator, Recommended): 06-01 Dockerfile/.dockerignore/docker-smoke/guard (i); 06-02 CI docker job + check-workflow.py (+ UAT hand-off), depends on 06-01; 06-03 README/docs/comment fix, independent (sequential execution in this run).
    - Recommendation: **06-01** (Wave 1): Dockerfile + `.dockerignore` + `scripts/docker-smoke.sh` + guard (i) + `fresh()` + the (i) planted cases. **06-02** (Wave 2, depends on 06-01): ci.yml docker job + check-workflow.py + the (g) planted cases + `06-UAT.md`. **06-03** (Wave 1, parallel-safe: no shared files): `Readme.md` + `docs/js-ops.md` + the executor comment. Guard (i)'s `bash -n scripts/docker-smoke.sh` means the smoke script must land with or before guard (i). The per-plan gate (TOOL-03 + guards + self-test) holds after each plan.
-6. **Pre-existing: guards (d)/(e) exit silently under `set -e` when `cargo tree` fails** (Pitfall 5). Out of scope (they still fail closed). Recommendation: record it as an info item for a later quick fix; do not touch it in Phase 6.
+6. **Pre-existing: guards (d)/(e) exit silently under `set -e` when `cargo tree` fails** (Pitfall 5). — RESOLVED (orchestrator, Recommended): out of scope; recorded as an info item for later. Out of scope (they still fail closed). Recommendation: record it as an info item for a later quick fix; do not touch it in Phase 6.
 
 ## Environment Availability
 
