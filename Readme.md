@@ -392,7 +392,11 @@ V8 has no heap limit yet (see Limits) and each JS worker runs its own isolates.
 `MemorySwapMax=0` matters on a host with swap: without it, rs3 would be swapped
 out past the cap instead of killed. If rs3 grows past the cap, the kernel kills
 rs3 inside its own cgroup instead of other services on the host, and rs3
-restarts with an empty store. Size the value to the server.
+restarts with an empty store. Size the value to the server: budget about 5 MB
+per running script (up to 4 per PATCH, one PATCH per CPU) plus the data you
+expect to store, because the store counts against the same cap. On a 64-CPU
+server, full nested load alone needs more than the shipped 1G. Reaching the
+cap kills rs3 and empties the store.
 
 ### Check
 
