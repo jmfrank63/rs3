@@ -1,6 +1,8 @@
 //! The JavaScript runtime layer: the store ops, the script runner and the
 //! dedicated JS thread pool. This module is free of actix-web.
 use std::sync::OnceLock;
+#[cfg(test)]
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use deno_core::JsRuntime;
@@ -46,13 +48,17 @@ pub struct DepthStop {
 
 /// State shared by every level of one job: the outer script and every nested
 /// script `op_rs3_patch` runs for it. The executor creates one per job and
-/// classifies the job's result from it once, after the run.
+/// classifies the job's result from it once, after the run. It is also the
+/// job's one error log sink.
 #[derive(Debug, Default)]
 pub struct JobState {
     /// Set when a nested runtime hit a host fault.
     host_fault: AtomicBool,
     /// The first depth stop of the job; later stops never replace it.
     depth_stop: OnceLock<DepthStop>,
+    /// Test hook: counts the error lines the JS layer wrote for this job.
+    #[cfg(test)]
+    error_logs: AtomicU32,
 }
 
 impl JobState {
@@ -80,6 +86,27 @@ impl JobState {
     /// The job's depth stop, if one was recorded.
     pub(crate) fn depth_stop(&self) -> Option<&DepthStop> {
         self.depth_stop.get()
+    }
+
+    /// Whether the job is stopped: a host fault or a depth stop was recorded.
+    /// The request's answer is then decided, every op refuses, and the stop
+    /// was already logged once where it happened.
+    pub(crate) fn stopped(&self) -> bool {
+        self.host_fault() || self.depth_stop.get().is_some()
+    }
+
+    /// Write one error line for this job to stderr. The caller escapes any
+    /// script-controlled text in it.
+    pub(crate) fn log_error(&self, line: std::fmt::Arguments<'_>) {
+        eprintln!("{line}");
+        #[cfg(test)]
+        self.error_logs.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many error lines the JS layer wrote for this job.
+    #[cfg(test)]
+    pub(crate) fn error_log_count(&self) -> u32 {
+        self.error_logs.load(Ordering::SeqCst)
     }
 }
 

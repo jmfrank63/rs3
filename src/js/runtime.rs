@@ -42,11 +42,12 @@ pub fn run_script(ctx: ExecCtx, name: &str, source: String) -> Result<String, Ex
 
 /// Create a runtime, run the script and stringify its completion value.
 ///
-/// `watch` shares the job's host fault flag with `ctx`, which moves into the
-/// runtime. A script error is logged only while the job has no host fault:
-/// after one, the error is almost always the `Error: internal error` the fault
-/// caused, the fault itself was already logged where it happened, and the
-/// request answers 500 either way.
+/// `watch` shares the job state with `ctx`, which moves into the runtime. A
+/// script error is logged only while the job is not stopped: after a host
+/// fault or a depth stop, a level's script error is almost always the stop
+/// error rethrown on its way up, the stop itself was already logged once where
+/// it happened, and the request's answer (500 or 422 js_depth_limit) is
+/// decided by the job's flags either way.
 fn run_fresh(
     ctx: ExecCtx,
     watch: &ExecCtx,
@@ -67,7 +68,7 @@ fn run_fresh(
     let global = rt.execute_script(name.to_owned(), source).map_err(|e| {
         // Debug-format the script-controlled name and error text (message and
         // stack) so control characters and newlines cannot forge log lines.
-        if !watch.host_fault() {
+        if !watch.job.stopped() {
             watch.log_error(format_args!("js error in {name:?}: {:?}", e.to_string()));
         }
         ExecError::Script {
@@ -78,7 +79,7 @@ fn run_fresh(
     deno_core::scope!(scope, &mut rt);
     let local = v8::Local::new(scope, global);
     stringify(scope, local).map_err(|e| {
-        if !watch.host_fault() {
+        if !watch.job.stopped() {
             watch.log_error(format_args!(
                 "js error in {name:?} while converting the result to a string: {:?}",
                 e.to_string()

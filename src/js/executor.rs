@@ -200,8 +200,10 @@ mod tests {
     use tokio::sync::mpsc::error::TrySendError;
     use tokio::sync::oneshot;
 
-    use super::{Envelope, JsExecutor};
-    use crate::js::{ExecError, JsSettings, block_on, init_platform, test_executor};
+    use super::{Envelope, JsExecutor, classify};
+    use crate::js::{
+        DepthStop, ExecError, JobState, JsSettings, block_on, init_platform, test_executor,
+    };
     use crate::store::Store;
 
     const MIB16: usize = 16 * 1024 * 1024;
@@ -391,6 +393,46 @@ mod tests {
                 Ok("1".to_owned())
             );
         }
+    }
+
+    #[test]
+    fn classify_precedence_host_fault_then_depth_then_result() {
+        let stop = || DepthStop {
+            limit: 4,
+            chain: vec!["a".to_owned(), "b".to_owned()],
+        };
+        let depth = || {
+            Err(ExecError::DepthLimit {
+                limit: 4,
+                chain: vec!["a".to_owned(), "b".to_owned()],
+            })
+        };
+        let script = || {
+            Err(ExecError::Script {
+                message: "Uncaught Error: x".to_owned(),
+            })
+        };
+        let internal = |m: &str| Err(ExecError::Internal(m.to_owned()));
+        // Host fault beats depth stop beats the result.
+        let both = JobState::default();
+        both.note_host_fault();
+        both.stop_depth(stop());
+        assert!(matches!(
+            classify(&both, Ok("x".to_owned())),
+            Err(ExecError::Internal(_))
+        ));
+        // Depth stop alone overrides a value and a script error.
+        let stopped = JobState::default();
+        stopped.stop_depth(stop());
+        assert_eq!(classify(&stopped, Ok("x".to_owned())), depth());
+        assert_eq!(classify(&stopped, script()), depth());
+        // An Internal result stays Internal, with its own detail.
+        assert_eq!(classify(&stopped, internal("boom")), internal("boom"));
+        // Neither flag: the result is unchanged.
+        let clean = JobState::default();
+        assert_eq!(classify(&clean, Ok("x".to_owned())), Ok("x".to_owned()));
+        assert_eq!(classify(&clean, script()), script());
+        assert_eq!(classify(&clean, internal("boom")), internal("boom"));
     }
 
     #[test]

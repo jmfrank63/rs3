@@ -298,6 +298,21 @@ pub(crate) mod tests {
     }
 
     #[actix_web::test]
+    async fn depth_limit_caught_is_still_422() {
+        let pairs = [
+            (
+                "t",
+                "try { Deno.core.ops.op_rs3_patch('me') } catch (e) {} 'ok'",
+            ),
+            ("me", "Deno.core.ops.op_rs3_patch('me')"),
+        ];
+        let resp = patch_seeded(&pairs, "t").await;
+        let body =
+            assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_depth_limit").await;
+        assert_eq!(body, depth_body("t -> me -> me -> me -> me"));
+    }
+
+    #[actix_web::test]
     async fn test_patch_stringify_exception_is_422_js_error() {
         let src = "({ toString() { throw new Error('x') } })";
         let resp = patch_seeded(&[("t", src)], "t").await;

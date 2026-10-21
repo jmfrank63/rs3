@@ -2,10 +2,10 @@
 //! injected `Store` only through `OpState`, never panic, and are free of
 //! actix-web. Once any level of a job has hit a host fault, every op of that
 //! job throws `Error: internal error` instead of touching the store.
-//! `op_rs3_patch` refuses to nest deeper than the job's `max_patch_depth`.
+//! `op_rs3_patch` refuses to nest deeper than the job's `max_patch_depth`; once
+//! it has refused, every op of that job throws the same depth error and
+//! touches nothing. Writes made before either stop stay (no transactions).
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use deno_core::{FromV8, OpState, op2, v8};
 use deno_error::JsErrorBox;
@@ -36,10 +36,6 @@ pub struct ExecCtx {
     /// (the key `op_rs3_patch` runs), at any depth.
     #[cfg(test)]
     pub(crate) fail_runtime_for_key: Option<&'static str>,
-    /// Test hook: counts the error lines the JS layer wrote for this job.
-    /// Shared by every level, like `host_fault`.
-    #[cfg(test)]
-    pub(crate) error_logs: Arc<AtomicU32>,
 }
 
 impl ExecCtx {
@@ -56,8 +52,6 @@ impl ExecCtx {
             fail_runtime_at_depth: None,
             #[cfg(test)]
             fail_runtime_for_key: None,
-            #[cfg(test)]
-            error_logs: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -77,8 +71,6 @@ impl ExecCtx {
             fail_runtime_at_depth: self.fail_runtime_at_depth,
             #[cfg(test)]
             fail_runtime_for_key: self.fail_runtime_for_key,
-            #[cfg(test)]
-            error_logs: Arc::clone(&self.error_logs),
         }
     }
 
@@ -92,12 +84,10 @@ impl ExecCtx {
         self.job.host_fault()
     }
 
-    /// Write one error line for this job to stderr. The caller escapes any
-    /// script-controlled text in it.
+    /// Write one error line for this job to stderr through the job's sink.
+    /// The caller escapes any script-controlled text in it.
     pub(crate) fn log_error(&self, line: std::fmt::Arguments<'_>) {
-        eprintln!("{line}");
-        #[cfg(test)]
-        self.error_logs.fetch_add(1, Ordering::SeqCst);
+        self.job.log_error(line);
     }
 }
 
@@ -160,14 +150,18 @@ fn depth_error(stop: &DepthStop) -> JsErrorBox {
     )
 }
 
-/// The job context, or `Error: internal error` once any level of this job has
-/// hit a host fault. The request already answers 500 at that point, so no op
-/// may read or change the store any more: writes made before the fault stay,
-/// writes after it are refused.
+/// The job context, or the job's stop error once the job is stopped, in the
+/// D-04 order: `Error: internal error` once any level hit a host fault (the
+/// request answers 500), otherwise the depth error once `op_rs3_patch` refused
+/// a level (the request answers 422 js_depth_limit). Either way no op may read
+/// or change the store any more: writes made before the stop stay, writes
+/// after it are refused.
 fn live_ctx(state: &OpState) -> Result<&ExecCtx, JsErrorBox> {
     let ctx = state.borrow::<ExecCtx>();
-    if ctx.host_fault() {
+    if ctx.job.host_fault() {
         Err(internal_error())
+    } else if let Some(stop) = ctx.job.depth_stop() {
+        Err(depth_error(stop))
     } else {
         Ok(ctx)
     }
@@ -175,7 +169,7 @@ fn live_ctx(state: &OpState) -> Result<&ExecCtx, JsErrorBox> {
 
 /// Returns the whole store as the `GET /list` text, `[{"k" : "v"},...]` sorted
 /// by key, or `[]` when empty. Extra arguments are ignored. Throws only after
-/// a host fault in the same job.
+/// a host fault or a depth stop in the same job.
 #[op2]
 #[string]
 fn op_rs3_list(state: &mut OpState) -> Result<String, JsErrorBox> {
@@ -183,7 +177,8 @@ fn op_rs3_list(state: &mut OpState) -> Result<String, JsErrorBox> {
 }
 
 /// Returns the value stored under `key`. Throws `Error: key not found: <key>`
-/// when the key is missing.
+/// when the key is missing. Like every op, it throws the job's stop error
+/// and touches nothing once the job has a host fault or a depth stop.
 #[op2]
 #[string]
 fn op_rs3_get(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
@@ -193,6 +188,8 @@ fn op_rs3_get(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsEr
 /// Stores every pair of a JSON object of strings and returns the compact echo
 /// `{"k":"v"}`. Throws `TypeError: malformed JSON: ..` or
 /// `TypeError: invalid input: ..` and writes nothing when the body is rejected.
+/// After a host fault or a depth stop it throws the job's stop error and
+/// writes nothing.
 #[op2]
 #[string]
 fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, JsErrorBox> {
@@ -205,7 +202,8 @@ fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, 
 }
 
 /// Removes `key` and returns the value it held. Throws
-/// `Error: key not found: <key>` when the key is missing.
+/// `Error: key not found: <key>` when the key is missing. After a host fault
+/// or a depth stop it throws the job's stop error and removes nothing.
 #[op2]
 #[string]
 fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
@@ -213,18 +211,23 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 }
 
 /// Runs the script stored under `key` in a fresh nested runtime on the same
-/// thread and returns `String(completion value)`. When the job already runs
-/// `max_patch_depth` levels, it records a depth stop for the job, throws
-/// `Error: PATCH nesting depth limit (<limit>) exceeded: <chain>` and neither
-/// reads `key` nor creates a runtime; the request then answers 422
-/// js_depth_limit. Throws `Error: key not found: <key>` when the key is
-/// missing, and an `Error` with
+/// thread and returns `String(completion value)`. Throws
+/// `Error: key not found: <key>` when the key is missing, and an `Error` with
 /// the nested exception message (one leading "Uncaught " removed) when the
-/// nested script fails. A host fault in the nested runtime (such as a runtime
-/// creation failure) is logged once, by the level where it happened, recorded
-/// in the job context and thrown as a plain `Error: internal error`; the
-/// top-level run then answers `ExecError::Internal` even if the script caught
-/// it, and every later op of the job throws the same error.
+/// nested script fails.
+///
+/// When the job already runs `max_patch_depth` levels, it records a depth stop
+/// for the job (logged once), throws
+/// `Error: PATCH nesting depth limit (<limit>) exceeded: <chain>` and neither
+/// reads `key` nor creates a runtime. The request then answers 422
+/// js_depth_limit even if the script caught the error, and every later op of
+/// the job throws the same error and touches nothing.
+///
+/// A host fault in the nested runtime (such as a runtime creation failure) is
+/// logged once, by the level where it happened, recorded in the job state and
+/// thrown as a plain `Error: internal error`; the top-level run then answers
+/// `ExecError::Internal` even if the script caught it, and every later op of
+/// the job throws the same error.
 //
 // `reentrant` is mandatory: the nested runtime calls ops while this op is on
 // the stack, and debug builds abort without the flag. The depth check runs
@@ -332,7 +335,7 @@ mod tests {
 
     use super::ExecCtx;
     use crate::js::runtime::run_script;
-    use crate::js::{ExecError, block_on, run_js, test_executor};
+    use crate::js::{DepthStop, ExecError, block_on, run_js, test_executor};
     use crate::store::{Store, legacy};
 
     /// A top-level context named "test" with a fresh job and the default limit.
@@ -440,9 +443,9 @@ mod tests {
     /// Run `source` against `ctx` and also return how many error lines the JS
     /// layer logged for the job.
     fn run_counting(ctx: ExecCtx, source: &str) -> (Result<String, ExecError>, u32) {
-        let logs = std::sync::Arc::clone(&ctx.error_logs);
+        let job = Arc::clone(&ctx.job);
         let r = run_ctx(ctx, source);
-        (r, logs.load(std::sync::atomic::Ordering::SeqCst))
+        (r, job.error_log_count())
     }
 
     #[test]
@@ -604,6 +607,65 @@ mod tests {
         assert_eq!(store.get("before"), Ok("1".to_owned()));
         assert!(store.get("after").is_err(), "a write after the stop landed");
         assert_eq!(store.get("keep"), Ok("k".to_owned()));
+    }
+
+    #[test]
+    fn every_op_throws_the_depth_error_after_the_stop() {
+        let store = Store::new();
+        store.insert("k".into(), "v".into());
+        store.insert("inner".into(), "1".into());
+        let ctx = ctx_for(&store);
+        // Pre-setting the record is test-only. run_ctx is unclassified, so the
+        // pre-set stop does not turn the completion value into an error.
+        ctx.job.stop_depth(DepthStop {
+            limit: 4,
+            chain: vec!["a".to_owned(), "b".to_owned()],
+        });
+        let src = r#"const g = (f) => { try { f(); return 'no throw'; }
+                       catch (e) { return e.name + ': ' + e.message; } };
+                     [g(() => Deno.core.ops.op_rs3_list()),
+                      g(() => Deno.core.ops.op_rs3_get('k')),
+                      g(() => Deno.core.ops.op_rs3_insert('{"w":"1"}')),
+                      g(() => Deno.core.ops.op_rs3_delete('k')),
+                      g(() => Deno.core.ops.op_rs3_patch('inner'))].join('|')"#;
+        let refused = ["Error: PATCH nesting depth limit (4) exceeded: a -> b"; 5].join("|");
+        assert_eq!(run_ctx(ctx, src), Ok(refused));
+        assert_eq!(store.get("k"), Ok("v".to_owned()));
+        assert!(store.get("w").is_err());
+        assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn depth_limit_chain_names_a_missing_key() {
+        let store = Store::new();
+        store.insert("k1".into(), "Deno.core.ops.op_rs3_patch('k2')".into());
+        store.insert("k2".into(), "Deno.core.ops.op_rs3_patch('k3')".into());
+        store.insert("k3".into(), "Deno.core.ops.op_rs3_patch('ghost')".into());
+        // Refused before any store read, so the absent key is named, not 404'd.
+        assert_eq!(
+            run_js(&store, "Deno.core.ops.op_rs3_patch('k1')"),
+            depth_err(&["test", "k1", "k2", "k3", "ghost"])
+        );
+    }
+
+    #[test]
+    fn depth_stop_is_logged_once() {
+        let store = Store::new();
+        store.insert("me".into(), "Deno.core.ops.op_rs3_patch('me')".into());
+        let want = DepthStop {
+            limit: 4,
+            chain: ["test", "me", "me", "me", "me"].map(str::to_owned).to_vec(),
+        };
+        for src in [
+            "Deno.core.ops.op_rs3_patch('me')",
+            "try { Deno.core.ops.op_rs3_patch('me') } catch (e) { 'caught' }",
+        ] {
+            let ctx = ctx_for(&store);
+            let job = Arc::clone(&ctx.job);
+            let (_, logs) = run_counting(ctx, src);
+            assert_eq!(logs, 1, "{src}");
+            assert_eq!(job.depth_stop(), Some(&want), "{src}");
+        }
     }
 
     #[test]
