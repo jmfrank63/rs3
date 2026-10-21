@@ -2,13 +2,13 @@
 
 ## Milestones
 
-- ✅ **v1.0 rs3 toolchain modernization**: Phases 1-6 (shipped 2026-10-21, override closeout with human UAT pending for phases 2 and 6). Archive: [milestones/v1.0-ROADMAP.md](milestones/v1.0-ROADMAP.md)
+- ✅ **v0.2 rs3 toolchain modernization**: Phases 1-6 (shipped 2026-10-21, override closeout with human UAT pending for phases 2 and 6). Archive: [milestones/v0.2-ROADMAP.md](milestones/v0.2-ROADMAP.md)
 - 📋 **Next milestone**: not yet defined (`/gsd-new-milestone`)
 
 ## Phases
 
 <details>
-<summary>✅ v1.0 rs3 toolchain modernization (Phases 1-6) — SHIPPED 2026-10-21</summary>
+<summary>✅ v0.2 rs3 toolchain modernization (Phases 1-6) — SHIPPED 2026-10-21</summary>
 
 - [x] Phase 1: Toolchain, Dependencies & Foundation (3/3 plans) — completed 2026-10-20
 - [ ] Phase 2: HTTP API Port & Error Handling (3/3 plans) — executed 2026-10-20; human UAT pending (02-UAT items 2–3)
@@ -23,9 +23,9 @@
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 1. Toolchain, Dependencies & Foundation | v1.0 | 3/3 | Complete | 2026-10-20 |
-| 2. HTTP API Port & Error Handling | v1.0 | 3/3 | Executed; human UAT pending | - |
-| 3. JavaScript Runtime Port | v1.0 | 3/3 | Complete | 2026-10-21 |
-| 4. CI Gate on x86_64 | v1.0 | 2/2 | Complete | 2026-10-21 |
-| 5. JS Execution Limits | v1.0 | 3/3 | Complete | 2026-10-21 |
-| 6. Native Deployment & Documentation | v1.0 | 2/2 | Executed; human UAT pending | - |
+| 1. Toolchain, Dependencies & Foundation | v0.2 | 3/3 | Complete | 2026-10-20 |
+| 2. HTTP API Port & Error Handling | v0.2 | 3/3 | Executed; human UAT pending | - |
+| 3. JavaScript Runtime Port | v0.2 | 3/3 | Complete | 2026-10-21 |
+| 4. CI Gate on x86_64 | v0.2 | 2/2 | Complete | 2026-10-21 |
+| 5. JS Execution Limits | v0.2 | 3/3 | Complete | 2026-10-21 |
+| 6. Native Deployment & Documentation | v0.2 | 2/2 | Executed; human UAT pending | - |

@@ -6,7 +6,7 @@ rs3 is a small Rust key/value "information object store" (originally a 2021 Birk
 Computer Science project). It is an actix-web HTTP server that stores string key/value pairs
 in a concurrent in-memory map and can execute a stored value as JavaScript inside an embedded
 V8 runtime (`deno_core`), where the JS can call back into the store through registered ops.
-Milestone v1.0 (2026-10-21) moved it onto Rust 1.99.1 / edition 2024 with released crates only,
+Milestone v0.2 (2026-10-21) moved it onto Rust 1.99.1 / edition 2024 with released crates only,
 added hard limits for runaway scripts, and replaced the Docker deployment with a native binary
 run by an example hardened systemd unit. It is the base for later agentic-coding features
 (git integration, VS Code access, TypeScript execution).
@@ -17,21 +17,21 @@ rs3 builds, tests and lints cleanly on current stable Rust (edition 2024) with o
 dependencies — while every existing HTTP route and the JS-executes-against-the-store
 behaviour keep working with the same semantics.
 
-Held through v1.0. Re-check it at `/gsd-new-milestone`: the next milestone adds features, so the
+Held through v0.2. Re-check it at `/gsd-new-milestone`: the next milestone adds features, so the
 core value may move from "modernize without breaking" towards the agentic-coding goals.
 
 ## Current State
 
-**v1.0 rs3 toolchain modernization: shipped 2026-10-21** on branch `modernize-toolchain`.
-The branch is not yet merged into `main` or pushed, and the `v1.0` tag is local only.
+**v0.2 rs3 toolchain modernization: shipped 2026-10-21** on branch `modernize-toolchain`.
+The branch is not yet merged into `main` or pushed, and the `v0.2` tag is local only.
 
 - 6 phases and 16 plans. All 47 v1 requirements are checked off. DEPL-03 is partial: the unit's root-only behaviour still needs a real server.
 - About 5,600 lines of Rust in 13 files under `src/`, and 216 tests. The full gate is green locally and on x86_64 CI (run 39527188207, 0 annotations).
-- The milestone closed with an override. Phases 02 and 06 are `human_needed`, with 02-UAT items 2–3 and 06-UAT items 1–7 open. See STATE.md Deferred Items and `milestones/v1.0-MILESTONE-AUDIT.md`.
+- The milestone closed with an override. Phases 02 and 06 are `human_needed`, with 02-UAT items 2–3 and 06-UAT items 1–7 open. See STATE.md Deferred Items and `milestones/v0.2-MILESTONE-AUDIT.md`.
 
 ## Next Milestone Goals
 
-These are defined with `/gsd-new-milestone`. The candidates are already tracked as v2 requirements in `milestones/v1.0-REQUIREMENTS.md`:
+These are defined with `/gsd-new-milestone`. The candidates are already tracked as v2 requirements in `milestones/v0.2-REQUIREMENTS.md`:
 
 - **Agentic-coding features:**
   - a git-backed store (FUT-01);
@@ -49,7 +49,7 @@ These are defined with `/gsd-new-milestone`. The candidates are already tracked 
   - the `SERVER__HOST` alias (OPS-02);
   - extra CI jobs (OPS-03);
   - release profile tuning (OPS-04).
-- **Carry-over from v1.0:**
+- **Carry-over from v0.2:**
   - run the remaining human checks (06-UAT on a real server, the 02-UAT dotenv-file checks);
   - merge `modernize-toolchain` into `main`, which brings `LICENSE`;
   - settle the `MemoryMax=` sizing wording.
@@ -58,33 +58,33 @@ These are defined with `/gsd-new-milestone`. The candidates are already tracked 
 
 ### Validated
 
-<!-- "existing" items were inferred from the 2021 code and kept working through v1.0. -->
+<!-- "existing" items were inferred from the 2021 code and kept working through v0.2. -->
 
 - ✓ `GET /` returns the JSON welcome string `"Welcome to rs3"` — existing
 - ✓ `GET /ip` returns the configured host — existing
 - ✓ `POST /insert` takes a JSON object and inserts every key/value — existing
-- ✓ `GET /list` returns all entries — existing (sorted by key and JSON-escaped since v1.0)
+- ✓ `GET /list` returns all entries — existing (sorted by key and JSON-escaped since v0.2)
 - ✓ `GET /key/{key}` returns the value for a key — existing
 - ✓ `DELETE /key/{key}` removes a key and returns the old value — existing
 - ✓ `PATCH /key/{key}` executes the stored value as JavaScript in V8 and returns the result — existing
-- ✓ JS running in the runtime can call the store via five ops (list, get, insert, delete, patch) — existing (renamed `op_rs3_*` in v1.0)
+- ✓ JS running in the runtime can call the store via five ops (list, get, insert, delete, patch) — existing (renamed `op_rs3_*` in v0.2)
 - ✓ Configuration from `.env` / environment (`SERVER.HOST`, `SERVER.PORT`) — existing
-- ✓ `rust-toolchain.toml` pinned to Rust 1.99.1 with `rustfmt` + `clippy`; `edition = "2024"`; `rust-version = "1.99"` — v1.0 (Phase 1)
-- ✓ All dependencies on released crates.io versions (no git/beta); `Cargo.lock` regenerated; single V8 via `deno_core` — v1.0 (Phase 1)
-- ✓ `dotenv` → `dotenvy`, `flurry` → `papaya`, `lazy_static` removed (the Phase 1 `LazyLock` bridge was replaced by injected state in Phase 2) — v1.0 (Phases 1–2)
-- ✓ `config` crate on the 0.15 builder API, still reading dotted `SERVER.HOST` / `SERVER.PORT` from `.env` or the environment — v1.0 (Phase 1)
-- ✓ `lib.rs` + thin `main.rs` with separate `store`, `config`, `http`, `js` modules; startup errors exit 1 instead of panicking — v1.0 (Phase 1)
-- ✓ `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` all pass (gate held at every later phase) — v1.0 (Phase 1)
-- ✓ actix-web on the released 4.17 API (`#[actix_web::main]` / `#[actix_web::test]`, `test::init_service`, `Bytes` bodies) — v1.0 (Phases 1–2)
-- ✓ Handlers return JSON errors instead of panicking. A missing key gives 404 `not_found`, a bad insert gives 400 `malformed_json` or 422 `invalid_input` and writes nothing, a script failure gives 422 `js_error`, and a host fault gives 500 `internal`. `unwrap_used` / `expect_used` are denied outside tests — v1.0 (Phases 2–3)
-- ✓ No global store. `AppState { store, Arc<Settings> }` is built once in `main`, shared by every route through one `web::Data`, and handed to the ops through per-job `OpState` — v1.0 (Phases 2–3)
-- ✓ Tests are deterministic and isolated: each test has its own store and builds its config in code without reading the environment. The only `thread::sleep` calls are two bounded stall fixtures in the timeout tests — v1.0 (Phases 2, 5)
-- ✓ JS engine on current released `deno_core` 0.412: five `#[op2]` ops (`op_rs3_list/get/insert/delete/patch`) registered through one `extension!`, called as `Deno.core.ops.op_rs3_*(...)` against the same injected store as the HTTP routes; JS runs on a dedicated `rs3-js-*` pool off the actix workers, V8 initialised once in `main`; script and op errors answer 422 `js_error` instead of aborting — v1.0 (Phase 3)
-- ✓ Every JS artefact (`requests/*`, `src/example.js`, tests) migrated to the new op syntax, and the legacy `rs3_*` → `op_rs3_*` mapping documented in `docs/js-ops.md` (and summarised in the README) — v1.0 (Phase 3)
-- ✓ CI on GitHub Actions: one `ci` job on an x86_64 `ubuntu-26.04` runner with `actions/checkout@v7`, `dtolnay/rust-toolchain@1.99.1`, `Swatinem/rust-cache@v2`; guards, fmt, clippy `-D warnings`, `cargo test --locked`, release build and release smoke all fail the build (no `continue-on-error`); remote runs 39507141932 and 39527188207 green with 0 annotations — v1.0 (Phase 4)
-- ✓ No script can crash or pin the server: a PATCH nesting depth limit (default 4) stops self-patching chains and cycles with 422 `js_depth_limit` and the key chain, and an execution timeout (default 5000 ms, per-worker watchdog) ends runaway scripts with 504 `js_timeout` while other requests keep being answered; both limits are set in code and verified on x86_64 CI (run 39527188207) and by an operator client-disconnect test — v1.0 (Phase 5)
-- ✓ Native deployment on a single Linux server: `cargo build --release --locked`, the example hardened unit `deploy/rs3.service` (DynamicUser, an `env(1)` bridge for the dotted variables, `Restart=on-failure` with a start limit, seccomp `@system-service @pkey`, `MemoryMax=1G`, exposure 1.5) and a five-line install. The `Dockerfile` and `docker_rs3/` are removed — v1.0 (Phase 6). The root-only directives and x86_64 PKU still need an operator run on a real server (06-UAT items 1–3)
-- ✓ `Readme.md` rewritten: toolchain, build/run/test, configuration, HTTP API, JS ops and mapping, limits, behaviour changes versus 2021, deployment and the MIT license. `Cargo.toml` declares `license = "MIT"`. Every documented body was replayed against the release binary (130 checks) — v1.0 (Phase 6). A newcomer readability review is pending (06-UAT item 5)
+- ✓ `rust-toolchain.toml` pinned to Rust 1.99.1 with `rustfmt` + `clippy`; `edition = "2024"`; `rust-version = "1.99"` — v0.2 (Phase 1)
+- ✓ All dependencies on released crates.io versions (no git/beta); `Cargo.lock` regenerated; single V8 via `deno_core` — v0.2 (Phase 1)
+- ✓ `dotenv` → `dotenvy`, `flurry` → `papaya`, `lazy_static` removed (the Phase 1 `LazyLock` bridge was replaced by injected state in Phase 2) — v0.2 (Phases 1–2)
+- ✓ `config` crate on the 0.15 builder API, still reading dotted `SERVER.HOST` / `SERVER.PORT` from `.env` or the environment — v0.2 (Phase 1)
+- ✓ `lib.rs` + thin `main.rs` with separate `store`, `config`, `http`, `js` modules; startup errors exit 1 instead of panicking — v0.2 (Phase 1)
+- ✓ `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` all pass (gate held at every later phase) — v0.2 (Phase 1)
+- ✓ actix-web on the released 4.17 API (`#[actix_web::main]` / `#[actix_web::test]`, `test::init_service`, `Bytes` bodies) — v0.2 (Phases 1–2)
+- ✓ Handlers return JSON errors instead of panicking. A missing key gives 404 `not_found`, a bad insert gives 400 `malformed_json` or 422 `invalid_input` and writes nothing, a script failure gives 422 `js_error`, and a host fault gives 500 `internal`. `unwrap_used` / `expect_used` are denied outside tests — v0.2 (Phases 2–3)
+- ✓ No global store. `AppState { store, Arc<Settings> }` is built once in `main`, shared by every route through one `web::Data`, and handed to the ops through per-job `OpState` — v0.2 (Phases 2–3)
+- ✓ Tests are deterministic and isolated: each test has its own store and builds its config in code without reading the environment. The only `thread::sleep` calls are two bounded stall fixtures in the timeout tests — v0.2 (Phases 2, 5)
+- ✓ JS engine on current released `deno_core` 0.412: five `#[op2]` ops (`op_rs3_list/get/insert/delete/patch`) registered through one `extension!`, called as `Deno.core.ops.op_rs3_*(...)` against the same injected store as the HTTP routes; JS runs on a dedicated `rs3-js-*` pool off the actix workers, V8 initialised once in `main`; script and op errors answer 422 `js_error` instead of aborting — v0.2 (Phase 3)
+- ✓ Every JS artefact (`requests/*`, `src/example.js`, tests) migrated to the new op syntax, and the legacy `rs3_*` → `op_rs3_*` mapping documented in `docs/js-ops.md` (and summarised in the README) — v0.2 (Phase 3)
+- ✓ CI on GitHub Actions: one `ci` job on an x86_64 `ubuntu-26.04` runner with `actions/checkout@v7`, `dtolnay/rust-toolchain@1.99.1`, `Swatinem/rust-cache@v2`; guards, fmt, clippy `-D warnings`, `cargo test --locked`, release build and release smoke all fail the build (no `continue-on-error`); remote runs 39507141932 and 39527188207 green with 0 annotations — v0.2 (Phase 4)
+- ✓ No script can crash or pin the server: a PATCH nesting depth limit (default 4) stops self-patching chains and cycles with 422 `js_depth_limit` and the key chain, and an execution timeout (default 5000 ms, per-worker watchdog) ends runaway scripts with 504 `js_timeout` while other requests keep being answered; both limits are set in code and verified on x86_64 CI (run 39527188207) and by an operator client-disconnect test — v0.2 (Phase 5)
+- ✓ Native deployment on a single Linux server: `cargo build --release --locked`, the example hardened unit `deploy/rs3.service` (DynamicUser, an `env(1)` bridge for the dotted variables, `Restart=on-failure` with a start limit, seccomp `@system-service @pkey`, `MemoryMax=1G`, exposure 1.5) and a five-line install. The `Dockerfile` and `docker_rs3/` are removed — v0.2 (Phase 6). The root-only directives and x86_64 PKU still need an operator run on a real server (06-UAT items 1–3)
+- ✓ `Readme.md` rewritten: toolchain, build/run/test, configuration, HTTP API, JS ops and mapping, limits, behaviour changes versus 2021, deployment and the MIT license. `Cargo.toml` declares `license = "MIT"`. Every documented body was replayed against the release binary (130 checks) — v0.2 (Phase 6). A newcomer readability review is pending (06-UAT item 5)
 
 ### Active
 
@@ -92,17 +92,17 @@ None yet. `/gsd-new-milestone` defines the next milestone's requirements; the ca
 
 ### Out of Scope
 
-- `experiments/`, `aws/`, `Vagrantfile` — left untouched in v1.0. The one exception is the deleted stale `experiments/web_scrape_s3_api/Cargo.lock`, which triggered Dependabot alerts. The `Vagrantfile` still points at the deleted `docker_rs3/`; it is MSc-era material, kept at tag `msc`
+- `experiments/`, `aws/`, `Vagrantfile` — left untouched in v0.2. The one exception is the deleted stale `experiments/web_scrape_s3_api/Cargo.lock`, which triggered Dependabot alerts. The `Vagrantfile` still points at the deleted `docker_rs3/`; it is MSc-era material, kept at tag `msc`
 - Container images — dropped on 2026-10-21: rs3 ships as a native binary on a single Linux server (see Key Decisions)
 - Git integration / serving repos over HTTP — future milestone (FUT-01, FUT-04); keep architecture open for it
 - VS Code integration / LSP-style access — future milestone (FUT-02)
 - TypeScript execution via tsc-rs — future milestone (FUT-03); JS runtime layer should be swappable/extendable
 - Workspace split into multiple crates — single binary crate unless clearly justified (each extra test binary re-links V8)
-- Persistence / new store features — not planned. The store stays in memory and is empty after every restart. v1.0 was a modernization, not a feature milestone
+- Persistence / new store features — not planned. The store stays in memory and is empty after every restart. v0.2 was a modernization, not a feature milestone
 
 ## Context
 
-State after v1.0 (2026-10-21):
+State after v0.2 (2026-10-21):
 
 - **Code:** a single crate, `lib.rs` plus a thin `main.rs`, with these modules:
   - `config`: the config 0.15 builder plus dotenvy;
@@ -115,7 +115,7 @@ State after v1.0 (2026-10-21):
 - **CI:** `.github/workflows/ci.yml` has one job on x86_64 `ubuntu-26.04`. It runs the repo guards, fmt, clippy `-D warnings`, `cargo test --locked`, the release build and a release-binary smoke. `scripts/check-workflow.py` pins the workflow.
 - **Deployment:** `deploy/rs3.service` and `deploy/rs3.conf` are examples that listen on loopback by default. rs3 has no authentication, so the README tells operators to put a reverse proxy with auth and TLS in front of it.
 - **Docs:** `Readme.md` is the full user and operator guide. `docs/js-ops.md` holds the op contract and the legacy mapping.
-- **Known issues and tech debt** (details in `milestones/v1.0-MILESTONE-AUDIT.md`):
+- **Known issues and tech debt** (details in `milestones/v0.2-MILESTONE-AUDIT.md`):
   - Human checks still open:
     - 06-UAT items 1–7: the real-server unit run, x86_64 PKU, the sudo update and troubleshooting commands, the `MemoryMax=` sizing wording, README readability, remote CI on the final HEAD and the judgment-tier prohibitions;
     - 02-UAT items 2–3: the live dotenv-file checks.
@@ -124,7 +124,7 @@ State after v1.0 (2026-10-21):
   - The path where a runtime registers after its timeout has already fired is untested. This is an accepted risk, because the watchdog's 50 ms re-fire covers it.
   - Logging is plain stderr/stdout (OPS-01). A script's `Deno.core.print` output reaches stdout raw.
   - `LICENSE` lives on `main` (9d1596b) and arrives with the merge.
-- **Before v1.0** (the 2021 baseline, at tag `msc`):
+- **Before v0.2** (the 2021 baseline, at tag `msc`):
   - about 390 lines of Rust on Rust 1.56 / edition 2018;
   - actix-web 4.0.0-beta.8, deno_core from git, `flurry`, `lazy_static` and `dotenv`;
   - a global map, and `unwrap()` panics on bad input;
@@ -132,7 +132,7 @@ State after v1.0 (2026-10-21):
 
 ## Constraints
 
-- **Toolchain**: Rust 1.99.1 (pinned), edition 2024 — the v1.0 goal, met
+- **Toolchain**: Rust 1.99.1 (pinned), edition 2024 — the v0.2 goal, met
 - **Platform**: Linux aarch64 dev host, CI on x86_64 (`ubuntu-26.04`); V8 prebuilt static libs (glibc) from the `v8` crate on both; the first V8 build is slow (expected)
 - **Compatibility**: Same HTTP routes and semantics; keep response bodies compatible where tests assert them
 - **Dependencies**: Released versions only — no git, no beta
@@ -180,4 +180,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-21 after v1.0 milestone*
+*Last updated: 2026-10-21 after v0.2 milestone*

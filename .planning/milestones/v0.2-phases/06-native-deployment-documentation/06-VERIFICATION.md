@@ -47,7 +47,7 @@ human_verification:
     expected: "Human confirms each prohibition holds"
     why_human: "unverified-prohibition — human review recommended (judgment-tier; autonomous verify records only a non-authoritative LLM-judge verdict)"
 audit_acknowledged:
-  milestone: v1.0
+  milestone: v0.2
   at: 2026-10-21
   status: human_needed
 ---

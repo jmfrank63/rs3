@@ -1,6 +1,6 @@
 # Milestones
 
-## v1.0 rs3 toolchain modernization (Shipped: 2026-10-21)
+## v0.2 rs3 toolchain modernization (Shipped: 2026-10-21)
 
 **Delivered:** rs3 moved from Rust 1.56 / edition 2018 on git and beta dependencies to Rust 1.99.1 / edition 2024 on released crates only. Every HTTP route and the JS-executes-against-the-store behaviour still work. It gained JSON errors, hard limits for runaway scripts, an x86_64 CI gate and native deployment with an example hardened systemd unit.
 
@@ -25,7 +25,7 @@
   - Docs: `Readme.md` rewritten and replayed byte for byte against the release binary (130 checks), under the MIT license.
 
 **Stats:**
-- Git range: `97b29ed` (chore: add project config) → `7bee227` (docs: audit milestone v1.0), 261 commits on top of `main`'s merge base `0807b95`
+- Git range: `97b29ed` (chore: add project config) → `7bee227` (docs: audit milestone v0.2), 261 commits on top of `main`'s merge base `0807b95`
 - Outside `.planning`: 58 files changed, 9,230 insertions(+), 3,310 deletions(-)
 - About 5,600 lines of Rust in 13 files under `src/`, with 216 tests
 - Timeline: 2026-10-20 → 2026-10-21 (2 days)
@@ -43,8 +43,8 @@ Known verification overrides: 4 newly acknowledged, 0 carried forward from a pri
   - the judgment-tier prohibitions.
 - verification_gaps: 02-VERIFICATION.md and 06-VERIFICATION.md, both `human_needed`.
 
-**Requirements:** 47/47 v1 requirements checked off. The audit counts 46 satisfied and 1 partial: DEPL-03, whose root-only unit behaviour awaits a real server. See `milestones/v1.0-REQUIREMENTS.md` (Outcomes) and `milestones/v1.0-MILESTONE-AUDIT.md`.
+**Requirements:** 47/47 v1 requirements checked off. The audit counts 46 satisfied and 1 partial: DEPL-03, whose root-only unit behaviour awaits a real server. See `milestones/v0.2-REQUIREMENTS.md` (Outcomes) and `milestones/v0.2-MILESTONE-AUDIT.md`.
 
-**Archives:** `milestones/v1.0-ROADMAP.md`, `milestones/v1.0-REQUIREMENTS.md`, `milestones/v1.0-MILESTONE-AUDIT.md`, `milestones/v1.0-phases/`
+**Archives:** `milestones/v0.2-ROADMAP.md`, `milestones/v0.2-REQUIREMENTS.md`, `milestones/v0.2-MILESTONE-AUDIT.md`, `milestones/v0.2-phases/`
 
 ---

@@ -5,7 +5,7 @@ source: [06-VERIFICATION.md, 06-01-SUMMARY.md]
 started: 2026-10-21T11:50:00Z
 updated: 2026-10-21T11:50:00Z
 audit_acknowledged:
-  milestone: v1.0
+  milestone: v0.2
   at: 2026-10-21
   gap_snapshot: "testing::scenarios=7"
 ---

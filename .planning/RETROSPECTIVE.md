@@ -2,7 +2,7 @@
 
 *A living document updated after each milestone. Lessons feed forward into future planning.*
 
-## Milestone: v1.0 — rs3 toolchain modernization
+## Milestone: v0.2 — rs3 toolchain modernization
 
 **Shipped:** 2026-10-21 (override closeout: phases 2 and 6 carry pending human UAT)
 **Phases:** 6 | **Plans:** 16 | **Sessions:** 5
@@ -71,14 +71,14 @@
 
 | Milestone | Sessions | Phases | Key Change |
 |-----------|----------|--------|------------|
-| v1.0 | 5 | 6 | First GSD milestone: tracer-first plans, a local gate that mirrors CI, operator UAT handoffs, override closeout for root-only and remote checks |
+| v0.2 | 5 | 6 | First GSD milestone: tracer-first plans, a local gate that mirrors CI, operator UAT handoffs, override closeout for root-only and remote checks |
 
 ### Cumulative Quality
 
 | Milestone | Tests | Coverage | Zero-Dep Additions |
 |-----------|-------|----------|-------------------|
-| v1.0 | 216 | not measured (coverage is v2 OPS-03) | — (the dependency set was replaced) |
+| v0.2 | 216 | not measured (coverage is v2 OPS-03) | — (the dependency set was replaced) |
 
 ### Top Lessons (Verified Across Milestones)
 
-1. Not yet cross-validated: v1.0 is the first milestone. Re-check the v1.0 lessons at the next close.
+1. Not yet cross-validated: v0.2 is the first milestone. Re-check the v0.2 lessons at the next close.
