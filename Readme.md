@@ -415,6 +415,14 @@ run JavaScript. Keep the loopback default (`RS3_HOST=127.0.0.1`), or put
 something you control in front of it, such as a reverse proxy with
 authentication and TLS. TLS is not built in.
 
+Loopback is not private. Every local user and process can still reach rs3
+on `127.0.0.1`, even behind a reverse proxy, and so can web pages open in a
+browser on the same machine: `POST /insert` accepts any Content-Type, and rs3
+does not check the `Host` header. Run rs3 only on a host where you trust all
+of them. The unit has commented-out `IPAddressDeny=`/`IPAddressAllow=` lines
+that keep it loopback-only even if `RS3_HOST` changes; a reverse proxy on the
+same host still connects over loopback.
+
 ### Troubleshooting
 
 The unit uses `Type=exec`, so `systemctl enable --now rs3` reports success as

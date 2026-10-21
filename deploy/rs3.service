@@ -48,6 +48,9 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 RemoveIPC=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Optional: refuse every peer except loopback, whatever RS3_HOST says.
+#IPAddressDeny=any
+#IPAddressAllow=localhost
 SystemCallArchitectures=native
 # @pkey: V8 uses memory protection keys on x86_64 CPUs that have them, and
 # @system-service does not include pkey_alloc/pkey_free/pkey_mprotect.
