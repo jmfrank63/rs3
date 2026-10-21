@@ -3,58 +3,59 @@ phase: 05
 review: 05-REVIEW.md
 titles: json
 findings:
-  - id: WR-01
-    severity: warning
-    disposition: open
-    title: "The smoke's timeout window includes the backstop, so a broken watchdog still passes"
-  - id: WR-02
-    severity: warning
-    disposition: open
-    title: "A nested host fault is dropped when the job times out during the nested run"
-  - id: WR-03
-    severity: warning
-    disposition: open
-    title: "A client can make a request answer 500 \"host fault\" by exhausting the JS stack before nesting"
   - id: IN-01
     severity: info
     disposition: open
-    title: "The backstop's log line has no job label, and the timeout is logged twice"
+    title: "The backstop's log line has no job label, and the timeout is logged twice (carry-over)"
   - id: IN-02
     severity: info
     disposition: open
-    title: "The ops table and the timeout section in the docs are incomplete or inaccurate"
+    title: "The docs' ops table and limits section are incomplete or inaccurate (carry-over)"
   - id: IN-03
     severity: info
     disposition: open
-    title: "`ExecCtx::depth` duplicates `chain.len() - 1`"
+    title: "`ExecCtx::depth` duplicates `chain.len() - 1`, and now drives a classification (carry-over, widened)"
   - id: IN-04
     severity: info
     disposition: open
-    title: "`op_rs3_patch`'s `map_err` claims to need no wildcard but ends with one"
+    title: "The smoke compares `nproc` with a pool sized by `available_parallelism` (carry-over)"
   - id: IN-05
     severity: info
     disposition: open
-    title: "The smoke compares `nproc` with a pool sized by `available_parallelism`"
+    title: "The watchdog spawn comment names the wrong thread as the V8 initialiser (carry-over)"
   - id: IN-06
     severity: info
     disposition: open
-    title: "The watchdog spawn comment names the wrong thread as the V8 initialiser"
+    title: "The timing assertions have tight upper bounds (carry-over)"
   - id: IN-07
     severity: info
     disposition: open
-    title: "The timing assertions have tight upper bounds"
-open: 10
-total: 10
-recorded: 2026-10-21T01:01:10.020Z
+    title: "Every boot that runs out of stack writes an unprefixed V8 line to the server's stdout (new)"
+  - id: IN-08
+    severity: info
+    disposition: open
+    title: "The stack-exhaustion log line blames the nested key, not the script that used up the stack (new)"
+  - id: WR-01
+    severity: warning
+    disposition: fixed
+    title: "The smoke's timeout window includes the backstop, so a broken watchdog still passes"
+  - id: WR-02
+    severity: warning
+    disposition: fixed
+    title: "A nested host fault is dropped when the job times out during the nested run"
+  - id: WR-03
+    severity: warning
+    disposition: fixed
+    title: "A client can make a request answer 500 \"host fault\" by exhausting the JS stack before nesting"
+open: 8
+total: 11
+recorded: 2026-10-21T01:17:02.474Z
 ---
 
 # Phase 05: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
-| WR-03 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
@@ -62,6 +63,10 @@ recorded: 2026-10-21T01:01:10.020Z
 | IN-05 | info | open | - |
 | IN-06 | info | open | - |
 | IN-07 | info | open | - |
+| IN-08 | info | open | - |
+| WR-01 | warning | fixed | 05-REVIEW-FIX.md (not in the current review) |
+| WR-02 | warning | fixed | 05-REVIEW-FIX.md (not in the current review) |
+| WR-03 | warning | fixed | 05-REVIEW-FIX.md (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
