@@ -386,6 +386,32 @@ pub(crate) mod tests {
     }
 
     #[actix_web::test]
+    async fn timeout_infinite_loop_is_504_then_worker_serves_next() {
+        let state = timeout_state(1, 300, &[("loop", "while(true){}"), ("ok", "1+1")]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let start = std::time::Instant::now();
+        let resp = atest::call_service(&app, patch_req("loop").to_request()).await;
+        let elapsed = start.elapsed();
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .map(|v| v.as_bytes().to_vec()),
+            Some(b"application/json".to_vec())
+        );
+        assert_eq!(atest::read_body(resp).await, timeout_body(300));
+        assert!(
+            elapsed >= std::time::Duration::from_millis(300)
+                && elapsed < std::time::Duration::from_millis(1300),
+            "{elapsed:?}"
+        );
+        // The one worker that timed out serves the next job.
+        let (code, body) = send(&app, patch_req("ok").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""2""#));
+    }
+
+    #[actix_web::test]
     async fn test_patch_stringify_exception_is_422_js_error() {
         let src = "({ toString() { throw new Error('x') } })";
         let resp = patch_seeded(&[("t", src)], "t").await;

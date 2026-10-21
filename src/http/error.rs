@@ -4,7 +4,8 @@
 //! with content type `application/json` and a status chosen per variant. The
 //! codes are `not_found` (404), `malformed_json` (400), `invalid_input` (422),
 //! `js_error` (422, the message is only the JS exception message),
-//! `js_depth_limit` (422, the message names the limit and the PATCH key chain)
+//! `js_depth_limit` (422, the message names the limit and the PATCH key chain),
+//! `js_timeout` (504, the message names the execution limit in milliseconds)
 //! and `internal` (500, fixed message `internal error`; details go to stderr).
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 
@@ -24,6 +25,10 @@ pub enum ApiError {
     /// naming the limit and the key chain.
     #[error("{0}")]
     JsDepthLimit(String),
+    /// A script ran past the execution timeout and was terminated. Carries
+    /// the message naming the limit.
+    #[error("{0}")]
+    JsTimeout(String),
     /// A host fault. The body message is always the fixed `internal error`.
     #[error("internal error")]
     Internal,
@@ -33,12 +38,15 @@ impl From<ExecError> for ApiError {
     /// A script failure becomes 422 `js_error` with the JS exception message
     /// (the runner already wrote the stack to stderr). A depth stop becomes
     /// 422 `js_depth_limit` with its message (the op already logged it once).
+    /// A timeout becomes 504 `js_timeout` with its message (the JS worker or
+    /// the backstop already logged it once).
     /// A host fault is logged to stderr and becomes 500 `internal`, so host
     /// details never reach the client.
     fn from(e: ExecError) -> Self {
         match e {
             ExecError::Script { message } => ApiError::JsError(message),
             ExecError::DepthLimit { .. } => ApiError::JsDepthLimit(e.to_string()),
+            ExecError::Timeout { .. } => ApiError::JsTimeout(e.to_string()),
             ExecError::Unavailable | ExecError::Internal(_) => {
                 // `Internal` already displays with this prefix; log its bare detail.
                 let detail = match e {
@@ -68,6 +76,7 @@ impl ApiError {
             ApiError::Store(StoreError::InvalidInput(_)) => "invalid_input",
             ApiError::JsError(_) => "js_error",
             ApiError::JsDepthLimit(_) => "js_depth_limit",
+            ApiError::JsTimeout(_) => "js_timeout",
             ApiError::Internal => "internal",
         }
     }
@@ -81,6 +90,7 @@ impl ResponseError for ApiError {
             ApiError::Store(StoreError::InvalidInput(_)) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::JsError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::JsDepthLimit(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiError::JsTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

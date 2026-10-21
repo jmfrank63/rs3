@@ -1,11 +1,11 @@
 //! The JavaScript runtime layer: the store ops, the script runner and the
 //! dedicated JS thread pool. This module is free of actix-web.
-use std::sync::OnceLock;
 #[cfg(test)]
 use std::sync::atomic::AtomicU32;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
-use deno_core::JsRuntime;
+use deno_core::{JsRuntime, v8};
 
 pub mod executor;
 pub mod ops;
@@ -35,6 +35,10 @@ pub enum ExecError {
     /// to 422 js_depth_limit.
     #[error("PATCH nesting depth limit ({limit}) exceeded: {}", .chain.join(" -> "))]
     DepthLimit { limit: u32, chain: Vec<String> },
+    /// The job ran longer than `timeout_ms` and was terminated. `limit_ms` is
+    /// the effective limit. HTTP maps this to 504 js_timeout.
+    #[error("script exceeded the {limit_ms} ms execution limit")]
+    Timeout { limit_ms: u64 },
 }
 
 /// The record of a job's depth stop: the limit in force and the refused chain.
@@ -46,12 +50,27 @@ pub struct DepthStop {
     pub chain: Vec<String>,
 }
 
+/// `JobState::phase`: the job is still running (the default).
+const RUNNING: u8 = 0;
+/// `JobState::phase`: the worker finished the job before the watchdog fired.
+const FINISHED: u8 = 1;
+/// `JobState::phase`: the watchdog fired before the worker finished the job.
+const TIMED_OUT: u8 = 2;
+
 /// State shared by every level of one job: the outer script and every nested
 /// script `op_rs3_patch` runs for it. The executor creates one per job and
 /// classifies the job's result from it once, after the run. It is also the
-/// job's one error log sink.
+/// job's one error log sink and its termination group: every runtime the job
+/// creates registers its isolate here, so the watchdog can terminate them all.
 #[derive(Debug, Default)]
 pub struct JobState {
+    /// `RUNNING`, then exactly one of `FINISHED` (set by the worker) or
+    /// `TIMED_OUT` (set by the watchdog), by compare-and-swap.
+    phase: AtomicU8,
+    /// The isolates of every live runtime of this job, with registration ids.
+    isolates: Mutex<Vec<(u64, v8::IsolateHandle)>>,
+    /// The next registration id.
+    next_id: AtomicU64,
     /// Set when a nested runtime hit a host fault.
     host_fault: AtomicBool,
     /// The first depth stop of the job; later stops never replace it.
@@ -88,11 +107,67 @@ impl JobState {
         self.depth_stop.get()
     }
 
-    /// Whether the job is stopped: a host fault or a depth stop was recorded.
-    /// The request's answer is then decided, every op refuses, and the stop
-    /// was already logged once where it happened.
+    /// Whether the job is stopped: it timed out, or a host fault or a depth
+    /// stop was recorded. The request's answer is then decided, no op touches
+    /// the store any more, and the stop is logged once (where it happened, or
+    /// by the worker for a timeout).
     pub(crate) fn stopped(&self) -> bool {
-        self.host_fault() || self.depth_stop.get().is_some()
+        self.timed_out() || self.host_fault() || self.depth_stop.get().is_some()
+    }
+
+    /// The registered isolates. A poisoned lock is still usable: the list is
+    /// only ever pushed to or filtered.
+    fn handles(&self) -> MutexGuard<'_, Vec<(u64, v8::IsolateHandle)>> {
+        self.isolates.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Add a freshly created runtime's isolate to the termination group and
+    /// return its registration id. The check runs under the registry lock, so
+    /// a concurrent `fire()` either sees this handle or this call sees the
+    /// timeout and terminates the handle at once: a runtime created after the
+    /// job timed out fails its first script.
+    pub(crate) fn register(&self, handle: v8::IsolateHandle) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let mut list = self.handles();
+        if self.timed_out() {
+            handle.terminate_execution();
+        }
+        list.push((id, handle));
+        id
+    }
+
+    /// Remove the isolate registered as `id`.
+    pub(crate) fn unregister(&self, id: u64) {
+        self.handles().retain(|(i, _)| *i != id);
+    }
+
+    /// Watchdog only: time the job out and terminate every registered isolate.
+    /// The first call moves a running job to timed out; later calls (the
+    /// re-fires) terminate again. A finished job is never touched. A disposed
+    /// isolate ignores the call.
+    pub(crate) fn fire(&self) {
+        let won = self
+            .phase
+            .compare_exchange(RUNNING, TIMED_OUT, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if won || self.timed_out() {
+            for (_, handle) in self.handles().iter() {
+                handle.terminate_execution();
+            }
+        }
+    }
+
+    /// Worker only, once the job returned: mark it finished. Returns true when
+    /// the watchdog fired first, so the job timed out whatever it returned.
+    pub(crate) fn finish(&self) -> bool {
+        self.phase
+            .compare_exchange(RUNNING, FINISHED, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+    }
+
+    /// Whether the watchdog timed this job out.
+    pub(crate) fn timed_out(&self) -> bool {
+        self.phase.load(Ordering::SeqCst) == TIMED_OUT
     }
 
     /// Write one error line for this job to stderr. The caller escapes any
@@ -107,6 +182,27 @@ impl JobState {
     #[cfg(test)]
     pub(crate) fn error_log_count(&self) -> u32 {
         self.error_logs.load(Ordering::SeqCst)
+    }
+}
+
+/// A runtime's membership in its job's termination group: registers the
+/// isolate on creation and unregisters it when dropped, on every exit path.
+pub(crate) struct Registered<'a> {
+    job: &'a JobState,
+    id: u64,
+}
+
+impl<'a> Registered<'a> {
+    /// Register `handle` in `job`'s termination group.
+    pub(crate) fn new(job: &'a JobState, handle: v8::IsolateHandle) -> Self {
+        let id = job.register(handle);
+        Self { job, id }
+    }
+}
+
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        self.job.unregister(self.id);
     }
 }
 
@@ -192,4 +288,26 @@ pub(crate) fn block_on<F: std::future::Future>(f: F) -> F::Output {
 #[cfg(test)]
 pub(crate) fn run_js(store: &Store, source: &str) -> Result<String, ExecError> {
     block_on(test_executor().execute(store.clone(), "test".to_owned(), source.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JobState;
+
+    #[test]
+    fn job_state_phase_changes_exactly_once() {
+        // The watchdog wins: the job timed out and stays timed out.
+        let fired = JobState::default();
+        fired.fire();
+        assert!(fired.finish(), "finish after fire must report the timeout");
+        fired.fire();
+        assert!(fired.timed_out());
+        assert!(fired.stopped());
+        // The worker wins: a late fire never touches the finished job.
+        let finished = JobState::default();
+        assert!(!finished.finish(), "finish before fire is not a timeout");
+        finished.fire();
+        assert!(!finished.timed_out());
+        assert!(!finished.stopped());
+    }
 }

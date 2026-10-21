@@ -3,8 +3,8 @@
 use deno_core::error::JsError;
 use deno_core::{JsRuntime, RuntimeOptions, v8};
 
-use super::ExecError;
 use super::ops::{ExecCtx, rs3_ext};
+use super::{ExecError, Registered};
 
 /// Run `source` as a script named `name` with the store ops bound to `ctx`, and
 /// return `String(completion value)`.
@@ -42,11 +42,16 @@ pub fn run_script(ctx: ExecCtx, name: &str, source: String) -> Result<String, Ex
 
 /// Create a runtime, run the script and stringify its completion value.
 ///
-/// `watch` shares the job state with `ctx`, which moves into the runtime. A
-/// script error is logged only while the job is not stopped: after a host
-/// fault or a depth stop, a level's script error is almost always the stop
-/// error rethrown on its way up, the stop itself was already logged once where
-/// it happened, and the request's answer (500 or 422 js_depth_limit) is
+/// `watch` shares the job state with `ctx`, which moves into the runtime.
+/// Right after creation the runtime's isolate joins the job's termination
+/// group, top-level and nested alike, and leaves it when the runtime is
+/// dropped, so the watchdog can terminate every runtime of a timed-out job. A
+/// runtime created after the job timed out is terminated at registration.
+///
+/// A script error is logged only while the job is not stopped: after a
+/// timeout, a host fault or a depth stop, a level's script error is almost
+/// always the stop rethrown on its way up, the stop itself is logged once
+/// elsewhere, and the request's answer (504, 500 or 422 js_depth_limit) is
 /// decided by the job's flags either way.
 fn run_fresh(
     ctx: ExecCtx,
@@ -65,6 +70,7 @@ fn run_fresh(
         ..Default::default()
     })
     .map_err(|e| ExecError::Internal(format!("cannot create JS runtime: {e}")))?;
+    let _registered = Registered::new(&watch.job, rt.v8_isolate().thread_safe_handle());
     let global = rt.execute_script(name.to_owned(), source).map_err(|e| {
         // Debug-format the script-controlled name and error text (message and
         // stack) so control characters and newlines cannot forge log lines.
