@@ -5,7 +5,7 @@ slug: "native-deployment-documentation"
 # audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: false) (#2117)
 status: draft
 nyquist_compliant: false
-wave_0_complete: false
+wave_0_complete: true
 created: "2026-10-21"
 ---
 
@@ -45,9 +45,9 @@ Filled by the planner/executor as tasks are created. The requirement → command
 | 06-01-01 | 01 | 1 | DEPL-03, DEPL-02, DOCS-04 | T-06-01, T-06-02, T-06-05 | the committed unit runs the release binary through the env(1) bridge with NoNewPrivs 1 and Seccomp 2; loopback default; license MIT with Cargo.lock unchanged | live (user manager) + static | `bash target/tmp/p6/unit-live.sh bridge`; `systemd-analyze verify --recursive-errors=no deploy/rs3.service` (empty, exit 0); `systemd-analyze security --offline=true --threshold=15 deploy/rs3.service`; install dry-run into target/tmp/p6/root | ✅ | ✅ green |
 | 06-01-02 | 01 | 1 | DEPL-03, DEPL-02 | T-06-03, T-06-04 | V8 survives the seccomp kill action (nested PATCH, 422, 504, clean stop); a broken or missing env file stops at the start limit; install replaces a running binary | live (user manager) | `bash target/tmp/p6/unit-live.sh kill`, then the modes `startlimit`, `nofile` and `update` | ✅ | ✅ green |
 | 06-01-03 | 01 | 1 | DEPL-01 | T-06-07 | no ignored or untracked file under the removed path becomes addable; the container artefacts and references are gone | static + full suite | `git grep -n -i docker -- . ':!.planning' ':!aws' ':!Vagrantfile' ':!experiments'` prints nothing; the D-17 full suite | n/a | ✅ green |
-| 06-02-01 | 02 | 2 | DOCS-01, DOCS-03 | T-06-09, T-06-10 | every documented route body, error body and startup line equals the release binary's live output | replay | `bash target/tmp/p6/readme-replay.sh` (30 or more checks) | ❌ W0 | ⬜ pending |
-| 06-02-02 | 02 | 2 | DOCS-02, DOCS-03 | T-06-08, T-06-11 | raw stdout, the limits and the behaviour changes are documented truthfully | replay + static | `bash target/tmp/p6/readme-replay.sh` (45 or more checks); whitespace-flattened greps on docs/js-ops.md | ❌ W0 | ⬜ pending |
-| 06-02-03 | 02 | 2 | DOCS-01, DEPL-01 | T-06-SC | CI unchanged and green on the final tree; the README is complete in D-12 order | full suite + replay + live | the D-17 full suite, then `bash target/tmp/p6/readme-replay.sh` and `bash target/tmp/p6/unit-live.sh bridge` | ✅ | ⬜ pending |
+| 06-02-01 | 02 | 2 | DOCS-01, DOCS-03 | T-06-09, T-06-10 | every documented route body, error body and startup line equals the release binary's live output | replay | `bash target/tmp/p6/readme-replay.sh` (30 or more checks) | ✅ | ✅ green |
+| 06-02-02 | 02 | 2 | DOCS-02, DOCS-03 | T-06-08, T-06-11 | raw stdout, the limits and the behaviour changes are documented truthfully | replay + static | `bash target/tmp/p6/readme-replay.sh` (45 or more checks); whitespace-flattened greps on docs/js-ops.md | ✅ | ✅ green |
+| 06-02-03 | 02 | 2 | DOCS-01, DEPL-01 | T-06-SC | CI unchanged and green on the final tree; the README is complete in D-12 order | full suite + replay + live | the D-17 full suite, then `bash target/tmp/p6/readme-replay.sh` and `bash target/tmp/p6/unit-live.sh bridge` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -55,8 +55,8 @@ Filled by the planner/executor as tasks are created. The requirement → command
 
 ## Wave 0 Requirements
 
-- [ ] `target/tmp/p6/unit-live.sh` (created by 06-01 Task 1, extended by Task 2): a user-manager live run derived from the committed `deploy/rs3.service` and `deploy/rs3.conf`. Modes: `bridge` (banner tagged rs3, `GET /`, PATCH through V8, the env(1) bridge in the main PID's environment, `NoNewPrivs: 1 Seccomp: 2`), `kill` (seccomp kill action: nested PATCH, 422, 504, clean stop, no SIGSYS), `startlimit`, `nofile` and `update`. Not committed.
-- [ ] `target/tmp/p6/readme-replay.sh` (created by 06-02 Task 1, extended by Task 2): starts `target/release/rs3` with `env -i PATH="$PATH" SERVER.HOST=127.0.0.1 SERVER.PORT=<free port>`, diffs every documented command, body and startup line, and checks that each appears verbatim in Readme.md. Not committed. Never name the dotenv file in a command.
+- [x] `target/tmp/p6/unit-live.sh` (created by 06-01 Task 1, extended by Task 2): a user-manager live run derived from the committed `deploy/rs3.service` and `deploy/rs3.conf`. Modes: `bridge` (banner tagged rs3, `GET /`, PATCH through V8, the env(1) bridge in the main PID's environment, `NoNewPrivs: 1 Seccomp: 2`), `kill` (seccomp kill action: nested PATCH, 422, 504, clean stop, no SIGSYS), `startlimit`, `nofile` and `update`. Not committed.
+- [x] `target/tmp/p6/readme-replay.sh` (created by 06-02 Task 1, extended by Task 2): starts `target/release/rs3` with `env -i PATH="$PATH" SERVER.HOST=127.0.0.1 SERVER.PORT=<free port>`, diffs every documented command, body and startup line, and checks that each appears verbatim in Readme.md. Not committed. Never name the dotenv file in a command.
 - No cargo test changes are needed, because the phase changes no behaviour.
 
 ---
@@ -71,10 +71,10 @@ Filled by the planner/executor as tasks are created. The requirement → command
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
 - [ ] Feedback latency < 240s
 - [ ] `nyquist_compliant: true` set in frontmatter
 

@@ -456,6 +456,32 @@ will cause the restart rate counter for a service to be flushed".
 A crash (for example heap exhaustion, which has no limit yet) restarts rs3
 after 2 s with an empty store. Repeated crashes hit the same start limit.
 
+## Development
+
+These are the checks CI runs, in the order a contributor runs them locally:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+cargo build --release --locked
+bash scripts/ci-guards.sh
+python3 scripts/check-workflow.py
+bash scripts/test-ci-guards.sh
+bash scripts/ci-smoke.sh
+```
+
+`scripts/ci-smoke.sh` needs the release build first: it starts
+`target/release/rs3` on a free loopback port and drives it with curl.
+
+CI is a single job in `.github/workflows/ci.yml` on GitHub's `ubuntu-26.04`
+x86_64 runner. It runs the repo guards, `cargo fmt --check`, clippy, the
+tests, the release build and the release smoke. The release smoke exercises
+the protected V8 platform, which matters on x86_64 CPUs with memory
+protection keys. The guards reject lint suppression, ignored tests, legacy op
+syntax and a second v8 in the dependency graph. `scripts/check-workflow.py`
+pins the workflow to its canonical lines, so change both together.
+
 ## License
 
 rs3 is released under the MIT license; see `LICENSE`.

@@ -145,7 +145,8 @@ impl JsExecutor {
                 .stack_size(effective_stack_bytes(settings))
                 .spawn(move || {
                     // Spawned from the worker, so the watchdog descends from the
-                    // thread that initialised V8, like the worker itself.
+                    // main thread that initialised V8 (main calls init_platform),
+                    // through the worker.
                     let (wd_tx, wd_rx) = std::sync::mpsc::channel::<Cmd>();
                     let spawned = std::thread::Builder::new()
                         .name(wd_name.clone())
