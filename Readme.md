@@ -466,8 +466,11 @@ sudo systemctl restart rs3
 The systemd.unit documentation (systemd 255) says: "systemctl reset-failed
 will cause the restart rate counter for a service to be flushed".
 
-A crash (for example heap exhaustion, which has no limit yet) restarts rs3
-after 2 s with an empty store. Repeated crashes hit the same start limit.
+A crash (for example heap exhaustion, which has no limit yet, or an OOM kill
+at `MemoryMax=`) restarts rs3 after 2 s with an empty store. Repeated crashes
+hit the same start limit. Because any client can trigger such a crash, a
+client that crashes rs3 about six times within 60 s takes it down until an
+operator runs the two commands above.
 
 ## Development
 
