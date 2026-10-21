@@ -184,6 +184,157 @@ Two answers come from actix-web itself, not from rs3:
 What a PATCH script can do, and the limits that produce 422 `js_depth_limit`
 and 504 `js_timeout`, are described in the JavaScript ops and Limits sections.
 
+## JavaScript ops
+
+`PATCH /key/{key}` runs the value stored under `key` as a JavaScript script on
+deno_core 0.412 (an embedded V8). The script runs on a dedicated JS worker
+thread, never on an HTTP worker. It reaches the store through five ops on
+`Deno.core.ops`, for example `Deno.core.ops.op_rs3_get("k")`. There is no
+bootstrap call.
+
+| Op | Argument | Returns |
+|----|----------|---------|
+| `Deno.core.ops.op_rs3_list()` | none | the inner `GET /list` text, such as `[{"k" : "v"}]`, sorted by key; `[]` on an empty store |
+| `Deno.core.ops.op_rs3_get(key)` | the key | its value |
+| `Deno.core.ops.op_rs3_insert(json)` | a JSON object with string values, as a string (use `JSON.stringify(obj)`) | the compact echo, such as `{"k":"v"}` |
+| `Deno.core.ops.op_rs3_delete(key)` | the key | the value it held |
+| `Deno.core.ops.op_rs3_patch(key)` | the key | `String(result)` of that key's script, run in a fresh nested runtime |
+
+Op errors are ordinary JavaScript exceptions that a script can catch. A
+missing key throws an `Error` with the message `key not found: <key>`; bad
+input (malformed or wrongly shaped insert JSON, an object or symbol where a
+string is expected) throws a `TypeError`. For example, the script
+`try { Deno.core.ops.op_rs3_get("nope") } catch (e) { e.message }` answers
+`"key not found: nope"`, and an uncaught op error answers 422 `js_error`.
+
+### Migrating 2021 scripts
+
+The 2021 version ran on a pre-release deno_core with a bootstrap call and
+`Deno.core.opSync`. Neither exists any more:
+
+| 2021 | Now |
+|------|-----|
+| `Deno.core.ops();` | delete the statement |
+| `Deno.core.opSync("rs3_list", "")` | `Deno.core.ops.op_rs3_list()` |
+| `Deno.core.opSync("rs3_get", key)` | `Deno.core.ops.op_rs3_get(key)` |
+| `Deno.core.opSync("rs3_insert", json)` | `Deno.core.ops.op_rs3_insert(json)` |
+| `Deno.core.opSync("rs3_delete", key)` | `Deno.core.ops.op_rs3_delete(key)` |
+| `Deno.core.opSync("rs3_patch", key)` | `Deno.core.ops.op_rs3_patch(key)` |
+
+A stored 2021 script now fails at the first legacy call. PATCH of
+`Deno.core.ops();` and of `Deno.core.opSync("rs3_list", "")` answers:
+
+```text
+422 {"error":"js_error","message":"Uncaught TypeError: Deno.core.ops is not a function"}
+422 {"error":"js_error","message":"Uncaught TypeError: Deno.core.opSync is not a function"}
+```
+
+### Worked example
+
+`requests/fac.txt` stores the factorial script from `requests/fac.js` under
+the key `fac`; the script reads its input with
+`Deno.core.ops.op_rs3_get("num")`. From the repo root, against a running
+server:
+
+```sh
+curl -s -X POST http://127.0.0.1:5000/insert -d '{"num":"5"}'
+curl -s -X POST http://127.0.0.1:5000/insert -d @requests/fac.txt
+curl -s -X PATCH http://127.0.0.1:5000/key/fac
+```
+
+The three commands print:
+
+```text
+"{\"num\":\"5\"}"
+"{\"fac\":\"function factorial(n) { if (n === 0) { return 1; }return n * factorial(n - 1); }let num = Number(Deno.core.ops.op_rs3_get(\\\"num\\\").toString());factorial(num);\"}"
+"120"
+```
+
+### Results
+
+A successful PATCH answers 200 with the JSON string of `String(result)`,
+where `result` is the value of the script's last expression statement:
+
+| Script | Response body |
+|--------|---------------|
+| `6*20` | `"120"` |
+| `let a=1;` | `"undefined"` |
+| `({a:1})` | `"[object Object]"` |
+| `Promise.resolve(1)` | `"[object Promise]"` |
+| `0.1+0.2` | `"0.30000000000000004"` |
+
+A Promise is not awaited, so it answers `"[object Promise]"`. Return a plain
+value, or `JSON.stringify(..)` an object yourself.
+
+### Output
+
+`Deno.core.print(text)` writes `text` unchanged to the server's stdout, so a
+script can print lines that look like rs3's own output.
+`Deno.core.print(text, true)` writes an escaped line prefixed with
+`js stderr: ` to stderr; `Deno.core.print("x\ny", true)` gives
+`js stderr: "x\ny"`. Scripts are untrusted, and so is everything they print.
+
+The full op contract (argument coercion, nested PATCH, error classes, stored
+scripts after upgrading) is in [docs/js-ops.md](docs/js-ops.md).
+
+## Limits
+
+- **Nesting depth limit: 4**, counting the PATCHed key, so a script may nest
+  `op_rs3_patch` three times. A chain of 4 scripts answers normally (`k1`
+  patches `k2`, which patches `k3`, which patches `k4` = `"leaf"`, answers
+  `"leaf"`); the call that would start a 5th is refused, and the PATCH answers
+  422 `js_depth_limit` with the key chain:
+  `{"error":"js_depth_limit","message":"PATCH nesting depth limit (4) exceeded: j1 -> j2 -> j3 -> j4 -> j5"}`.
+  Sibling `op_rs3_patch` calls at the same level are not counted: a script
+  that calls `op_rs3_patch` ten times in a loop and ends with `"done"` answers
+  `"done"`.
+- **Execution timeout: 5000 ms**, counted from the moment a JS worker picks
+  the request up (time waiting in the queue does not count). The script,
+  nested scripts included, is terminated and the PATCH answers 504
+  `js_timeout`. If the stall is inside the host rather than in JavaScript, a
+  backstop answers the same 504 2 s later.
+- Both are hard stops, even when the script catches the error. Both are set
+  in code (`JsSettings`) and cannot be configured at runtime.
+- Neither stop rolls back writes. A script that inserts `w2` with
+  `op_rs3_insert` and then loops forever answers 504, and `GET /key/w2`
+  afterwards answers `"kept"`.
+- Other routes keep being answered while a script runs. Other PATCH requests
+  run while a JS worker is free (there is one per available CPU); otherwise
+  they wait in the queue.
+- **There is no heap limit yet** (planned for v2). A script that allocates
+  without bound can exhaust V8's heap and abort the whole process.
+- The store lives in memory, so every restart (including systemd's restart
+  after a crash) starts with an empty store.
+
+## Behaviour changes
+
+Compared with the 2021 version (git tag `msc`):
+
+- **`/list` is sorted and escaped.** Entries are sorted by key in byte order,
+  and keys and values are JSON-escaped; the `" : "` spacing is kept. The `,]`
+  quirk is gone (2021 listed entries in hash order, unescaped, and stripped
+  every `,]`, which corrupted values containing it).
+- **A missing key answers 404.** `GET`, `DELETE` and `PATCH /key/{key}` give
+  404 `not_found` JSON, also on an empty store (2021 answered `"[]"` on an
+  empty store and panicked otherwise).
+- **`POST /insert` validates.** A body that is not JSON answers 400
+  `malformed_json`, and one that is not an object of strings answers 422
+  `invalid_input`; nothing is inserted (2021 panicked, possibly after
+  inserting some pairs).
+- **The ops are renamed** `rs3_*` → `op_rs3_*` and called as
+  `Deno.core.ops.op_rs3_*(...)`, with no `Deno.core.ops()` bootstrap and no
+  `opSync`. A missing key throws a catchable `Error`, and bad input a
+  `TypeError` (2021 crashed the server).
+- **PATCH errors have status codes:** 422 `js_error`, 422 `js_depth_limit`,
+  504 `js_timeout` or 500 `internal` (2021 panicked on a script error).
+- **The depth limit and the timeout are new** (see Limits).
+- **Configuration is strict.** A malformed or BOM-prefixed dotenv file stops
+  startup, and only `SERVER.*` is read (2021 ignored dotenv errors and merged
+  every environment variable).
+- **Startup reports errors cleanly.** The banner prints only after a
+  successful bind, and a startup failure is one `error:` line with exit 1
+  (2021 printed the banner before binding and panicked on errors).
+
 ## Deployment
 
 This section runs rs3 on one Linux server with systemd, using the two example

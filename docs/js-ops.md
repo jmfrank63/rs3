@@ -11,7 +11,9 @@ that a script can catch with `try`/`catch`. After a nested host fault, every op
 throws `Error: internal error` for the rest of the PATCH. After the nesting
 depth limit has refused an `op_rs3_patch`, every op throws that same depth
 error. After the execution timeout, every op returns an empty string and
-touches nothing. See Errors and Sandbox and known limits.
+touches nothing. An object or symbol argument still throws its `TypeError`,
+because arguments are converted before the timeout is checked. See Errors and
+Sandbox and known limits.
 
 ## Migrating from the legacy API
 
@@ -22,10 +24,10 @@ Neither exists any more. Rewrite old scripts with this table:
 | Old call | New call | Argument | Returns | Throws when |
 |----------|----------|----------|---------|-------------|
 | `Deno.core.ops();` | delete the statement | none | none | calling it now throws `TypeError: Deno.core.ops is not a function`, because `Deno.core.ops` is a plain object |
-| `Deno.core.opSync("rs3_list", "")` | `Deno.core.ops.op_rs3_list()` | none; extra arguments are ignored | the inner `GET /list` text, such as `[{"k" : "v"}]`, sorted by key in byte order; `[]` when the store is empty | only after a nested host fault (see Errors) |
-| `Deno.core.opSync("rs3_get", key)` | `Deno.core.ops.op_rs3_get(key)` | the key, coerced to a string | the value | the key is missing: `Error` with message `key not found: <key>` (legacy: the server panicked); after a nested host fault: `Error: internal error` (see Errors) |
-| `Deno.core.opSync("rs3_insert", json)` | `Deno.core.ops.op_rs3_insert(json)` | a JSON object whose values are all strings, passed as a string | the compact echo, such as `{"k":"v"}` | malformed JSON: `TypeError` whose message starts with `malformed JSON:`; wrong shape: `TypeError` whose message starts with `invalid input:`; nothing is written on error; after a nested host fault: `Error: internal error` (see Errors) |
-| `Deno.core.opSync("rs3_delete", key)` | `Deno.core.ops.op_rs3_delete(key)` | the key | the value the key held | the key is missing: `Error` with message `key not found: <key>`; after a nested host fault: `Error: internal error` (see Errors) |
+| `Deno.core.opSync("rs3_list", "")` | `Deno.core.ops.op_rs3_list()` | none; extra arguments are ignored | the inner `GET /list` text, such as `[{"k" : "v"}]`, sorted by key in byte order; `[]` when the store is empty | after a nested host fault: `Error: internal error` (see Errors); after the depth limit stopped the PATCH: the same depth error; after the timeout: returns an empty string and touches nothing (see Errors) |
+| `Deno.core.opSync("rs3_get", key)` | `Deno.core.ops.op_rs3_get(key)` | the key, coerced to a string | the value | the key is missing: `Error` with message `key not found: <key>` (legacy: the server panicked); after a nested host fault: `Error: internal error` (see Errors); after the depth limit stopped the PATCH: the same depth error; after the timeout: returns an empty string and touches nothing (see Errors) |
+| `Deno.core.opSync("rs3_insert", json)` | `Deno.core.ops.op_rs3_insert(json)` | a JSON object whose values are all strings, passed as a string | the compact echo, such as `{"k":"v"}` | malformed JSON: `TypeError` whose message starts with `malformed JSON:`; wrong shape: `TypeError` whose message starts with `invalid input:`; nothing is written on error; after a nested host fault: `Error: internal error` (see Errors); after the depth limit stopped the PATCH: the same depth error; after the timeout: returns an empty string and touches nothing (see Errors) |
+| `Deno.core.opSync("rs3_delete", key)` | `Deno.core.ops.op_rs3_delete(key)` | the key | the value the key held | the key is missing: `Error` with message `key not found: <key>`; after a nested host fault: `Error: internal error` (see Errors); after the depth limit stopped the PATCH: the same depth error; after the timeout: returns an empty string and touches nothing (see Errors) |
 | `Deno.core.opSync("rs3_patch", key)` | `Deno.core.ops.op_rs3_patch(key)` | the key | `String(completion value)` of that key's script, run in a fresh nested runtime | the key is missing; the nested script fails, rethrown as `Error` with the nested message minus its leading `Uncaught `; the calling script used up so much stack that the nested runtime cannot start, thrown as `Error` with the message `RangeError: not enough stack to start a nested script` (a script error, 422 `js_error` when uncaught); the nested runtime hits a host fault, thrown as `Error: internal error`; the whole PATCH then answers 500 even if the script catches it, and every later op throws the same error; the call would nest deeper than the depth limit (4 scripts, counting the PATCHed key), thrown as `Error` with the message `PATCH nesting depth limit (4) exceeded: <key chain>` before the key is read; the whole PATCH then answers 422 `js_depth_limit` even if the script catches it. After the execution timeout it returns an empty string and runs nothing; the whole PATCH answers 504 `js_timeout` |
 
 The legacy `Deno.core.opSync` function no longer exists either, and calling it
@@ -100,7 +102,9 @@ table is the migration path.
 - **Timeout.** A PATCH whose scripts run longer than 5000 ms is terminated.
   Nothing is thrown that the script could catch. From then on every op returns
   an empty string and writes nothing, and the whole PATCH answers 504
-  `js_timeout` (see PATCH results). Store writes made before the stop stay.
+  `js_timeout` (see PATCH results). An object or symbol argument still throws
+  its `TypeError`, because arguments are converted before the timeout is
+  checked. Store writes made before the stop stay.
 
 ## PATCH results
 
@@ -196,20 +200,27 @@ and the depth limit wins over the script's own error (422 `js_error`).
 
 - Scripts run in bare deno_core. `fetch`, `require` and `setTimeout` are
   undefined, and there is no file or network access.
-- `Deno.core.print(text)` still works. It writes `text` unchanged to the
-  server's stdout, not to the HTTP response, so anything a script prints ends
-  up in the server's output. `Deno.core.print(text, true)` writes to the
-  server's stderr instead. There rs3 escapes the text and writes one line per
-  call, prefixed with `js stderr: ` (for example `js stderr: "a\nb"`), so a
-  script cannot fake server log lines. Treat everything a script prints, on
-  either stream, as untrusted. Error messages and stack traces of failed
-  scripts are logged to stderr in the same escaped form.
+- `Deno.core.print(text)` still works. It writes `text` unchanged (raw,
+  unescaped) to the server's stdout, not to the HTTP response. A script can
+  therefore print anything there, including text that looks like rs3's own
+  output such as the startup banner; under systemd each line becomes a journal
+  entry. `Deno.core.print(text, true)` writes to the server's stderr instead.
+  There rs3 escapes the text and writes one line per call, prefixed with
+  `js stderr: ` (for example `js stderr: "a\nb"`), so a script cannot fake
+  rs3's stderr lines. Treat everything a script prints, on either stream, as
+  untrusted. Error messages and stack traces of failed scripts are logged to
+  stderr in the same escaped form. One exception: when a nested
+  `op_rs3_patch` cannot start for lack of stack, V8 itself prints an
+  unprefixed `Uncaught RangeError: Maximum call stack size exceeded` line to
+  stdout, once per failed start.
 - `Deno.core.ops.op_panic` is disabled and throws `Error: op is disabled`,
   because a panic inside an op would abort the whole server. Uncaught, it
   gives a 422 with the message `Uncaught Error: op is disabled`.
-- **Nesting depth limit: 4.** At most 4 scripts run in one PATCH chain,
+- **Nesting depth limit: 4.** The nesting depth is at most 4 scripts,
   counting the PATCHed key (`max_patch_depth` in `JsSettings`), so a script
-  may nest `op_rs3_patch` three times. The next `op_rs3_patch` is refused
+  may nest `op_rs3_patch` three times. Sibling `op_rs3_patch` calls at the
+  same level are not counted; only the timeout bounds them. The next nested
+  `op_rs3_patch` is refused
   before the key is read. The thrown `Error` and the 422 `js_depth_limit` body
   carry the key chain, for example
   `PATCH nesting depth limit (4) exceeded: a -> b -> a -> b -> a`. It is a hard
@@ -220,9 +231,12 @@ and the depth limit wins over the script's own error (422 `js_error`).
   (`timeout_ms` in `JsSettings`), counted from the moment a JS worker picks
   the request up. Time spent waiting in the queue does not count. After that
   the script, nested scripts included, is terminated, every op returns an
-  empty string and writes nothing, and the answer is 504 `js_timeout`. Other
-  routes and other PATCH requests keep being answered meanwhile, and the
-  worker serves the next request normally afterwards. A stall inside the host
+  empty string and writes nothing, and the answer is 504 `js_timeout`. An
+  object or symbol argument still throws its `TypeError`, because arguments
+  are converted before the timeout is checked. Other routes keep being
+  answered, and other PATCH requests too while a JS worker is free (there is
+  one worker per available CPU); otherwise they wait in the queue. The worker
+  serves the next request normally afterwards. A stall inside the host
   rather than in JavaScript, such as a stdout pipe that nobody drains, cannot
   be terminated: a backstop answers 504 2 s later (7000 ms after pickup), but
   that worker stays busy until the stall ends.
