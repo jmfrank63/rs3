@@ -223,6 +223,31 @@ pub(crate) mod tests {
         );
     }
 
+    /// The `js_depth_limit` body for the default limit of 4 and `chain`.
+    fn depth_body(chain: &str) -> serde_json::Value {
+        serde_json::json!({
+            "error": "js_depth_limit",
+            "message": format!("PATCH nesting depth limit (4) exceeded: {chain}")
+        })
+    }
+
+    #[actix_web::test]
+    async fn depth_limit_finite_chain_is_422() {
+        // Finite and acyclic (D-11): without a limit this answers 200 "6".
+        let pairs = [
+            ("k1", "Deno.core.ops.op_rs3_patch('k2')"),
+            ("k2", "Deno.core.ops.op_rs3_patch('k3')"),
+            ("k3", "Deno.core.ops.op_rs3_patch('k4')"),
+            ("k4", "Deno.core.ops.op_rs3_patch('k5')"),
+            ("k5", "Deno.core.ops.op_rs3_patch('k6')"),
+            ("k6", "6"),
+        ];
+        let resp = patch_seeded(&pairs, "k1").await;
+        let body =
+            assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_depth_limit").await;
+        assert_eq!(body, depth_body("k1 -> k2 -> k3 -> k4 -> k5"));
+    }
+
     #[actix_web::test]
     async fn test_patch_stringify_exception_is_422_js_error() {
         let src = "({ toString() { throw new Error('x') } })";
