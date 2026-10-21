@@ -21,6 +21,8 @@ struct Envelope {
     job: Arc<JobState>,
     /// Names the job in the timeout log line.
     label: String,
+    /// Signalled when a worker picks the job up, which starts the backstop.
+    started: oneshot::Sender<()>,
     reply: oneshot::Sender<Reply>,
 }
 
@@ -58,6 +60,11 @@ enum Cmd {
 /// the job is still armed. A termination that lands while an op builds a
 /// thrown error is cancelled by deno_core, so one shot is not enough.
 const REFIRE: Duration = Duration::from_millis(50);
+
+/// How long past `timeout_ms` a caller waits for a worker's reply before the
+/// backstop answers `ExecError::Timeout` on its own. It covers stalls inside
+/// Rust code, which V8 termination cannot interrupt.
+const BACKSTOP_GRACE: Duration = Duration::from_secs(2);
 
 /// A worker's watchdog. Idle, it waits for `Arm`. Armed, it waits until the
 /// deadline, then fires the job (time it out, terminate every registered
@@ -180,27 +187,55 @@ impl JsExecutor {
     /// registered in `job` and the job answers `ExecError::Timeout`. A
     /// panicking job answers `ExecError::Internal`; a closed pool or a dropped
     /// reply answers `ExecError::Unavailable`.
+    ///
+    /// Backstop: once a worker picked the job up, the caller waits at most
+    /// `timeout_ms` plus `BACKSTOP_GRACE` for the reply. Past that it logs one
+    /// line and answers `ExecError::Timeout` itself, for a worker stuck inside
+    /// Rust code. The worker still finishes the job, its reply is dropped, and
+    /// it then serves the next job. Queue wait is not timed: a deadline counted
+    /// from enqueue would answer 504 for queued jobs that still run, and
+    /// write, later.
     pub(crate) async fn run_job<F>(&self, job: Arc<JobState>, label: String, f: F) -> Reply
     where
         F: FnOnce() -> Reply + Send + 'static,
     {
+        let (started, started_rx) = oneshot::channel();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Envelope {
                 run: Box::new(f),
                 job,
                 label,
+                started,
                 reply,
             })
             .await
             .map_err(|_| ExecError::Unavailable)?;
-        reply_rx.await.map_err(|_| ExecError::Unavailable)?
+        // An Err means the envelope was dropped unrun; the reply then fails
+        // too and answers Unavailable below.
+        let _ = started_rx.await;
+        let limit = Duration::from_millis(self.limits.timeout_ms).saturating_add(BACKSTOP_GRACE);
+        match tokio::time::timeout(limit, reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(ExecError::Unavailable),
+            Err(_) => {
+                eprintln!(
+                    "error: JS worker did not reply within {} ms",
+                    limit.as_millis()
+                );
+                Err(ExecError::Timeout {
+                    limit_ms: self.limits.timeout_ms,
+                })
+            }
+        }
     }
 
     /// Run `job` on a JS worker with its tokio runtime entered and return its
     /// result. Waits while the queue is full. Every job is armed, so a closure
     /// that runs longer than `timeout_ms` answers `ExecError::Timeout` (it has
-    /// no runtimes in its job's termination group, so nothing is terminated).
+    /// no runtimes in its job's termination group, so nothing is terminated),
+    /// and the backstop of `run_job`, counted from pickup, answers for a
+    /// closure that never returns in time.
     /// A panicking job answers `ExecError::Internal`; a closed pool answers
     /// `ExecError::Unavailable`.
     pub async fn run<F>(&self, job: F) -> Result<String, ExecError>
@@ -269,7 +304,8 @@ fn classify(job: &JobState, timed_out: bool, timeout_ms: u64, result: Reply) -> 
 /// with the tokio runtime entered, so a panicking job cannot kill the worker
 /// and every JsRuntime is created inside a tokio context.
 ///
-/// Per job the worker arms its watchdog (deadline = pickup + `timeout_ms`),
+/// Per job the worker signals the caller that the job started (which starts
+/// the caller's backstop), arms its watchdog (deadline = pickup + `timeout_ms`),
 /// runs the job, marks it finished (`JobState::finish`, which reports whether
 /// the watchdog fired first), disarms the watchdog before taking the next job,
 /// logs a timeout once through the job's sink, and replies with the result as
@@ -289,8 +325,11 @@ fn worker_loop(
             run,
             job,
             label,
+            started,
             reply,
         } = env;
+        // Starts the caller's backstop; the caller may have gone away.
+        let _ = started.send(());
         // A deadline past what Instant can hold is no deadline at all.
         if let Some(deadline) = Instant::now().checked_add(timeout)
             && watchdog.send(Cmd::Arm(Arc::clone(&job), deadline)).is_err()
@@ -442,6 +481,7 @@ mod tests {
                 run: Box::new(|| Ok("job 1".to_owned())),
                 job: Arc::default(),
                 label: "job 1".to_owned(),
+                started: oneshot::channel().0,
                 reply: reply1,
             });
             assert!(queued.is_ok(), "the queue slot was not free");
@@ -451,6 +491,7 @@ mod tests {
                 run: Box::new(|| Ok(String::new())),
                 job: Arc::default(),
                 label: "probe".to_owned(),
+                started: oneshot::channel().0,
                 reply: probe,
             });
             assert!(

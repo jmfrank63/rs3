@@ -412,6 +412,82 @@ pub(crate) mod tests {
     }
 
     #[actix_web::test]
+    async fn timeout_does_not_block_other_requests() {
+        use std::time::{Duration, Instant};
+        let state = timeout_state(2, 1000, &[("loop", "while(true){}"), ("m", "6*20")]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let start = Instant::now();
+        let looping = async {
+            let (code, body) = send(&app, patch_req("loop").to_request()).await;
+            (code, body, start.elapsed())
+        };
+        let others = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let (get_code, get_body) = send(&app, get_req("/").to_request()).await;
+            let get_at = start.elapsed();
+            let (m_code, m_body) = send(&app, patch_req("m").to_request()).await;
+            (get_code, get_body, get_at, m_code, m_body, start.elapsed())
+        };
+        let ((loop_code, loop_body, loop_at), (get_code, get_body, get_at, m_code, m_body, m_at)) =
+            tokio::join!(looping, others);
+        assert_eq!(get_code, StatusCode::OK);
+        assert_eq!(get_body, web::Bytes::from_static(br#""Welcome to rs3""#));
+        assert_eq!(m_code, StatusCode::OK);
+        assert_eq!(m_body, web::Bytes::from_static(br#""120""#));
+        assert!(get_at < loop_at, "GET / at {get_at:?}, loop at {loop_at:?}");
+        assert!(m_at < loop_at, "PATCH m at {m_at:?}, loop at {loop_at:?}");
+        assert!(m_at < Duration::from_millis(1000), "PATCH m at {m_at:?}");
+        assert_eq!(loop_code, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(loop_body, timeout_body(1000));
+        assert!(
+            loop_at >= Duration::from_millis(1000),
+            "loop at {loop_at:?}"
+        );
+    }
+
+    #[actix_web::test]
+    async fn timeout_queued_patch_runs_once_the_worker_frees_up() {
+        use std::time::{Duration, Instant};
+        let state = timeout_state(1, 500, &[("loop", "while(true){}"), ("m", "6*20")]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let start = Instant::now();
+        let looping = async {
+            let (code, body) = send(&app, patch_req("loop").to_request()).await;
+            (code, body, start.elapsed())
+        };
+        let queued = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let (code, body) = send(&app, patch_req("m").to_request()).await;
+            (code, body, start.elapsed())
+        };
+        let ((loop_code, loop_body, loop_at), (m_code, m_body, m_at)) =
+            tokio::join!(looping, queued);
+        assert_eq!(loop_code, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(loop_body, timeout_body(500));
+        // Queue wait is not counted against the queued PATCH's own timeout.
+        assert_eq!(m_code, StatusCode::OK);
+        assert_eq!(m_body, web::Bytes::from_static(br#""120""#));
+        assert!(m_at >= loop_at, "PATCH m at {m_at:?}, loop at {loop_at:?}");
+        assert!(m_at >= Duration::from_millis(500), "PATCH m at {m_at:?}");
+    }
+
+    #[actix_web::test]
+    async fn timeout_nested_loop_is_504() {
+        let state = timeout_state(
+            1,
+            300,
+            &[
+                ("outer", "Deno.core.ops.op_rs3_patch('loop')"),
+                ("loop", "while(true){}"),
+            ],
+        );
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let resp = atest::call_service(&app, patch_req("outer").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(atest::read_body(resp).await, timeout_body(300));
+    }
+
+    #[actix_web::test]
     async fn test_patch_stringify_exception_is_422_js_error() {
         let src = "({ toString() { throw new Error('x') } })";
         let resp = patch_seeded(&[("t", src)], "t").await;
