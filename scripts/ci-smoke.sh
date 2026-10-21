@@ -18,12 +18,18 @@
 #     PATCH /key/m          -> 200 "120" before the loop answers (only when nproc >= 2, because
 #                              the pool has one JS worker per core; skipped with a note otherwise)
 #   PATCH /key/loop         -> 504 {"error":"js_timeout","message":"script exceeded the 5000 ms
-#                              execution limit"}, at least 4900 ms and under 9000 ms after it was sent
+#                              execution limit"}, at least 4900 ms and under 6500 ms after it was sent,
+#                              answered by the watchdog: the server log holds the worker's line
+#                              'error: js timeout in "loop" after 5000 ms' and no backstop line
+#                              ('JS worker did not reply')
 #   PATCH /key/m            -> 200 "120" after the timeout, and the server process is still alive
 # The release binary uses the default JS limits: nesting depth 4 and a 5000 ms timeout. Both are
 # set in code; there is no environment knob, so the timeout check waits about 5 s. This smoke is
 # the only place where the timeout watchdog terminates a script under the protected V8 platform
-# on the x86_64 runner (debug test builds use the unprotected platform).
+# on the x86_64 runner (debug test builds use the unprotected platform). The backstop answers the
+# same 504 body at about 7000 ms (timeout + 2 s grace) when the watchdog fails to terminate the
+# script, so the window ends below it, and the log must show that the worker itself returned
+# the timed-out job (it writes its timeout line only then), which proves that worker was freed.
 # A server that dies fails the smoke with its exit status, whether it dies during startup or
 # during a request. Status 139 (SIGSEGV) is the x86_64 PKU symptom of the protected V8
 # platform. V8 isolates are created lazily on the JS workers, so the crash shows up at the
@@ -188,8 +194,15 @@ LOOP_CODE="${loop_raw##*$'\n'}"
 LOOP_BODY="${loop_raw%$'\n'*}"
 [[ "$LOOP_CODE" == "504" && "$LOOP_BODY" == '{"error":"js_timeout","message":"script exceeded the 5000 ms execution limit"}' ]] \
   || fail "PATCH /key/loop -> ${LOOP_CODE} ${LOOP_BODY} after ${LOOP_MS} ms"
-(( LOOP_MS >= 4900 && LOOP_MS < 9000 )) || fail "PATCH /key/loop -> 504 after ${LOOP_MS} ms (expected 4900 to 8999 ms)"
-echo "ci-smoke: ok   PATCH /key/loop -> 504 js_timeout after ${LOOP_MS} ms"
+(( LOOP_MS >= 4900 && LOOP_MS < 6500 )) \
+  || fail "PATCH /key/loop -> 504 after ${LOOP_MS} ms (expected 4900 to 6499 ms; about 7000 ms means the backstop answered, not the watchdog)"
+# The worker writes its timeout line only once the terminated job returned, before it replies.
+grep -qF 'error: js timeout in "loop" after 5000 ms' "$LOG" \
+  || fail "PATCH /key/loop -> 504, but the worker did not log the timeout: the watchdog did not terminate the script"
+if grep -qF 'JS worker did not reply' "$LOG"; then
+  fail "the backstop answered PATCH /key/loop; the watchdog did not terminate the script"
+fi
+echo "ci-smoke: ok   PATCH /key/loop -> 504 js_timeout after ${LOOP_MS} ms, terminated by the watchdog"
 
 req PATCH /key/m
 [[ "$CODE" == "200" && "$BODY" == '"120"' ]] || fail "PATCH /key/m after the timeout -> ${CODE} ${BODY}"
