@@ -90,6 +90,47 @@ run JavaScript. Keep the loopback default (`RS3_HOST=127.0.0.1`), or put
 something you control in front of it, such as a reverse proxy with
 authentication and TLS. TLS is not built in.
 
+### Troubleshooting
+
+The unit uses `Type=exec`, so `systemctl enable --now rs3` reports success as
+soon as `/usr/bin/env` has started, even when rs3 then exits on bad
+configuration or a busy port. The check is `systemctl status rs3` plus the
+curl from the Check step.
+
+On a startup failure rs3 writes a single `error:` line, tagged `rs3`, and
+exits 1. `journalctl -u rs3` shows it. For example, an empty `RS3_PORT=`
+gives:
+
+```text
+rs3[<pid>]: error: invalid configuration: invalid type: string "", expected an integer for key `server.port` in the environment
+```
+
+If `/etc/rs3/rs3.conf` is missing, systemd itself logs:
+
+```text
+Failed to load environment files: No such file or directory
+```
+
+After 5 failed starts within 60 s the unit stops retrying, logs the line
+below and stays failed:
+
+```text
+Start request repeated too quickly.
+```
+
+Fix the file, then flush the restart counter and start rs3 again:
+
+```sh
+sudo systemctl reset-failed rs3
+sudo systemctl restart rs3
+```
+
+The systemd.unit documentation (systemd 255) says: "systemctl reset-failed
+will cause the restart rate counter for a service to be flushed".
+
+A crash (for example heap exhaustion, which has no limit yet) restarts rs3
+after 2 s with an empty store. Repeated crashes hit the same start limit.
+
 ## License
 
 rs3 is released under the MIT license; see `LICENSE`.
