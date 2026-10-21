@@ -343,11 +343,19 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
 /// Text for stderr is written as one Debug-escaped line per call, prefixed with
 /// `js stderr: `, so a script cannot forge server log lines. Never registered
 /// under its own name; the signature must match `op_print` exactly.
+///
+/// Both streams write and flush through `write_all_retrying` and
+/// `flush_retrying`, so a non-blocking stdout or stderr is retried like
+/// upstream instead of failing the print. A pipe nobody drains therefore stalls
+/// the worker: the client still gets the backstop 504, but the worker stays
+/// busy until the stall ends.
 #[op2(fast)]
 fn op_rs3_print(#[string] msg: &str, is_err: bool) -> Result<(), std::io::Error> {
-    use std::io::Write;
     if is_err {
-        writeln!(std::io::stderr().lock(), "js stderr: {msg:?}")
+        let line = format!("js stderr: {msg:?}\n");
+        let mut err = std::io::stderr().lock();
+        write_all_retrying(&mut err, line.as_bytes())?;
+        flush_retrying(&mut err)
     } else {
         let mut out = std::io::stdout().lock();
         write_all_retrying(&mut out, msg.as_bytes())?;
@@ -355,14 +363,35 @@ fn op_rs3_print(#[string] msg: &str, is_err: bool) -> Result<(), std::io::Error>
     }
 }
 
-/// Writes all of `bytes` to `w`.
-fn write_all_retrying(w: &mut impl std::io::Write, bytes: &[u8]) -> std::io::Result<()> {
-    w.write_all(bytes)
+/// Writes all of `bytes` to `w` like deno_core's `op_print`: `Interrupted`
+/// retries, `WouldBlock` yields the thread and retries, any other error is
+/// returned. A write that accepts zero bytes is a `WriteZero` error instead of
+/// a spin.
+fn write_all_retrying(w: &mut impl std::io::Write, mut bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+    while !bytes.is_empty() {
+        match w.write(bytes) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(n) => bytes = bytes.get(n..).unwrap_or_default(),
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::yield_now(),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
-/// Flushes `w`.
+/// Flushes `w` with the same retry rule as `write_all_retrying`; never unwraps.
 fn flush_retrying(w: &mut impl std::io::Write) -> std::io::Result<()> {
-    w.flush()
+    use std::io::ErrorKind;
+    loop {
+        match w.flush() {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::yield_now(),
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 deno_core::extension!(
@@ -1107,6 +1136,35 @@ mod tests {
         assert!(flushed.is_ok(), "flush gave up: {flushed:?}");
         assert_eq!(sink.written, b"hello, world");
         assert_eq!(sink.flush_calls, 2);
+    }
+
+    #[test]
+    fn print_gives_up_on_other_errors() {
+        use std::io::ErrorKind::{BrokenPipe, WriteZero};
+        let mut broken = FlakySink::new(&[BrokenPipe], &[]);
+        let err = super::write_all_retrying(&mut broken, b"x").map_err(|e| e.kind());
+        assert_eq!(err, Err(BrokenPipe));
+        assert!(broken.written.is_empty());
+        let mut broken_flush = FlakySink::new(&[], &[BrokenPipe]);
+        let err = super::flush_retrying(&mut broken_flush).map_err(|e| e.kind());
+        assert_eq!(err, Err(BrokenPipe));
+        assert_eq!(broken_flush.flush_calls, 1);
+        let mut full = ZeroSink;
+        let err = super::write_all_retrying(&mut full, b"x").map_err(|e| e.kind());
+        assert_eq!(err, Err(WriteZero));
+    }
+
+    /// A sink that accepts nothing: every write returns Ok(0).
+    struct ZeroSink;
+
+    impl std::io::Write for ZeroSink {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]

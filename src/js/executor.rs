@@ -48,6 +48,17 @@ impl Limits {
     }
 }
 
+/// The smallest worker stack: smaller configured values are raised to it. In
+/// the stack spike a 512 KiB stack aborted the process at depth 4, 1 MiB was
+/// the minimum that held, and 2 MiB held up to depth 64 (the depth clamp).
+const MIN_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+/// The stack each worker thread gets: `settings.stack_bytes`, but at least
+/// `MIN_STACK_BYTES`.
+fn effective_stack_bytes(settings: &JsSettings) -> usize {
+    settings.stack_bytes.max(MIN_STACK_BYTES)
+}
+
 /// A command from a worker to its watchdog thread.
 enum Cmd {
     /// Watch this job: time it out at the deadline.
@@ -111,7 +122,8 @@ impl JsExecutor {
     /// `settings.stack_bytes` of stack, each running its own tokio
     /// current_thread runtime, and each spawning its own watchdog thread named
     /// `rs3-js-{i}-wd`. Zero workers or zero queue capacity are clamped to 1,
-    /// `max_patch_depth` is clamped to 1..=64 and `timeout_ms` to at least 1.
+    /// `stack_bytes` to at least `MIN_STACK_BYTES` (2 MiB, see there),
+    /// `max_patch_depth` to 1..=64 and `timeout_ms` to at least 1.
     /// Returns once every worker has started its watchdog and built its
     /// runtime, or the first spawn or runtime-build error.
     pub fn start(settings: &JsSettings) -> std::io::Result<JsExecutor> {
@@ -128,7 +140,7 @@ impl JsExecutor {
             let wd_name = format!("{name}-wd");
             std::thread::Builder::new()
                 .name(name.clone())
-                .stack_size(settings.stack_bytes)
+                .stack_size(effective_stack_bytes(settings))
                 .spawn(move || {
                     // Spawned from the worker, so the watchdog descends from the
                     // thread that initialised V8, like the worker itself.
@@ -300,9 +312,13 @@ fn classify(job: &JobState, timed_out: bool, timeout_ms: u64, result: Reply) -> 
     }
 }
 
-/// Take jobs until every sender is dropped. Each job runs under catch_unwind
-/// with the tokio runtime entered, so a panicking job cannot kill the worker
-/// and every JsRuntime is created inside a tokio context.
+/// Take jobs until every sender is dropped. Each job runs with the tokio
+/// runtime entered, so every JsRuntime is created inside a tokio context, and
+/// under catch_unwind, which catches panics in job code that runs outside V8
+/// callbacks and answers them as an internal error. A panic inside an op
+/// callback (any `op_rs3_*` op, including the nested runtime `op_rs3_patch`
+/// runs) unwinds across V8 frames and aborts the whole process; catch_unwind
+/// cannot stop that, which is why ops never panic (ROBU-04).
 ///
 /// Per job the worker signals the caller that the job started (which starts
 /// the caller's backstop), arms its watchdog (deadline = pickup + `timeout_ms`),
@@ -366,7 +382,7 @@ mod tests {
     use tokio::sync::mpsc::error::TrySendError;
     use tokio::sync::oneshot;
 
-    use super::{Envelope, JsExecutor, Limits, classify};
+    use super::{Envelope, JsExecutor, Limits, MIN_STACK_BYTES, classify, effective_stack_bytes};
     use crate::js::{
         DepthStop, ExecError, JobState, JsSettings, block_on, dedicated_executor, init_platform,
         test_executor,
@@ -544,6 +560,22 @@ mod tests {
             block_on(JsExecutor::closed().execute(Store::new(), "t".into(), "1".into())),
             Err(ExecError::Unavailable)
         );
+    }
+
+    #[test]
+    fn stack_bytes_are_clamped() {
+        // Pure: computes the clamp, never spawns a thread with a small stack.
+        let with = |stack_bytes| JsSettings {
+            stack_bytes,
+            ..JsSettings::default()
+        };
+        assert_eq!(MIN_STACK_BYTES, 2 * 1024 * 1024);
+        assert_eq!(effective_stack_bytes(&with(0)), 2 * 1024 * 1024);
+        assert_eq!(
+            effective_stack_bytes(&with(2 * 1024 * 1024)),
+            2 * 1024 * 1024
+        );
+        assert_eq!(effective_stack_bytes(&with(MIB16)), MIB16);
     }
 
     #[test]
@@ -802,6 +834,36 @@ mod tests {
                 "max_patch_depth {given}"
             );
         }
+    }
+
+    #[test]
+    fn minimum_stack_runs_the_max_depth_chain() {
+        // stack_bytes 0 is raised to the 2 MiB floor, which must still run the
+        // default maximum depth (test, k1, k2, k3) with a leaf that recurses
+        // until V8's stack guard throws.
+        let exec = dedicated_executor(JsSettings {
+            workers: 1,
+            queue_capacity: 4,
+            stack_bytes: 0,
+            ..JsSettings::default()
+        });
+        let store = Store::new();
+        store.insert("k1".into(), "Deno.core.ops.op_rs3_patch('k2')".into());
+        store.insert("k2".into(), "Deno.core.ops.op_rs3_patch('k3')".into());
+        store.insert(
+            "k3".into(),
+            "function f(n) { return f(n + 1) + 1; } \
+             try { f(0); 'no throw' } catch (e) { e instanceof RangeError }"
+                .into(),
+        );
+        assert_eq!(
+            block_on(exec.execute(
+                store,
+                "test".into(),
+                "Deno.core.ops.op_rs3_patch('k1')".into()
+            )),
+            Ok("true".to_owned())
+        );
     }
 
     #[test]

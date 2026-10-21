@@ -739,6 +739,66 @@ pub(crate) mod tests {
         assert_eq!(body, web::Bytes::from_static(br#""1111""#));
     }
 
+    const FAC_TXT: &str = include_str!("../../requests/fac.txt");
+    const SUM_TXT: &str = include_str!("../../requests/sum.txt");
+    const BIN_TXT: &str = include_str!("../../requests/bin.txt");
+    const STORE_TXT: &str = include_str!("../../requests/store.txt");
+
+    /// `POST /insert` with a shipped requests/*.txt payload, as written.
+    fn insert_txt_req(payload: &'static str) -> atest::TestRequest {
+        atest::TestRequest::post()
+            .insert_header(("Content-Type", "application/json"))
+            .set_payload(payload)
+            .uri("/insert")
+    }
+
+    /// Insert `payload` through `POST /insert` into a state seeded with
+    /// `inputs`, then PATCH `key`; returns the app and the PATCH answer.
+    async fn patch_txt_payload(
+        inputs: &[(&str, &str)],
+        payload: &'static str,
+        key: &str,
+    ) -> (StatusCode, web::Bytes, AppState) {
+        let state = seeded(inputs);
+        let app = atest::init_service(App::new().configure(configure(state.clone()))).await;
+        let (code, body) = send(&app, insert_txt_req(payload).to_request()).await;
+        assert_eq!(code, StatusCode::OK, "POST /insert {key}: {body:?}");
+        let (code, body) = send(&app, patch_req(key).to_request()).await;
+        (code, body, state)
+    }
+
+    #[actix_web::test]
+    async fn txt_payload_fac_is_120() {
+        let (code, body, _) = patch_txt_payload(&[("num", "5")], FAC_TXT, "fac").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""120""#));
+    }
+
+    #[actix_web::test]
+    async fn txt_payload_sum_is_10() {
+        let (code, body, _) = patch_txt_payload(&[("numbers", "1 2 3 4")], SUM_TXT, "sum").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""10""#));
+    }
+
+    #[actix_web::test]
+    async fn txt_payload_bin_is_tree_json() {
+        let (code, body, _) = patch_txt_payload(&[("tree", "5 3 8")], BIN_TXT, "bin").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(TREE_BODY));
+    }
+
+    #[actix_web::test]
+    async fn txt_payload_store_writes_res() {
+        let (code, body, state) = patch_txt_payload(&[], STORE_TXT, "store").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""{\"res\":\"1111\"}""#));
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let (code, body) = send(&app, get_req("/key/res").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""1111""#));
+    }
+
     #[actix_web::test]
     async fn fixtures_share_one_store_in_any_order() {
         // sum.js and bin.js both declare `numbers` and `arr` at top level; every

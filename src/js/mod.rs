@@ -217,7 +217,9 @@ pub struct JsSettings {
     pub workers: usize,
     /// Jobs that can wait in the queue before submitters wait too.
     pub queue_capacity: usize,
-    /// Stack size of each worker thread in bytes.
+    /// Stack size of each worker thread in bytes. The executor raises smaller
+    /// values to 2 MiB, the floor that held a maximum-depth PATCH chain (64)
+    /// in the stack spike.
     pub stack_bytes: usize,
     /// How many PATCH levels one job may run, counting the PATCHed key as
     /// level 1: with 4, a script may nest `op_rs3_patch` three times, and the
