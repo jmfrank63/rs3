@@ -1,0 +1,13 @@
+{
+  "command": "RUSTC_BOOTSTRAP=1 target/debug/deps/rs3-99cb7436f4311bd2 js::executor::tests::backstop_answers_timeout_when_the_worker_never_replies --exact -Z unstable-options --format junit",
+  "exitCode": 101,
+  "output": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"test\" package=\"test\" id=\"0\" errors=\"0\" failures=\"1\" tests=\"1\" skipped=\"0\" ><testcase classname=\"js::executor::tests\" name=\"backstop_answers_timeout_when_the_worker_never_replies\" time=\"0\"><failure type=\"assert\"/><system-out><![CDATA[error: js timeout in \"job\" after 100 ms]]>&#xA;&#xA;<![CDATA[thread 'js::executor::tests::backstop_answers_timeout_when_the_worker_never_replies' (3810075) panicked at src/js/executor.rs:689:9:]]>&#xA;<![CDATA[2.400415085s]]>&#xA;<![CDATA[note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace]]>&#xA;<![CDATA[]]></system-out></testcase><system-out/><system-err/></testsuite></testsuites>\n",
+  "targetTest": "js::executor::tests#backstop_answers_timeout_when_the_worker_never_replies",
+  "targetFile": "src/js/executor.rs",
+  "expected": "On a dedicated executor (workers 1, timeout_ms 100), a run() closure that sleeps 2400 ms in Rust answers Err(ExecError::Timeout { limit_ms: 100 }) from the D-07 backstop at least 2100 ms and less than 2400 ms after the call; the next run() then answers Ok(\"next\")",
+  "actual": "assertion failed at src/js/executor.rs:689 (elapsed about 2.40 s): the result was already Timeout (the watchdog fired at 100 ms and the worker classified by flag), but the caller waited for the worker's reply until the Rust sleep ended, because run_job has no backstop yet",
+  "reportPath": ".planning/phases/05-js-execution-limits/tdd-evidence/05-02-task3-red.junit.xml",
+  "runStartedAt": "2026-10-21T00:32:23Z",
+  "reportModifiedAt": "2026-10-21T00:32:25.930Z",
+  "semanticAssessment": "Target js::executor::tests::backstop_answers_timeout_when_the_worker_never_replies compiled, executed and failed on its planned elapsed assertion: the Timeout result assertion passed, and the elapsed time was about 2.40 s instead of under 2.4 s because nothing cuts off a caller whose worker is stuck in Rust (terminate_execution cannot interrupt a Rust sleep). The stall is bounded at 2.4 s by construction. No build, load or fixture failure; exactly one target failure."
+}

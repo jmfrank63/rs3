@@ -676,6 +676,28 @@ mod tests {
     }
 
     #[test]
+    fn backstop_answers_timeout_when_the_worker_never_replies() {
+        // A stall inside Rust that terminate_execution cannot interrupt.
+        let exec = timeout_exec(100);
+        let start = std::time::Instant::now();
+        let r = block_on(exec.run(|| {
+            std::thread::sleep(Duration::from_millis(2400));
+            Ok("late".to_owned())
+        }));
+        let elapsed = start.elapsed();
+        assert_eq!(r, Err(ExecError::Timeout { limit_ms: 100 }));
+        assert!(
+            elapsed >= Duration::from_millis(2100) && elapsed < Duration::from_millis(2400),
+            "{elapsed:?}"
+        );
+        // The stalled worker finishes, drops its reply and serves the next job.
+        assert_eq!(
+            block_on(exec.run(|| Ok("next".to_owned()))),
+            Ok("next".to_owned())
+        );
+    }
+
+    #[test]
     fn default_settings_follow_d06() {
         let s = JsSettings::default();
         assert!(s.workers >= 1);
