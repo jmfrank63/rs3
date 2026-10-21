@@ -2,14 +2,15 @@
 //! injected `Store` only through `OpState`, never panic, and are free of
 //! actix-web. Once any level of a job has hit a host fault, every op of that
 //! job throws `Error: internal error` instead of touching the store.
+//! `op_rs3_patch` refuses to nest deeper than the job's `max_patch_depth`.
 use std::sync::Arc;
 #[cfg(test)]
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use deno_core::{FromV8, OpState, op2, v8};
 use deno_error::JsErrorBox;
 
+use super::{DepthStop, ExecError, JobState};
 use crate::store::{Store, StoreError, legacy};
 
 /// Per-job context the ops read from `OpState`.
@@ -19,10 +20,15 @@ pub struct ExecCtx {
     pub store: Store,
     /// How many `op_rs3_patch` levels deep this script runs (0 at the top).
     pub depth: u32,
-    /// Set when a nested runtime hit a host fault. Shared by every level of
-    /// one job, so the top level answers a host fault even if a script caught
+    /// The keys from the PATCHed key (`chain[0]`) down to the key this script
+    /// runs for, in call order. Names the refused chain in a depth stop.
+    pub(crate) chain: Vec<String>,
+    /// How many PATCH levels the job may run, counting the PATCHed key.
+    pub(crate) max_patch_depth: u32,
+    /// The job's shared state: host fault and depth stop. Shared by every
+    /// level of one job, so the executor sees a stop even if a script caught
     /// the error `op_rs3_patch` threw.
-    host_fault: Arc<AtomicBool>,
+    pub(crate) job: Arc<JobState>,
     /// Test hook: make runtime creation fail at this depth.
     #[cfg(test)]
     pub(crate) fail_runtime_at_depth: Option<u32>,
@@ -37,12 +43,15 @@ pub struct ExecCtx {
 }
 
 impl ExecCtx {
-    /// A top-level context for `store`.
-    pub fn new(store: Store) -> Self {
+    /// A top-level context for `store` running the script named `root`, the
+    /// first key of every chain, under `max_patch_depth`.
+    pub fn new(store: Store, job: Arc<JobState>, root: &str, max_patch_depth: u32) -> Self {
         Self {
             store,
             depth: 0,
-            host_fault: Arc::new(AtomicBool::new(false)),
+            chain: vec![root.to_owned()],
+            max_patch_depth,
+            job,
             #[cfg(test)]
             fail_runtime_at_depth: None,
             #[cfg(test)]
@@ -52,13 +61,18 @@ impl ExecCtx {
         }
     }
 
-    /// The context for a script run by `op_rs3_patch`: same store and host
-    /// fault flag, one level deeper. Phase 5 enforces a limit on the depth.
-    pub fn nested(&self) -> Self {
+    /// The context for the script `op_rs3_patch` runs for `key`: same store,
+    /// job and limit, one level deeper, with `key` appended to the chain.
+    /// `op_rs3_patch` checks `max_patch_depth` before it builds one.
+    pub fn nested(&self, key: &str) -> Self {
+        let mut chain = self.chain.clone();
+        chain.push(key.to_owned());
         Self {
             store: self.store.clone(),
             depth: self.depth + 1,
-            host_fault: Arc::clone(&self.host_fault),
+            chain,
+            max_patch_depth: self.max_patch_depth,
+            job: Arc::clone(&self.job),
             #[cfg(test)]
             fail_runtime_at_depth: self.fail_runtime_at_depth,
             #[cfg(test)]
@@ -70,12 +84,12 @@ impl ExecCtx {
 
     /// Record that a nested runtime hit a host fault during this job.
     pub(crate) fn note_host_fault(&self) {
-        self.host_fault.store(true, Ordering::SeqCst);
+        self.job.note_host_fault();
     }
 
     /// Whether any level of this job hit a host fault.
     pub(crate) fn host_fault(&self) -> bool {
-        self.host_fault.load(Ordering::SeqCst)
+        self.job.host_fault()
     }
 
     /// Write one error line for this job to stderr. The caller escapes any
@@ -133,6 +147,19 @@ fn internal_error() -> JsErrorBox {
     JsErrorBox::generic("internal error")
 }
 
+/// The error thrown into a script for a depth stop. Built from the
+/// `ExecError::DepthLimit` message, so the JS message and the 422 message
+/// come from one format.
+fn depth_error(stop: &DepthStop) -> JsErrorBox {
+    JsErrorBox::generic(
+        ExecError::DepthLimit {
+            limit: stop.limit,
+            chain: stop.chain.clone(),
+        }
+        .to_string(),
+    )
+}
+
 /// The job context, or `Error: internal error` once any level of this job has
 /// hit a host fault. The request already answers 500 at that point, so no op
 /// may read or change the store any more: writes made before the fault stay,
@@ -186,8 +213,12 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 }
 
 /// Runs the script stored under `key` in a fresh nested runtime on the same
-/// thread and returns `String(completion value)`. Throws
-/// `Error: key not found: <key>` when the key is missing, and an `Error` with
+/// thread and returns `String(completion value)`. When the job already runs
+/// `max_patch_depth` levels, it records a depth stop for the job, throws
+/// `Error: PATCH nesting depth limit (<limit>) exceeded: <chain>` and neither
+/// reads `key` nor creates a runtime; the request then answers 422
+/// js_depth_limit. Throws `Error: key not found: <key>` when the key is
+/// missing, and an `Error` with
 /// the nested exception message (one leading "Uncaught " removed) when the
 /// nested script fails. A host fault in the nested runtime (such as a runtime
 /// creation failure) is logged once, by the level where it happened, recorded
@@ -196,18 +227,41 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 /// it, and every later op of the job throws the same error.
 //
 // `reentrant` is mandatory: the nested runtime calls ops while this op is on
-// the stack, and debug builds abort without the flag. The depth is carried for
-// the Phase 5 limit. Until then a self-patching script is a known Phase 5 DoS
-// item and is never tested here.
+// the stack, and debug builds abort without the flag. The depth check runs
+// before the store read and before any runtime is created, so a self-patching
+// or cyclic script stops after `max_patch_depth` levels instead of nesting
+// runtimes until memory or the native stack runs out.
 #[op2(reentrant)]
 #[string]
 fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
     let StrArg(key) = key;
     // Clone the context out so no OpState borrow is held across the nested run.
     let ctx = live_ctx(state)?.clone();
+    // The chain holds every level so far, the PATCHed key being level 1, so the
+    // next level would exceed the limit once it already holds the limit.
+    if ctx.chain.len() >= ctx.max_patch_depth as usize {
+        let mut chain = ctx.chain.clone();
+        chain.push(key);
+        let (stop, newly_set) = ctx.job.stop_depth(DepthStop {
+            limit: ctx.max_patch_depth,
+            chain,
+        });
+        if newly_set {
+            // Debug-format the script-controlled keys so they cannot forge log lines.
+            ctx.log_error(format_args!(
+                "error: JS depth limit ({}) exceeded: {:?}",
+                stop.limit,
+                stop.chain.join(" -> ")
+            ));
+        }
+        return Err(depth_error(stop));
+    }
     let source = ctx.store.get(&key).map_err(to_js)?;
-    super::runtime::run_script(ctx.nested(), &key, source).map_err(|e| match e {
-        super::ExecError::Script { message } => JsErrorBox::generic(
+    super::runtime::run_script(ctx.nested(&key), &key, source).map_err(|e| match e {
+        // Nested runs never classify depth (the executor does that once), so
+        // this arm is unreachable today; it is listed so no wildcard is needed.
+        e @ ExecError::DepthLimit { .. } => JsErrorBox::generic(e.to_string()),
+        ExecError::Script { message } => JsErrorBox::generic(
             message
                 .strip_prefix("Uncaught ")
                 .unwrap_or(&message)
@@ -224,7 +278,7 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
                 // log lines. `Internal` already displays with a "JS host
                 // failure" prefix, so log its bare detail.
                 let detail = match other {
-                    super::ExecError::Internal(m) => m,
+                    ExecError::Internal(m) => m,
                     e => e.to_string(),
                 };
                 ctx.log_error(format_args!(
@@ -274,10 +328,17 @@ deno_core::extension!(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::ExecCtx;
     use crate::js::runtime::run_script;
     use crate::js::{ExecError, block_on, run_js, test_executor};
     use crate::store::{Store, legacy};
+
+    /// A top-level context named "test" with a fresh job and the default limit.
+    fn ctx_for(store: &Store) -> ExecCtx {
+        ExecCtx::new(store.clone(), Arc::default(), "test", 4)
+    }
 
     fn ok(s: &str) -> Result<String, ExecError> {
         Ok(s.to_owned())
@@ -361,13 +422,13 @@ mod tests {
     }
 
     fn failing_at(store: &Store, depth: u32) -> ExecCtx {
-        let mut ctx = ExecCtx::new(store.clone());
+        let mut ctx = ctx_for(store);
         ctx.fail_runtime_at_depth = Some(depth);
         ctx
     }
 
     fn failing_for(store: &Store, key: &'static str) -> ExecCtx {
-        let mut ctx = ExecCtx::new(store.clone());
+        let mut ctx = ctx_for(store);
         ctx.fail_runtime_for_key = Some(key);
         ctx
     }
@@ -423,7 +484,7 @@ mod tests {
         let store = Store::new();
         store.insert("k".into(), "v".into());
         store.insert("inner".into(), "1".into());
-        let ctx = ExecCtx::new(store.clone());
+        let ctx = ctx_for(&store);
         ctx.note_host_fault();
         // Pre-setting the flag is test-only: in production no run starts on a
         // faulted job. The fault predates this run, so its completion value
@@ -445,7 +506,7 @@ mod tests {
     /// cannot reach while every op refuses after a fault.
     #[test]
     fn a_fault_recorded_before_a_run_is_not_blamed_on_it() {
-        let ctx = ExecCtx::new(Store::new());
+        let ctx = ctx_for(&Store::new());
         ctx.note_host_fault();
         assert_eq!(run_ctx(ctx, "6*7"), ok("42"));
     }
@@ -464,10 +525,7 @@ mod tests {
         assert!(is_internal(&r), "{r:?}");
         assert!(store.get("good_ran").is_err());
         // The same chain without the injected failure runs `good`.
-        assert_eq!(
-            run_ctx(ExecCtx::new(store.clone()), src),
-            ok(r#"{"good_ran":"1"}"#)
-        );
+        assert_eq!(run_ctx(ctx_for(&store), src), ok(r#"{"good_ran":"1"}"#));
         assert_eq!(store.get("good_ran"), Ok("1".to_owned()));
     }
 
@@ -481,10 +539,7 @@ mod tests {
         assert!(is_internal(&r), "{r:?}");
         // Without the injected failure the same chain succeeds.
         assert_eq!(
-            run_ctx(
-                ExecCtx::new(store.clone()),
-                "Deno.core.ops.op_rs3_patch('mid')"
-            ),
+            run_ctx(ctx_for(&store), "Deno.core.ops.op_rs3_patch('mid')"),
             ok("1")
         );
     }
@@ -515,10 +570,7 @@ mod tests {
         let store = Store::new();
         store.insert("inner".into(), "throw new Error('boom')".into());
         // The inner script error and the uncaught rethrow at the top.
-        let (r, logs) = run_counting(
-            ExecCtx::new(store.clone()),
-            "Deno.core.ops.op_rs3_patch('inner')",
-        );
+        let (r, logs) = run_counting(ctx_for(&store), "Deno.core.ops.op_rs3_patch('inner')");
         assert!(matches!(r, Err(ExecError::Script { .. })), "{r:?}");
         assert_eq!(logs, 2);
     }
@@ -533,10 +585,14 @@ mod tests {
 
     #[test]
     fn exec_ctx_nested_increments_depth_and_shares_store() {
-        let ctx = ExecCtx::new(Store::new());
+        let ctx = ExecCtx::new(Store::new(), Arc::default(), "test", 4);
         assert_eq!(ctx.depth, 0);
-        let nested = ctx.nested();
+        assert_eq!(ctx.chain, ["test"]);
+        let nested = ctx.nested("k");
         assert_eq!(nested.depth, 1);
+        assert_eq!(nested.chain, ["test", "k"]);
+        assert_eq!(nested.max_patch_depth, 4);
+        assert!(Arc::ptr_eq(&ctx.job, &nested.job));
         nested.store.insert("k".into(), "v".into());
         assert_eq!(ctx.store.get("k"), Ok("v".to_owned()));
     }

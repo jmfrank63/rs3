@@ -249,6 +249,55 @@ pub(crate) mod tests {
     }
 
     #[actix_web::test]
+    async fn depth_limit_allows_exactly_the_max_levels() {
+        let pairs = [
+            ("k1", "Deno.core.ops.op_rs3_patch('k2')"),
+            ("k2", "Deno.core.ops.op_rs3_patch('k3')"),
+            ("k3", "Deno.core.ops.op_rs3_patch('k4')"),
+            ("k4", "4"),
+        ];
+        let resp = patch_seeded(&pairs, "k1").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#""4""#)
+        );
+    }
+
+    #[actix_web::test]
+    async fn depth_limit_self_patch_is_422() {
+        let state = test_state();
+        state
+            .store
+            .insert("me".into(), r#"Deno.core.ops.op_rs3_patch("me")"#.into());
+        state.store.insert("m".into(), "6*20".into());
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let resp = atest::call_service(&app, patch_req("me").to_request()).await;
+        let body =
+            assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_depth_limit").await;
+        assert_eq!(body, depth_body("me -> me -> me -> me -> me"));
+        // The server keeps serving after the stop.
+        let (code, body) = send(&app, get_req("/").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""Welcome to rs3""#));
+        let (code, body) = send(&app, patch_req("m").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""120""#));
+    }
+
+    #[actix_web::test]
+    async fn depth_limit_cycle_is_422() {
+        let pairs = [
+            ("a", "Deno.core.ops.op_rs3_patch('b')"),
+            ("b", "Deno.core.ops.op_rs3_patch('a')"),
+        ];
+        let resp = patch_seeded(&pairs, "a").await;
+        let body =
+            assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "js_depth_limit").await;
+        assert_eq!(body, depth_body("a -> b -> a -> b -> a"));
+    }
+
+    #[actix_web::test]
     async fn test_patch_stringify_exception_is_422_js_error() {
         let src = "({ toString() { throw new Error('x') } })";
         let resp = patch_seeded(&[("t", src)], "t").await;

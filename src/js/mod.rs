@@ -1,5 +1,8 @@
 //! The JavaScript runtime layer: the store ops, the script runner and the
 //! dedicated JS thread pool. This module is free of actix-web.
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use deno_core::JsRuntime;
 
 pub mod executor;
@@ -25,9 +28,62 @@ pub enum ExecError {
     /// HTTP maps this to 500 internal.
     #[error("JS host failure: {0}")]
     Internal(String),
+    /// A PATCH chain went deeper than `max_patch_depth`. `chain` lists the keys
+    /// in call order, from the PATCHed key to the refused one. HTTP maps this
+    /// to 422 js_depth_limit.
+    #[error("PATCH nesting depth limit ({limit}) exceeded: {}", .chain.join(" -> "))]
+    DepthLimit { limit: u32, chain: Vec<String> },
 }
 
-/// Sizing of the JS thread pool.
+/// The record of a job's depth stop: the limit in force and the refused chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepthStop {
+    /// The `max_patch_depth` that was exceeded.
+    pub limit: u32,
+    /// The keys in call order, ending with the refused key.
+    pub chain: Vec<String>,
+}
+
+/// State shared by every level of one job: the outer script and every nested
+/// script `op_rs3_patch` runs for it. The executor creates one per job and
+/// classifies the job's result from it once, after the run.
+#[derive(Debug, Default)]
+pub struct JobState {
+    /// Set when a nested runtime hit a host fault.
+    host_fault: AtomicBool,
+    /// The first depth stop of the job; later stops never replace it.
+    depth_stop: OnceLock<DepthStop>,
+}
+
+impl JobState {
+    /// Record that a nested runtime hit a host fault during this job.
+    pub(crate) fn note_host_fault(&self) {
+        self.host_fault.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether any level of this job hit a host fault.
+    pub(crate) fn host_fault(&self) -> bool {
+        self.host_fault.load(Ordering::SeqCst)
+    }
+
+    /// Record a depth stop. The first stop wins: it returns the stored record
+    /// and whether this call set it.
+    pub(crate) fn stop_depth(&self, stop: DepthStop) -> (&DepthStop, bool) {
+        let mut newly_set = false;
+        let record = self.depth_stop.get_or_init(|| {
+            newly_set = true;
+            stop
+        });
+        (record, newly_set)
+    }
+
+    /// The job's depth stop, if one was recorded.
+    pub(crate) fn depth_stop(&self) -> Option<&DepthStop> {
+        self.depth_stop.get()
+    }
+}
+
+/// Sizing and limits of the JS thread pool.
 ///
 /// Built in code and never read from the environment: the Phase 2 config
 /// allowlist admits only server.host and server.port. Env-configurable pool
@@ -40,17 +96,23 @@ pub struct JsSettings {
     pub queue_capacity: usize,
     /// Stack size of each worker thread in bytes.
     pub stack_bytes: usize,
+    /// How many PATCH levels one job may run, counting the PATCHed key as
+    /// level 1: with 4, a script may nest `op_rs3_patch` three times, and the
+    /// fourth nested call is refused with `ExecError::DepthLimit`. Built in
+    /// code and never read from the environment.
+    pub max_patch_depth: u32,
 }
 
 impl Default for JsSettings {
     /// One worker per available core (at least 1), 16 queued jobs per worker,
-    /// and 16 MiB of stack per worker.
+    /// 16 MiB of stack per worker and a PATCH depth limit of 4.
     fn default() -> Self {
         let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         Self {
             workers,
             queue_capacity: workers * 16,
             stack_bytes: 16 * 1024 * 1024,
+            max_patch_depth: 4,
         }
     }
 }

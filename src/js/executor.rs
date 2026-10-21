@@ -6,7 +6,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::ops::ExecCtx;
 use super::runtime::run_script;
-use super::{ExecError, JsSettings};
+use super::{ExecError, JobState, JsSettings};
 use crate::store::Store;
 
 type Reply = Result<String, ExecError>;
@@ -17,11 +17,27 @@ struct Envelope {
     reply: oneshot::Sender<Reply>,
 }
 
+/// The per-job limits the executor applies, taken from `JsSettings` once.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    /// PATCH levels one job may run, counting the PATCHed key.
+    max_patch_depth: u32,
+}
+
+impl Limits {
+    fn from_settings(settings: &JsSettings) -> Limits {
+        Limits {
+            max_patch_depth: settings.max_patch_depth,
+        }
+    }
+}
+
 /// Handle to the JS thread pool. Clones are cheap and share the same pool;
 /// the workers exit once every handle is dropped.
 #[derive(Clone, Debug)]
 pub struct JsExecutor {
     tx: mpsc::Sender<Envelope>,
+    limits: Limits,
 }
 
 impl JsExecutor {
@@ -80,7 +96,10 @@ impl JsExecutor {
                 }
             }
         }
-        Ok(JsExecutor { tx })
+        Ok(JsExecutor {
+            tx,
+            limits: Limits::from_settings(settings),
+        })
     }
 
     /// Run `job` on a JS worker with its tokio runtime entered and return its
@@ -103,14 +122,21 @@ impl JsExecutor {
 
     /// Run `source` as a script named `name` against `store`. The runtime is
     /// created and dropped on the worker; only the owned result crosses back.
+    /// Every level of the job shares one `JobState`, and the result is
+    /// classified from it once, by `classify`.
     pub async fn execute(
         &self,
         store: Store,
         name: String,
         source: String,
     ) -> Result<String, ExecError> {
-        self.run(move || run_script(ExecCtx::new(store), &name, source))
-            .await
+        let limits = self.limits;
+        self.run(move || {
+            let job = Arc::new(JobState::default());
+            let ctx = ExecCtx::new(store, Arc::clone(&job), &name, limits.max_patch_depth);
+            classify(&job, run_script(ctx, &name, source))
+        })
+        .await
     }
 
     /// An executor whose pool is already gone: every call answers
@@ -119,7 +145,30 @@ impl JsExecutor {
     pub(crate) fn closed() -> JsExecutor {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
-        JsExecutor { tx }
+        JsExecutor {
+            tx,
+            limits: Limits::from_settings(&JsSettings::default()),
+        }
+    }
+}
+
+/// The one classification point of a job's result, applied after the run.
+/// The precedence is D-04: a host fault (500 internal) beats a depth stop
+/// (422 js_depth_limit), which beats the script's own result. Every decision
+/// is taken from the job's flags, never from a message, so a stop answers the
+/// same whether or not the script caught the error. Nested `run_script` calls
+/// never classify.
+fn classify(job: &JobState, result: Reply) -> Reply {
+    match result {
+        Err(ExecError::Internal(_)) => result,
+        _ if job.host_fault() => Err(ExecError::Internal("a nested JS runtime failed".into())),
+        _ => match job.depth_stop() {
+            Some(stop) => Err(ExecError::DepthLimit {
+                limit: stop.limit,
+                chain: stop.chain.clone(),
+            }),
+            None => result,
+        },
     }
 }
 
@@ -162,6 +211,7 @@ mod tests {
             workers,
             queue_capacity,
             stack_bytes: MIB16,
+            ..JsSettings::default()
         })
         .expect("dedicated executor")
     }
