@@ -1,6 +1,6 @@
 ---
 phase: 06-native-deployment-documentation
-reviewed: 2026-10-21T11:15:08Z
+reviewed: 2026-10-21T12:10:00Z
 depth: standard
 files_reviewed: 8
 files_reviewed_list:
@@ -14,207 +14,122 @@ files_reviewed_list:
   - src/js/executor.rs
 findings:
   critical: 0
-  warning: 4
-  info: 3
-  total: 7
+  warning: 1
+  info: 1
+  total: 2
 status: issues_found
 ---
 
-# Phase 6: Code Review Report
+# Phase 6: Code Review Report (iteration 3)
 
-**Reviewed:** 2026-10-21T11:15:08Z
+**Reviewed:** 2026-10-21T12:10:00Z
 **Depth:** standard
 **Files Reviewed:** 8
 **Status:** issues_found
 
 ## Summary
 
-I reviewed the diff from `2ecb06d` to HEAD for the eight files in scope. I checked the README and
-`docs/js-ops.md` claims against `src/` (`main.rs`, `config.rs`, `http/mod.rs`, `js/mod.rs`,
-`js/ops.rs`, `js/executor.rs`), `.github/workflows/ci.yml` and `scripts/`. I read
-06-CONTEXT.md and 06-RESEARCH.md first, so this report does not count deliberate decisions
-(D-01..D-17, the resolved open questions) as defects.
+This re-review covers the current state of the eight files (phase diff base `2ecb06d`, HEAD
+`ef9ab51`). It follows the iteration-2 fixes `b69b176` (`MemorySwapMax=0`) and `ef9ab51`
+(`MemoryMax=` sizing guidance). I read 06-CONTEXT.md and the relevant parts of 06-RESEARCH.md
+first, so I did not count these deliberate decisions as defects:
+- the env(1) bridge;
+- `@pkey`;
+- leaving out `MemoryDenyWriteExecute`;
+- `ProtectProc=invisible` without `ProcSubset=` (RESEARCH §evidence, open question 2);
+- `license = "MIT"` with `LICENSE` arriving from `main`.
 
-Live checks against `target/release/rs3` (scratch under `target/tmp`, removed afterwards):
-- Confirmed: `GET /ip`, the sibling-`op_rs3_patch` loop answering `"done"`, the timeout plus
-  kept write (`w2` → `"kept"`), and the stack-exhaustion stderr line.
-- `systemd-analyze verify --recursive-errors=no deploy/rs3.service` exits 0 with no output.
-- The D-04 `git grep -i docker` acceptance check prints nothing.
+**Earlier findings that stay resolved:**
+- **Iteration-1 findings (WR-01..WR-04, IN-01..IN-03).** The text and unit lines reviewed in
+  iteration 2 are unchanged and still correct.
+- **Iteration-2 WR-01 (swap).** `deploy/rs3.service:25-26` now sets `MemorySwapMax=0` with a
+  correct comment, and `Readme.md:390-393` explains it.
+- **Iteration-2 IN-01 (sizing).** `Readme.md:395-399` now gives a sizing rule and says the store
+  counts against the cap. However, the rule's per-script figure is wrong for any script that reads
+  the store (WR-01 below).
 
-The unit's directives are coherent:
-- The env(1) bridge cannot be turned into option injection, because every expanded argument
-  starts with `SERVER.`.
-- `@pkey` is required, because `@system-service` lacks it.
-- `MemoryDenyWriteExecute` is correctly absent.
-- `EnvironmentFile=` has no `-` prefix, so a missing file fails loudly.
-- Ambient capabilities would survive the intermediate `/usr/bin/env` exec, so the low-port
-  advice works.
+**Checks I ran myself.** All scratch went under `target/tmp/rv3` and has been removed. No rs3
+process or listener is left.
+- **`systemd-analyze verify --recursive-errors=no deploy/rs3.service`:** no output, exit 0
+  (systemd 255).
+- **`systemd-analyze security --offline=true deploy/rs3.service`:** overall exposure 1.5, OK.
+- **`git grep -n -i docker -- . ':!.planning' ':!aws' ':!Vagrantfile' ':!experiments'`:** no
+  output (exit 1).
+- **`src/`, `Cargo.lock`, `.github` and `scripts`:** no uncommitted changes.
+- **`src/js/executor.rs:147-149`:** the comment matches `src/main.rs`: `init_platform` runs on
+  the main thread (line 16) before `JsExecutor::start` (line 17).
+- **Memory measurements behind WR-01:** release binary, loopback, env-var config. The store held
+  100 keys × 200 000-byte values (about 20 MB of data). Idle VmRSS/VmHWM was about 36 MB.
 
-The executor.rs change is a comment only, and the comment is accurate for the production path
-(`main` calls `init_platform`, then `JsExecutor::start` spawns the workers).
+| Load | VmHWM | Extra per request |
+|------|-------|-------------------|
+| One `GET /list` | 113.6 MB | +78 MB, about 3.9× the stored data |
+| Four concurrent `GET /list` | 332 MB | about 74 MB each |
+| Four concurrent PATCHes of `Deno.core.ops.op_rs3_list().length` | 368 MB | about 83 MB per running script, about 4× the stored data |
 
-There are no blockers. The problems are in the documentation:
-- One documented V8 output line does not match what V8 actually prints.
-- The README says CI runs a script that is explicitly not a CI step.
-- The security note is narrower than the real exposure.
-- The hardened unit has no memory ceiling, although the docs admit an unbounded heap.
-
-Noted but not flagged: `Readme.md:487` and `license = "MIT"` refer to a `LICENSE` file that is
-not on this branch. This is deliberate (D-12 item 11): the file is on `main` at 9d1596b and is
-MIT.
+## Narrative Findings (AI reviewer)
 
 ## Warnings
 
-### WR-01: The documented V8 stack-overflow stdout line has the wrong text and the wrong timing
+### WR-01: The new `MemoryMax=` sizing rule underestimates memory by about 4× the store per concurrent `/list` or `op_rs3_list`; an operator who follows it gets an OOM kill and loses every key under normal traffic
 
-**File:** `docs/js-ops.md:213-216`
-**Issue:** The new text says V8 prints "an unprefixed `Uncaught RangeError: Maximum call stack
-size exceeded` line to stdout, once per failed start". Both parts are inaccurate:
-- **Text.** A live run of the release binary (a nested `op_rs3_patch` from a stack-exhausted
-  script) wrote `<unknown>:-1: Uncaught RangeError: Maximum call stack size exceeded` to stdout.
-  The line has a `<unknown>:-1: ` source-location prefix, so it is not "unprefixed". 06-RESEARCH
-  Pitfall 7 (line 522) also recorded `ext:core/00_primordials.js:6413: …` variants in the same
-  catch-and-retry run, so the location part is not even fixed.
-- **Timing.** V8's default message reporter writes through C stdio. When stdout is not a
-  terminal, which is the case under systemd (journal stream) or when redirected, C stdio is fully
-  buffered. In the live run the line appeared only when the process exited after SIGTERM. So the
-  lines do not appear "once per failed start". They show up in batches, can come out of order
-  with Rust's line-buffered stdout (05-REVIEW IN-07 already notes the interleaving), and are lost
-  if the process aborts (for example on heap exhaustion). An operator who greps the journal for
-  the quoted text, or who expects one entry per failure, will be misled.
+**File:** `Readme.md:395-399` (the rule), together with `deploy/rs3.service:24`
+(`MemoryMax=1G`)
+**Issue:** The README now says: "budget about 5 MB per running script (up to 4 per PATCH, one
+PATCH per CPU) plus the data you expect to store". That budget counts the stored data once. It
+also assumes a running script costs about 5 MB whatever it does. Neither holds for the routes and
+ops that copy the whole store:
+- **`GET /list`** (`src/http/kv.rs:57`). `Store::list()` (`src/store/mod.rs:75-85`) clones every
+  key and value, `legacy::format_list` builds a second copy, and `HttpResponse::json` escapes it
+  into a third. In my measurement one request transiently cost about 3.9× the stored data.
+  Concurrent requests stack: actix runs one worker per CPU, and each finished body stays in memory
+  until a client that may be slow has read it.
+- **`op_rs3_list()`.** It makes the same copies plus the V8 string, so a running script that calls
+  it costs about 4× the store, not 5 MB. In my measurement that was about 83 MB per script for a
+  20 MB store, about 16× the documented budget.
 
-**Fix:** Reword this part of the paragraph, for example:
+A concrete case with the shipped `MemoryMax=1G` on a small server, following the README:
+- A store of about 250 MB is well within "1G minus the data you expect to store".
+- One `GET /list` then needs about 250 MB + 3.9 × 250 MB ≈ 1.2 GB, past the cap.
+- With `MemorySwapMax=0`, the kernel OOM-kills rs3, systemd restarts it, and the whole store is
+  gone.
+- On a 4-CPU host, four concurrent `/list` calls (or four PATCHes that call `op_rs3_list`) do the
+  same at a store of about 65 MB.
+
+This comes from this phase's own changes. Before the cap, these copies used host memory and
+succeeded. The fix turned "a runaway script" into "a legitimate `/list` on a moderately large
+store" as the trigger for total data loss. The README's own sentence, "Reaching the cap kills rs3
+and empties the store", tells the operator the consequence. The budget it gives them to avoid that
+consequence is wrong.
+
+**Fix:** Correct the rule so it budgets the transient copies, for example (`Readme.md:395-399`):
 ```markdown
-One exception: when a nested `op_rs3_patch` cannot start for lack of stack,
-V8's own message reporter prints a line such as
-`<unknown>:-1: Uncaught RangeError: Maximum call stack size exceeded` to
-stdout, without the `js stderr: ` prefix. It goes through C stdio buffering,
-so under systemd these lines can reach the journal late, in batches, or not
-at all if the process aborts.
+Size the value to the server. Budget about 5 MB per running script (up to 4 per
+PATCH, one PATCH per CPU) plus the data you expect to store, and then about 4×
+the stored data again for every `GET /list` or `op_rs3_list()` that can run at
+the same time (up to one per CPU each), because each one copies the whole store.
+The store counts against the same cap, so with the shipped 1G keep the stored
+data well below 1G / (1 + 4 × CPUs). On a 64-CPU server, full nested load alone
+needs more than the shipped 1G. Reaching the cap kills rs3 and empties the store.
 ```
-
-### WR-02: The README says CI runs `scripts/test-ci-guards.sh`, but that script is local-only
-
-**File:** `Readme.md:461-472`
-**Issue:** "These are the checks CI runs, in the order a contributor runs them locally:" is
-followed by a list that includes `bash scripts/test-ci-guards.sh` and
-`python3 scripts/check-workflow.py`.
-- `scripts/test-ci-guards.sh:2` says: "Planted-violation self-test for scripts/ci-guards.sh
-  (D-05). Local only, not a CI step."
-- `.github/workflows/ci.yml` has no step for either script. `check-workflow.py` runs only inside
-  `ci-guards.sh` as guard (g).
-
-The paragraph at `:477-479` describes the CI job correctly, so the two parts of the section
-contradict each other. A contributor who expects CI to catch a broken self-test will not get
-that.
-
-**Fix:** Split the list, for example: "CI runs these checks (`check-workflow.py` runs inside
-`ci-guards.sh` as guard (g)):" followed by the guards, fmt, clippy, test, release build and
-smoke. Then add a separate line: "Also run the guard self-test locally (CI does not):
-`bash scripts/test-ci-guards.sh`". Alternatively, drop "These are the checks CI runs" and say
-"the local gate, a superset of CI".
-
-### WR-03: The security note treats "loopback" as private, but loopback is reachable by every local account and by browsers on the host
-
-**File:** `Readme.md:411-416`, `deploy/rs3.conf:4-5`
-**Issue:** The note says: "Keep the loopback default (`RS3_HOST=127.0.0.1`), or put something you
-control in front of it". It presents both as sufficient mitigations for an unauthenticated JS
-executor. They are not:
-- **Local accounts.** On a shared server every local account and every compromised local process
-  can reach `127.0.0.1:5000` directly. Putting a reverse proxy with authentication in front does
-  not remove that path, because the backend port stays open on loopback.
-- **Browsers on the same machine.** This matters most for the Quick start on a developer machine.
-  The README itself says (`:154`) that `POST /insert` accepts any Content-Type. A web page the
-  user visits can therefore send a CORS "simple" request (`fetch(..., {method:'POST',
-  mode:'no-cors', body:'{"k":"<script>"}'})`, sent as `text/plain`) without a preflight. That
-  request overwrites stored keys, including scripts that the user later PATCHes.
-- **DNS rebinding.** rs3 does not check the `Host` header, so a DNS-rebinding page can also issue
-  PATCH requests and read the responses.
-
-The unit has no network-level enforcement either. If `RS3_HOST` is changed to `0.0.0.0`, nothing
-in the sandbox limits who can connect.
-
-**Fix:** State the real boundary in the security note, for example: "Loopback still lets every
-local user and process, and web pages open in a browser on the same machine, reach rs3. Use it
-only on a host where you trust all of them." Optionally, add defence in depth to the unit that
-keeps it loopback-only even if `RS3_HOST` changes. A reverse proxy on the same host still works,
-because it connects over loopback. Because the root-only directives are UAT items (D-11), add it
-as a commented example if it cannot be verified here:
-```ini
-# Optional: refuse every peer except loopback, whatever RS3_HOST says.
-#IPAddressDeny=any
-#IPAddressAllow=localhost
-```
-
-### WR-04: The "hardened" unit has no memory ceiling, although the docs admit there is no heap limit
-
-**File:** `deploy/rs3.service:12-56`; related `Readme.md:304-305`, `docs/js-ops.md:245-249`
-**Issue:** Both documents say that a script that allocates without bound can exhaust V8's heap and
-abort the process. The JS pool runs one worker per available CPU (`src/js/mod.rs:245-248`), and
-each worker has its own isolates, plus up to 3 nested isolates per job. Concurrent PATCH requests
-can therefore drive the service's RSS to several times one isolate's default heap limit before
-V8 aborts. On a small server that is more than the host has, so the kernel OOM killer acts on
-the whole host instead of only on rs3, and other services on the server can be killed or
-stalled.
-
-The unit sets no `MemoryMax=` (or `MemoryHigh=`), so systemd does not contain this to rs3's
-cgroup. A memory ceiling is a standard sandbox directive. It is the natural place to bound the
-gap that v2 JSHD-01 will close in code, and it needs no code change.
-
-**Fix:** Add a cgroup ceiling with a comment, and mention it in the README's Service user and
-sandbox section:
-```ini
-# No V8 heap limit yet (v2): cap the whole service so a runaway script is
-# OOM-killed inside rs3's cgroup and restarted, not the host. Size to the server.
-MemoryMax=1G
-```
-Under the current `Restart=on-failure`, a cgroup OOM kill counts as a failure and restarts rs3
-with an empty store, which is the behaviour the README already documents for heap exhaustion.
+Optionally, also shorten the unit comment at `deploy/rs3.service:22-23` to "Size to the server
+(see Readme.md, Service user and sandbox)", so operators find the rule.
 
 ## Info
 
-### IN-01: The start limit turns client-triggerable crashes into a permanent outage
+### IN-01: The `MemoryMax=` paragraph states the kill-and-empty consequence twice
 
-**File:** `deploy/rs3.service:7-10`, `Readme.md:439-457`
-**Issue:** `StartLimitIntervalSec=60` / `StartLimitBurst=5` were added deliberately (06-RESEARCH
-Open Question 1) so that a broken `rs3.conf` stops the restart loop. Heap exhaustion, however,
-can be triggered by any client: no auth, no heap limit. A client that crashes rs3 about 6 times
-within 60 s leaves the unit in `failed` until an operator runs `systemctl reset-failed`.
-`Readme.md:456-457` says "Repeated crashes hit the same start limit" but does not say that this
-is a denial of service that lasts until someone intervenes.
-**Fix:** Spell out the consequence in the Troubleshooting paragraph. Alternatively, on
-systemd ≥ 254 (the research host has 255), consider backoff instead of a hard stop for crashes,
-for example `RestartSteps=5` with `RestartMaxDelaySec=60`, and keep the start limit wide enough
-to still catch configuration failures. WR-04's `MemoryMax=` does not change this, because a
-cgroup OOM kill is still a failure.
-
-### IN-02: "The environment wins over such a file anyway" overstates how harmless `/.env` is under the unit
-
-**File:** `Readme.md:372-374`
-**Issue:** Under the system manager the working directory is `/`, and `Settings::load` calls
-`dotenvy::dotenv_iter()` (`src/config.rs:88-90`). The environment wins only over the values in a
-well-formed file. A malformed, BOM-prefixed or unreadable `/.env` (for example root-owned with
-mode 0600, which the DynamicUser cannot read) is a hard startup error
-(`src/config.rs:99-104`, `error: invalid configuration: .env: …`), whatever the environment
-holds. 06-RESEARCH Pitfall 4 notes this edge, but the README sentence suggests the file can never
-matter.
-**Fix:** Change the end of the sentence to: "…and the environment wins over the values in such a
-file, but a malformed or unreadable `/.env` still stops startup."
-
-### IN-03: The Update section does not cover a changed unit or environment file
-
-**File:** `Readme.md:399-409`
-**Issue:** The update steps re-install only the binary and restart. If a pull also changes
-`deploy/rs3.service`, the installed unit stays stale. Running the steps above it instead also
-fails the update: re-running the Install block overwrites the operator's edited
-`/etc/rs3/rs3.conf` (`install -D … deploy/rs3.conf /etc/rs3/rs3.conf`), and skipping
-`daemon-reload` leaves the old unit loaded.
-**Fix:** Add one sentence: "If `deploy/rs3.service` changed, re-install it and run
-`sudo systemctl daemon-reload` before the restart. Do not re-install `rs3.conf` over your
-edited copy."
+**File:** `Readme.md:393-395` and `Readme.md:398-399`
+**Issue:** The paragraph says "If rs3 grows past the cap, the kernel kills rs3 … and rs3
+restarts with an empty store." Four lines later it says "Reaching the cap kills rs3 and empties
+the store." This duplication came from the iteration-2 fix (`ef9ab51`) appending its sentence
+without merging it with the existing one. The paragraph is now 10 lines long, and the sizing rule
+is buried between the two copies.
+**Fix:** Drop the trailing "Reaching the cap kills rs3 and empties the store." Or merge the two
+sentences, ideally while applying the WR-01 rewrite.
 
 ---
 
-_Reviewed: 2026-10-21T11:15:08Z_
+_Reviewed: 2026-10-21T12:10:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
