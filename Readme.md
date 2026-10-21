@@ -414,6 +414,10 @@ sudo systemctl restart rs3
 `install` replaces the file, so it works while rs3 is running; `cp` fails with
 "Text file busy". A restart empties the in-memory store.
 
+If `deploy/rs3.service` changed, re-install it and run
+`sudo systemctl daemon-reload` before the restart. Do not re-install
+`rs3.conf` over your edited copy.
+
 ### Security note
 
 rs3 has no authentication: anyone who can reach the port can store data and
