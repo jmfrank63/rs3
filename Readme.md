@@ -370,8 +370,9 @@ names that contain a dot. So `/etc/rs3/rs3.conf` holds `RS3_HOST` and
 `RS3_PORT`, and the unit's `ExecStart` passes them to rs3 through env(1) as
 `SERVER.HOST` and `SERVER.PORT`. Edit them there, then run
 `sudo systemctl restart rs3`. Under the unit the working directory is `/`, so
-rs3 reads no dotenv (`.env`) file unless one exists at `/`, and the
-environment wins over such a file anyway.
+rs3 reads no dotenv (`.env`) file unless one exists at `/`. The environment
+wins over the values in such a file, but a malformed or unreadable `/.env`
+still stops startup.
 
 ### Service user and sandbox
 
