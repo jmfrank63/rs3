@@ -210,9 +210,12 @@ and the depth limit wins over the script's own error (422 `js_error`).
   rs3's stderr lines. Treat everything a script prints, on either stream, as
   untrusted. Error messages and stack traces of failed scripts are logged to
   stderr in the same escaped form. One exception: when a nested
-  `op_rs3_patch` cannot start for lack of stack, V8 itself prints an
-  unprefixed `Uncaught RangeError: Maximum call stack size exceeded` line to
-  stdout, once per failed start.
+  `op_rs3_patch` cannot start for lack of stack, V8's own message reporter
+  prints a line such as
+  `<unknown>:-1: Uncaught RangeError: Maximum call stack size exceeded` to
+  stdout, without the `js stderr: ` prefix (the source location varies). It
+  goes through C stdio buffering, so under systemd these lines can reach the
+  journal late, in batches, or not at all if the process aborts.
 - `Deno.core.ops.op_panic` is disabled and throws `Error: op is disabled`,
   because a panic inside an op would abort the whole server. Uncaught, it
   gives a 422 with the message `Uncaught Error: op is disabled`.
