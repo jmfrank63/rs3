@@ -8,7 +8,10 @@ and `op_rs3_patch`.
 
 Every op takes and returns strings. Errors are ordinary JavaScript exceptions
 that a script can catch with `try`/`catch`. After a nested host fault, every op
-throws `Error: internal error` for the rest of the PATCH (see Errors).
+throws `Error: internal error` for the rest of the PATCH. After the nesting
+depth limit has refused an `op_rs3_patch`, every op throws that same depth
+error. After the execution timeout, every op returns an empty string and
+touches nothing. See Errors and Sandbox and known limits.
 
 ## Migrating from the legacy API
 
@@ -23,7 +26,7 @@ Neither exists any more. Rewrite old scripts with this table:
 | `Deno.core.opSync("rs3_get", key)` | `Deno.core.ops.op_rs3_get(key)` | the key, coerced to a string | the value | the key is missing: `Error` with message `key not found: <key>` (legacy: the server panicked); after a nested host fault: `Error: internal error` (see Errors) |
 | `Deno.core.opSync("rs3_insert", json)` | `Deno.core.ops.op_rs3_insert(json)` | a JSON object whose values are all strings, passed as a string | the compact echo, such as `{"k":"v"}` | malformed JSON: `TypeError` whose message starts with `malformed JSON:`; wrong shape: `TypeError` whose message starts with `invalid input:`; nothing is written on error; after a nested host fault: `Error: internal error` (see Errors) |
 | `Deno.core.opSync("rs3_delete", key)` | `Deno.core.ops.op_rs3_delete(key)` | the key | the value the key held | the key is missing: `Error` with message `key not found: <key>`; after a nested host fault: `Error: internal error` (see Errors) |
-| `Deno.core.opSync("rs3_patch", key)` | `Deno.core.ops.op_rs3_patch(key)` | the key | `String(completion value)` of that key's script, run in a fresh nested runtime | the key is missing; the nested script fails, rethrown as `Error` with the nested message minus its leading `Uncaught `; the nested runtime hits a host fault, thrown as `Error: internal error`; the whole PATCH then answers 500 even if the script catches it, and every later op throws the same error |
+| `Deno.core.opSync("rs3_patch", key)` | `Deno.core.ops.op_rs3_patch(key)` | the key | `String(completion value)` of that key's script, run in a fresh nested runtime | the key is missing; the nested script fails, rethrown as `Error` with the nested message minus its leading `Uncaught `; the nested runtime hits a host fault, thrown as `Error: internal error`; the whole PATCH then answers 500 even if the script catches it, and every later op throws the same error; the call would nest deeper than the depth limit (4 scripts, counting the PATCHed key), thrown as `Error` with the message `PATCH nesting depth limit (4) exceeded: <key chain>` before the key is read; the whole PATCH then answers 422 `js_depth_limit` even if the script catches it. After the execution timeout it returns an empty string and runs nothing; the whole PATCH answers 504 `js_timeout` |
 
 The legacy `Deno.core.opSync` function no longer exists either, and calling it
 throws a `TypeError`. The old example script also called an op named `op_list`
@@ -76,6 +79,17 @@ table is the migration path.
   without touching the store, so the script cannot make further writes after
   the request has failed. There are no transactions: store writes the script
   made before the fault stay.
+- **Depth limit.** `op_rs3_patch` refuses a call that would run more than 4
+  scripts deep, counting the PATCHed key, before it reads the next key. It
+  throws an `Error` whose message names the key chain, for example
+  `PATCH nesting depth limit (4) exceeded: a -> b -> a -> b -> a`. Catching it
+  does not help: the whole PATCH answers 422 `js_depth_limit` (see PATCH
+  results), and from then on every op throws the same error without touching
+  the store. Store writes made before the stop stay.
+- **Timeout.** A PATCH whose scripts run longer than 5000 ms is terminated.
+  Nothing is thrown that the script could catch. From then on every op returns
+  an empty string and writes nothing, and the whole PATCH answers 504
+  `js_timeout` (see PATCH results). Store writes made before the stop stay.
 
 ## PATCH results
 
@@ -117,9 +131,24 @@ table is the migration path.
   when the script caught the error the op threw. Writes made before the fault
   stay; ops called after it are refused. The details go to the server log
   only.
+- **Depth limit: 422.** A chain of `op_rs3_patch` calls more than 4 scripts
+  deep, counting the PATCHed key (a key that patches itself, a cycle of keys,
+  or a long chain), answers
+  `{"error":"js_depth_limit","message":"PATCH nesting depth limit (4) exceeded: a -> b -> a -> b -> a"}`.
+  The message lists the keys from the PATCHed key to the refused one. The
+  answer is the same when the script caught the error.
+- **Timeout: 504.** A PATCH whose scripts, nested ones included, run longer
+  than 5000 ms answers
+  `{"error":"js_timeout","message":"script exceeded the 5000 ms execution limit"}`.
+  This holds even when the script had already computed a value at the moment
+  of the stop.
 - **Missing key: 404.** PATCH of a key that does not exist answers
   `{"error":"not_found","message":"key not found: <key>"}` without running
   anything.
+
+When more than one of these applies to the same PATCH, a host fault (500) wins
+over a timeout (504), a timeout wins over the depth limit (422 `js_depth_limit`),
+and the depth limit wins over the script's own error (422 `js_error`).
 
 ## Runtime model
 
@@ -165,23 +194,33 @@ table is the migration path.
 - `Deno.core.ops.op_panic` is disabled and throws `Error: op is disabled`,
   because a panic inside an op would abort the whole server. Uncaught, it
   gives a 422 with the message `Uncaught Error: op is disabled`.
-- **Unbounded nesting until Phase 5.** There is no limit yet on how deep
-  `op_rs3_patch` calls can nest. A script that patches itself, directly or
-  through a cycle of keys, does not crash the server, but it ends with an
-  error only after about 235 (debug build) or 778 (release build) nested
-  levels. That costs about 800 MB of memory and 2.7 s of one JS worker per
-  request. When the error is a JavaScript exception, the answer is a 422 whose
-  message is very long because every level adds its own prefix. Nested
-  runtimes share one thread's stack, so deep nesting, or calling
-  `op_rs3_patch` from inside deep recursion, can also leave too little stack
-  to create the next runtime. That is a host fault and answers 500.
-- **Non-terminating scripts until Phase 5.** A script that never finishes,
-  such as `while(true){}`, occupies one JS worker indefinitely. Once every
-  worker is busy, further PATCH requests queue behind them and wait. The other
-  routes keep working, because HTTP workers never run JavaScript.
-- Phase 5 adds a nesting depth limit (answered with 422) and an execution
-  timeout (answered with 504). Until then, do not store self-patching or
-  non-terminating scripts.
+- **Nesting depth limit: 4.** At most 4 scripts run in one PATCH chain,
+  counting the PATCHed key (`max_patch_depth` in `JsSettings`), so a script
+  may nest `op_rs3_patch` three times. The next `op_rs3_patch` is refused
+  before the key is read. The thrown `Error` and the 422 `js_depth_limit` body
+  carry the key chain, for example
+  `PATCH nesting depth limit (4) exceeded: a -> b -> a -> b -> a`. It is a hard
+  stop even when the script catches the error: every later op throws the same
+  error and touches nothing, and the PATCH answers 422. A self-patching key or
+  a cycle of keys therefore costs only a few nested runtimes.
+- **Execution timeout: 5000 ms.** Each PATCH may run for 5000 ms
+  (`timeout_ms` in `JsSettings`), counted from the moment a JS worker picks
+  the request up. Time spent waiting in the queue does not count. After that
+  the script, nested scripts included, is terminated, every op returns an
+  empty string and writes nothing, and the answer is 504 `js_timeout`. Other
+  routes and other PATCH requests keep being answered meanwhile, and the
+  worker serves the next request normally afterwards. A stall inside the host
+  rather than in JavaScript, such as a stdout pipe that nobody drains, cannot
+  be terminated: a backstop answers 504 2 s later (7000 ms after pickup), but
+  that worker stays busy until the stall ends.
+- Both limits are set in code (`JsSettings`) and cannot be set through the
+  environment.
+- Neither stop rolls anything back. There are no transactions, so store writes
+  a script made before the depth stop or the timeout stay.
+- **Heap exhaustion is not covered.** A script that allocates without bound,
+  such as `let a = []; while (true) a.push(1)`, can exhaust V8's heap and
+  abort the server process before the timeout ends it. A memory limit is
+  planned for v2. Do not store such scripts.
 
 ## Worked example
 
