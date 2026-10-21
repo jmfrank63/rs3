@@ -19,6 +19,9 @@ ExecStart=/usr/bin/env SERVER.HOST=${RS3_HOST} SERVER.PORT=${RS3_PORT} /usr/loca
 SyslogIdentifier=rs3
 Restart=on-failure
 RestartSec=2
+# No V8 heap limit yet (v2): cap the whole service so a runaway script is
+# OOM-killed inside rs3's cgroup and restarted, not the host. Size to the server.
+MemoryMax=1G
 
 # Unprivileged: a transient "rs3" user (an existing static rs3 user is reused).
 # No capabilities, so the port must be 1024 or above. For a lower port, set

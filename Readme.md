@@ -386,6 +386,11 @@ executable memory, and rs3 crashes at the first PATCH. `@pkey` is in the
 syscall filter because V8 uses memory protection keys on x86_64 CPUs that
 have them.
 
+`MemoryMax=1G` caps the whole service, because V8 has no heap limit yet (see
+Limits) and each JS worker runs its own isolates. If rs3 grows past the cap,
+the kernel kills rs3 inside its own cgroup instead of other services on the
+host, and rs3 restarts with an empty store. Size the value to the server.
+
 ### Check
 
 ```sh
