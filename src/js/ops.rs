@@ -39,6 +39,10 @@ pub struct ExecCtx {
     /// (the key `op_rs3_patch` runs), at any depth.
     #[cfg(test)]
     pub(crate) fail_runtime_for_key: Option<&'static str>,
+    /// Test hook: an injected runtime failure first waits (bounded) until the
+    /// job timed out, so the fault and the timeout overlap at that level.
+    #[cfg(test)]
+    pub(crate) fail_runtime_after_timeout: bool,
 }
 
 impl ExecCtx {
@@ -55,6 +59,8 @@ impl ExecCtx {
             fail_runtime_at_depth: None,
             #[cfg(test)]
             fail_runtime_for_key: None,
+            #[cfg(test)]
+            fail_runtime_after_timeout: false,
         }
     }
 
@@ -74,6 +80,8 @@ impl ExecCtx {
             fail_runtime_at_depth: self.fail_runtime_at_depth,
             #[cfg(test)]
             fail_runtime_for_key: self.fail_runtime_for_key,
+            #[cfg(test)]
+            fail_runtime_after_timeout: self.fail_runtime_after_timeout,
         }
     }
 
@@ -259,7 +267,9 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 /// Once the job timed out it returns an empty string without reading `key`
 /// or creating a runtime, and it also returns an empty string, never an
 /// error, when the job timed out while the nested script ran: throwing then
-/// would cancel the termination of the calling script.
+/// would cancel the termination of the calling script. A host fault in that
+/// nested run is still logged and recorded first, so the request answers 500,
+/// not 504.
 //
 // `reentrant` is mandatory: the nested runtime calls ops while this op is on
 // the stack, and debug builds abort without the flag. The depth check runs
@@ -296,15 +306,38 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
     }
     let source = ctx.store.get(&key).map_err(to_js)?;
     let result = super::runtime::run_script(ctx.nested(&key), &key, source);
+    // Record a host fault before anything else, timeout included: a host fault
+    // beats a timeout (D-04), and it must be logged even when the job timed
+    // out while the nested level ran. `live_ctx` saw the flag clear when this
+    // op started, so if it is set now, a deeper level already logged and
+    // recorded the fault, and this result only reports that the nested run
+    // saw it. Logging again would blame a key whose runtime ran normally, once
+    // per ancestor level.
+    if let Err(e @ (ExecError::Internal(_) | ExecError::Unavailable)) = &result
+        && !ctx.host_fault()
+    {
+        // Host details go to stderr only, escaped so they cannot forge log
+        // lines. `Internal` already displays with a "JS host failure" prefix,
+        // so log its bare detail.
+        let detail = match e {
+            ExecError::Internal(m) => m.clone(),
+            e => e.to_string(),
+        };
+        ctx.log_error(format_args!(
+            "error: nested JS host failure in {key:?} at depth {}: {detail:?}",
+            ctx.depth + 1
+        ));
+        ctx.note_host_fault();
+    }
     // Never throw into a terminating script: an Err here would cancel its
     // termination (see live_ctx).
     if ctx.job.timed_out() {
         return Ok(String::new());
     }
+    // Every variant is listed, so a new one must be classified here.
     result.map_err(|e| match e {
         // Nested runs never classify depth or timeouts (the executor does that
-        // once), so these arms are unreachable today; they are listed so no
-        // wildcard is needed, and neither is a host fault.
+        // once), so these arms are unreachable today.
         e @ ExecError::DepthLimit { .. } => JsErrorBox::generic(e.to_string()),
         e @ ExecError::Timeout { .. } => JsErrorBox::generic(e.to_string()),
         ExecError::Script { message } => JsErrorBox::generic(
@@ -313,28 +346,8 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
                 .unwrap_or(&message)
                 .to_owned(),
         ),
-        other => {
-            // `live_ctx` saw the flag clear when this op started, so if it is
-            // set now, a deeper level already logged and recorded the fault,
-            // and this error only reports that the nested run saw it. Logging
-            // again would blame a key whose runtime ran normally, once per
-            // ancestor level.
-            if !ctx.host_fault() {
-                // Host details go to stderr only, escaped so they cannot forge
-                // log lines. `Internal` already displays with a "JS host
-                // failure" prefix, so log its bare detail.
-                let detail = match other {
-                    ExecError::Internal(m) => m,
-                    e => e.to_string(),
-                };
-                ctx.log_error(format_args!(
-                    "error: nested JS host failure in {key:?} at depth {}: {detail:?}",
-                    ctx.depth + 1
-                ));
-                ctx.note_host_fault();
-            }
-            internal_error()
-        }
+        // Recorded and logged above.
+        ExecError::Internal(_) | ExecError::Unavailable => internal_error(),
     })
 }
 
@@ -639,6 +652,28 @@ mod tests {
         let r = run_ctx_on(&timeout_exec(), ctx, src);
         assert!(is_internal(&r), "{r:?}");
         assert!(job.timed_out());
+    }
+
+    #[test]
+    fn host_fault_during_the_timeout_beats_it_and_is_logged() {
+        let store = Store::new();
+        store.insert("bad".into(), "1".into());
+        // The injected failure of `bad` returns only once the job timed out,
+        // so the fault and the timeout overlap at that level. Straight-line
+        // after the call: the armed 300 ms timeout ends the job either way.
+        let mut ctx = failing_for(&store, "bad");
+        ctx.fail_runtime_after_timeout = true;
+        let job = Arc::clone(&ctx.job);
+        let r = run_ctx_on(
+            &timeout_exec(),
+            ctx,
+            "Deno.core.ops.op_rs3_patch('bad'); 'done'",
+        );
+        assert!(job.timed_out());
+        assert!(job.host_fault(), "the nested fault was dropped");
+        assert!(is_internal(&r), "{r:?}");
+        // The nested host failure line and the worker's timeout line.
+        assert_eq!(job.error_log_count(), 2);
     }
 
     fn failing_at(store: &Store, depth: u32) -> ExecCtx {

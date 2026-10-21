@@ -61,6 +61,13 @@ fn run_fresh(
 ) -> Result<String, ExecError> {
     #[cfg(test)]
     if ctx.fail_runtime_at_depth == Some(ctx.depth) || ctx.fail_runtime_for_key == Some(name) {
+        if ctx.fail_runtime_after_timeout {
+            // Bounded: the test arms a short timeout, and this gives up after 5 s.
+            let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !ctx.job.timed_out() && std::time::Instant::now() < give_up {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
         return Err(ExecError::Internal(
             "cannot create JS runtime: injected test failure".into(),
         ));
