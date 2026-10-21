@@ -3,7 +3,7 @@ status: complete
 phase: 05-js-execution-limits
 source: [05-VERIFICATION.md, 05-03-SUMMARY.md]
 started: 2026-10-21T02:00:00Z
-updated: 2026-10-21T09:29:31.316Z
+updated: 2026-10-21T09:30:17.553Z
 ---
 
 ## Current Test
@@ -28,7 +28,7 @@ evidence: "Operator reported 2026-10-21: GitHub Actions run 39527188207 at 40afe
 expected: Review `src/js/mod.rs:132-134`. When a nested runtime registers after the job has already timed out, it is terminated straight away. No test reaches this path, so confirm by review, or add a test later.
 result: skipped
 source: operator
-reason: "Accepted risk (operator, 2026-10-21): the watchdog's 50 ms re-fire covers a runtime that registers after the timeout."
+reason: "Deferred follow-up: accepted risk (operator, 2026-10-21). The watchdog's 50 ms re-fire covers a runtime that registers after the timeout; a test for this path can be added later."
 
 ### 3. Client disconnect during a runaway script (present, not exercised by a test)
 expected: Review `src/js/executor.rs:350-356`. The watchdog is armed at worker pickup, independent of the HTTP future, so a dropped request still has its script terminated after `timeout_ms`. No test drops a request mid-job.
@@ -56,3 +56,9 @@ skipped: 1
 blocked: 0
 
 ## Gaps
+
+## Deferred Follow-Ups
+
+- test: 2
+  idea: "Optional test for a nested runtime that registers after the job timed out (src/js/mod.rs); accepted risk, the 50 ms watchdog re-fire covers it."
+  deferred_at: 2026-10-21
