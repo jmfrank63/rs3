@@ -5,48 +5,48 @@ titles: json
 findings:
   - id: WR-01
     severity: warning
-    disposition: open
-    title: "The documented V8 stack-overflow stdout line has the wrong text and the wrong timing"
+    disposition: fixed
+    title: "The new `MemoryMax=` sizing rule underestimates memory by about 4× the store per concurrent `/list` or `op_rs3_list`; an operator who follows it gets an OOM kill and loses every key under normal traffic"
+  - id: IN-01
+    severity: info
+    disposition: fixed
+    title: "The `MemoryMax=` paragraph states the kill-and-empty consequence twice"
   - id: WR-02
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The README says CI runs `scripts/test-ci-guards.sh`, but that script is local-only"
   - id: WR-03
     severity: warning
-    disposition: open
-    title: "The security note treats \"loopback\" as private, but loopback is reachable by every local account and by browsers on the host"
+    disposition: fixed
+    title: "The security note treats \"loopback\" as private"
   - id: WR-04
     severity: warning
-    disposition: open
-    title: "The \"hardened\" unit has no memory ceiling, although the docs admit there is no heap limit"
-  - id: IN-01
-    severity: info
-    disposition: open
-    title: "The start limit turns client-triggerable crashes into a permanent outage"
+    disposition: fixed
+    title: "The \"hardened\" unit has no memory ceiling"
   - id: IN-02
     severity: info
-    disposition: open
-    title: "\"The environment wins over such a file anyway\" overstates how harmless `/.env` is under the unit"
+    disposition: fixed
+    title: "\"The environment wins over such a file anyway\" overstates how harmless `/.env` is"
   - id: IN-03
     severity: info
-    disposition: open
+    disposition: fixed
     title: "The Update section does not cover a changed unit or environment file"
-open: 7
+open: 0
 total: 7
-recorded: 2026-10-21T11:17:39.264Z
+recorded: 2026-10-21T11:35:54.482Z
 ---
 
 # Phase 06: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
-| WR-03 | warning | open | - |
-| WR-04 | warning | open | - |
-| IN-01 | info | open | - |
-| IN-02 | info | open | - |
-| IN-03 | info | open | - |
+| WR-01 | warning | fixed | 06-REVIEW-FIX.md (9a1e3b2; reconciled by hand: the fix report shortens the finding title, so the title check did not match) |
+| IN-01 | info | fixed | 06-REVIEW-FIX.md |
+| WR-02 | warning | fixed | 06-REVIEW-FIX.iter2.md (not in the current review) |
+| WR-03 | warning | fixed | 06-REVIEW-FIX.iter2.md (not in the current review) |
+| WR-04 | warning | fixed | 06-REVIEW-FIX.iter2.md (not in the current review) |
+| IN-02 | info | fixed | 06-REVIEW-FIX.iter2.md (not in the current review) |
+| IN-03 | info | fixed | 06-REVIEW-FIX.iter2.md (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
