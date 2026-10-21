@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 05
 current_phase_name: JS Execution Limits
 status: executing
-stopped_at: Completed 04-02-PLAN.md
-last_updated: "2026-10-21T00:13:10.224Z"
-last_activity: 2026-10-20
-last_activity_desc: Phase 04 execution started
-state_head: 208b95d56394975547e8b884c6914fdbfac8f2c5
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-10-21T00:23:25.109Z"
+last_activity: 2026-10-21
+last_activity_desc: Phase 05 execution started
+state_head: 9fff6041c586beffd8f29a2c5348accd295d11c7
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 14
-  completed_plans: 11
+  completed_plans: 12
   percent: 17
 ---
 
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-20)
 
 **Core value:** rs3 builds, tests and lints cleanly on current stable Rust (edition 2024) with only released dependencies, while every existing HTTP route and the JS-executes-against-the-store behaviour keep working with the same semantics.
-**Current focus:** Phase 04 — CI Gate on x86_64
+**Current focus:** Phase 05 — JS Execution Limits
 
 ## Current Position
 
-Phase: 05 (JS Execution Limits) — READY TO EXECUTE
-Plan: 2 of 2
+Phase: 05 (JS Execution Limits) — EXECUTING
+Plan: 2 of 3
 Status: Ready to execute
-Last activity: 2026-10-20 — Phase 04 execution started
+Last activity: 2026-10-21 — Phase 05 execution started
 
 Progress: [██░░░░░░░░] 17%
 
@@ -64,6 +64,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P03 | 6 min | 3 tasks | 8 files |
 | Phase 04 P01 | 5 min | 2 tasks | 6 files |
 | Phase 04 P02 | 2 min | 2 tasks | 2 files |
+| Phase 05 P01 | 8 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -103,6 +104,10 @@ Recent decisions affecting current work:
 - [Phase 04]: [04-01] ci-guards.sh enforces D-05 (a)-(h); grep/cargo-tree errors fail the guard; PyYAML skipped only in CI (structure check mandatory locally, never pip-installed); event-context interpolation rejected; test-ci-guards.sh proves 31 planted cases + CI skip
 - [Phase 04]: [04-02] Release smoke drives JS through the protected V8 platform on the release binary: PATCH 6*20 -> "120", throwing script -> exact 422 js_error body, server alive; startup crash reported as exit status (139 = x86_64 PKU symptom, D-07 fallback)
 - [Phase 04]: [04-02] Remote x86_64 CI run NOT observed (no push); handed off as pending human UAT in 04-02-SUMMARY.md for 04-UAT.md, with the D-07 fallback; CI-03 remote confirmation open
+- [Phase 05]: [05-01] Depth limit counts the PATCHed key as level 1: op_rs3_patch refuses when chain.len() >= max_patch_depth, before the store read and before any runtime; the 422 chain ends with the refused key
+- [Phase 05]: [05-01] Per-job Arc<JobState> (src/js/mod.rs) replaces ExecCtx's host_fault Arc: host fault, first-wins depth stop, stopped(), and the job's one error log sink
+- [Phase 05]: [05-01] JsExecutor::execute classifies once via classify(): Err(Internal) passes, host fault -> Internal, depth stop -> DepthLimit (422 js_depth_limit), else the result; nested run_script never classifies
+- [Phase 05]: [05-01] max_patch_depth in JsSettings (default 4) clamped to 1..=64 in Limits::from_settings; after a stop every op throws the depth error and writes nothing; one stop logs one line
 
 ### Pending Todos
 
@@ -142,6 +147,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T21:57:38.922Z
-Stopped at: Completed 04-02-PLAN.md
+Last session: 2026-10-21T00:23:24.936Z
+Stopped at: Completed 05-01-PLAN.md
 Resume file: None
