@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 05
 current_phase_name: JS Execution Limits
 status: executing
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-10-21T00:23:25.109Z"
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-10-21T00:37:42.447Z"
 last_activity: 2026-10-21
 last_activity_desc: Phase 05 execution started
-state_head: 9fff6041c586beffd8f29a2c5348accd295d11c7
+state_head: 501cbc80c3256f6973668a183095495a377857ad
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 14
-  completed_plans: 12
+  completed_plans: 13
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-20)
 ## Current Position
 
 Phase: 05 (JS Execution Limits) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-10-21 — Phase 05 execution started
 
@@ -65,6 +65,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 04 P01 | 5 min | 2 tasks | 6 files |
 | Phase 04 P02 | 2 min | 2 tasks | 2 files |
 | Phase 05 P01 | 8 min | 3 tasks | 6 files |
+| Phase 05 P02 | 11 min | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,10 @@ Recent decisions affecting current work:
 - [Phase 05]: [05-01] Per-job Arc<JobState> (src/js/mod.rs) replaces ExecCtx's host_fault Arc: host fault, first-wins depth stop, stopped(), and the job's one error log sink
 - [Phase 05]: [05-01] JsExecutor::execute classifies once via classify(): Err(Internal) passes, host fault -> Internal, depth stop -> DepthLimit (422 js_depth_limit), else the result; nested run_script never classifies
 - [Phase 05]: [05-01] max_patch_depth in JsSettings (default 4) clamped to 1..=64 in Limits::from_settings; after a stop every op throws the depth error and writes nothing; one stop logs one line
+- [Phase 05]: 05-02: outcome decided by the JobState phase CAS (finish() true = Timeout even with a computed value); never by the 'execution terminated' text
+- [Phase 05]: 05-02: one rs3-js-N-wd watchdog per worker, spawned inside the worker closure; Arm at pickup, Disarm before the next job, 50 ms re-fire
+- [Phase 05]: 05-02: rs3 ops return an empty string and never throw once the job timed out (an op Err cancels V8 termination, research S4)
+- [Phase 05]: 05-02: D-07 backstop in JsExecutor::run_job: timeout_ms + 2 s counted from a started signal at pickup; queue wait untimed
 
 ### Pending Todos
 
@@ -147,6 +152,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T00:23:24.936Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-10-21T00:37:42.251Z
+Stopped at: Completed 05-02-PLAN.md
 Resume file: None
