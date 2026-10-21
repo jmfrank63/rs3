@@ -458,7 +458,8 @@ after 2 s with an empty store. Repeated crashes hit the same start limit.
 
 ## Development
 
-These are the checks CI runs, in the order a contributor runs them locally:
+These are the checks CI runs, in the order a contributor runs them locally
+(`scripts/check-workflow.py` runs inside `scripts/ci-guards.sh` as guard (g)):
 
 ```sh
 cargo fmt --check
@@ -466,13 +467,17 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 cargo build --release --locked
 bash scripts/ci-guards.sh
-python3 scripts/check-workflow.py
-bash scripts/test-ci-guards.sh
 bash scripts/ci-smoke.sh
 ```
 
 `scripts/ci-smoke.sh` needs the release build first: it starts
 `target/release/rs3` on a free loopback port and drives it with curl.
+
+Also run the guard self-test locally; CI does not run it:
+
+```sh
+bash scripts/test-ci-guards.sh
+```
 
 CI is a single job in `.github/workflows/ci.yml` on GitHub's `ubuntu-26.04`
 x86_64 runner. It runs the repo guards, `cargo fmt --check`, clippy, the
