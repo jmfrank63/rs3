@@ -71,17 +71,18 @@ Requirements for the modernization milestone. Each maps to roadmap phases.
 - [x] **CI-02**: CI runs fmt check, clippy (`--all-targets -D warnings`) and tests with `--locked`, and any failure fails the build (no `continue-on-error`)
 - [x] **CI-03**: CI runs on an x86_64 Linux runner and passes (catches V8 platform/PKU issues not visible on aarch64) (implemented; remote x86_64 evidence: GitHub Actions run 39507141932 green on ubuntu-26.04 for operator commit fd8f43f — 171 tests at default threads, release smoke incl. PATCH "120" and 422 on the protected V8 platform; re-run on the hardened HEAD scripts pending as 04-UAT item 1)
 
-### Docker
+### Deployment
 
-- [ ] **DOCK-01**: Dockerfile builds with a current `rust` toolchain image (cargo-chef caching, `--locked`) whose Debian release matches the runtime image
-- [ ] **DOCK-02**: Runtime image is slim (e.g. distroless cc / debian-slim), non-root, and the container serves `GET /` when run with `SERVER.HOST=0.0.0.0`
-- [ ] **DOCK-03**: A `.dockerignore` excludes `target/` and other non-build files
+- [ ] **DEPL-01**: The obsolete container deployment is removed: the root `Dockerfile` and the `docker_rs3/` directory are deleted (the MSc-era version stays at git tag `msc`), no `.dockerignore` is added, and the docs, requirements and CI scripts no longer refer to it
+- [ ] **DEPL-02**: `Readme.md` documents the native release build (`cargo build --release --locked`) and a short install section for running the binary on a single Linux server
+- [ ] **DEPL-03**: An example hardened systemd unit (`deploy/rs3.service`) runs rs3 as an unprivileged user, takes `SERVER.HOST` / `SERVER.PORT` from an `EnvironmentFile`, restarts on failure, and applies sandboxing directives compatible with V8
 
 ### Documentation
 
-- [ ] **DOCS-01**: `Readme.md` documents the toolchain (Rust 1.99.1 / edition 2024), first-build V8 note, and build/run/test instructions
-- [ ] **DOCS-02**: `Readme.md` documents the new JS op syntax with the old→new op mapping and an example
-- [ ] **DOCS-03**: `Readme.md` documents HTTP error status codes and a "Behaviour changes" section (404 instead of `"[]"`, 400/422 inserts, escaped `/list`)
+- [ ] **DOCS-01**: `Readme.md` documents the toolchain (Rust 1.99.1 / edition 2024), first-build V8 note, configuration (`SERVER.HOST` / `SERVER.PORT`), and build/run/test instructions
+- [ ] **DOCS-02**: `Readme.md` documents the new JS op syntax with the old→new op mapping and an example, linking `docs/js-ops.md`
+- [ ] **DOCS-03**: `Readme.md` documents the HTTP API with its error status codes and a "Behaviour changes" section versus the 2021 version (sorted and escaped `/list`, 404 instead of `"[]"` for missing keys, 400/422 inserts and other 4xx errors, op renames, PATCH depth limit and timeout)
+- [ ] **DOCS-04**: `Cargo.toml` declares `license = "MIT"` and `Readme.md` states the MIT license
 
 ## v2 Requirements
 
@@ -118,14 +119,15 @@ Deferred. Tracked but not in the current roadmap.
 
 | Feature | Reason |
 |---------|--------|
-| Changes to `experiments/`, `aws/`, `docker_rs3/`, `Vagrantfile` | Explicitly excluded by the brief (except trivial Rust-version references) |
+| Changes to `experiments/`, `aws/`, `Vagrantfile` | Explicitly excluded by the brief; the one exception is the deleted stale `experiments/web_scrape_s3_api/Cargo.lock` (it triggered Dependabot alerts) |
+| Container image deployment | Dropped on 2026-10-21 by user decision: rs3 ships as a native binary on a single Linux server (see PROJECT.md Key Decisions) |
 | `web::Json` extractor for `/insert` | Rejects requests without a JSON content-type (breaks `curl -d`) and collapses the 400/422 split |
 | Reusing one `JsRuntime` across requests | Top-level `let` collisions between scripts (e.g. `fac.js` fails on second run); state leaks between requests |
 | `deno_runtime` / fs / net APIs in the JS sandbox | Expands attack surface; not needed for store ops |
 | Back-compat shim for `Deno.core.opSync` | Old API removed upstream; clean migration with documented mapping instead |
 | Workspace split into multiple crates | Single package required; each extra test binary re-links V8 |
 | Persistence / new store features | Modernization milestone, not a feature milestone |
-| musl / Alpine images | V8 prebuilt static libs target glibc |
+| musl / fully static builds | The V8 prebuilt static libs used here target glibc |
 
 ## Traceability
 
@@ -173,18 +175,19 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CI-01 | Phase 4 | Complete |
 | CI-02 | Phase 4 | Complete |
 | CI-03 | Phase 4 | Complete |
-| DOCK-01 | Phase 6 | Pending |
-| DOCK-02 | Phase 6 | Pending |
-| DOCK-03 | Phase 6 | Pending |
+| DEPL-01 | Phase 6 | Pending |
+| DEPL-02 | Phase 6 | Pending |
+| DEPL-03 | Phase 6 | Pending |
 | DOCS-01 | Phase 6 | Pending |
 | DOCS-02 | Phase 6 | Pending |
 | DOCS-03 | Phase 6 | Pending |
+| DOCS-04 | Phase 6 | Pending |
 
 **Coverage:**
-- v1 requirements: 46 total
-- Mapped to phases: 46
+- v1 requirements: 47 total
+- Mapped to phases: 47
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-10-20*
-*Last updated: 2026-10-20 after roadmap creation (traceability mapped to 6 phases)*
+*Last updated: 2026-10-21: Phase 6 re-scoped to native deployment (DOCK-01..03 dropped; DEPL-01..03 and DOCS-04 added)*

@@ -47,12 +47,13 @@ behaviour keep working with the same semantics.
 - [ ] No global store: the temporary `LazyLock` bridge is replaced by injected `web::Data` / `OpState` state (ARCH-02)
 - [ ] Store and config injected into the HTTP and JS layers (modules already split in Phase 1)
 - [ ] CI on GitHub Actions with `actions/checkout@v4`+, `dtolnay/rust-toolchain`, `Swatinem/rust-cache`; check/test/fmt/clippy fail the build (no `continue-on-error`)
-- [ ] Dockerfile on a current `rust` image (cargo-chef ok) with a slim runtime image
-- [ ] `Readme.md` updated for new toolchain, run instructions and new JS op syntax
+- [ ] Native deployment on a single Linux server: release build (`cargo build --release --locked`) and an example hardened systemd unit; the obsolete `Dockerfile` and `docker_rs3/` are removed
+- [ ] `Readme.md` updated for new toolchain, configuration, run instructions, HTTP API, new JS op syntax, behaviour changes and the MIT license (`license = "MIT"` in `Cargo.toml`)
 
 ### Out of Scope
 
-- `experiments/`, `aws/`, `docker_rs3/` Ansible content, `Vagrantfile` — explicitly left untouched this milestone (except trivial Rust-version references)
+- `experiments/`, `aws/`, `Vagrantfile` — explicitly left untouched this milestone (the one exception is the deleted stale `experiments/web_scrape_s3_api/Cargo.lock`, which triggered Dependabot alerts)
+- Container images — dropped on 2026-10-21: rs3 ships as a native binary on a single Linux server (see Key Decisions)
 - Git integration / serving repos over HTTP — future milestone; keep architecture open for it
 - VS Code integration / LSP-style access — future milestone
 - TypeScript execution via tsc-rs — future milestone; JS runtime layer should be swappable/extendable
@@ -91,6 +92,7 @@ behaviour keep working with the same semantics.
 | `GET /list` sorted by key | Legacy order was arbitrary hash order; deterministic output for tests | ✓ Shipped in Phase 1 (only visible store-route change in Phase 1) |
 | Accept inert `v8x 149.4.0-rc.4` optional lock entry | Optional dep of `deno_v8`, never built; DEPS-01 verified on manifest + active graph (D-21) | ✓ Accepted (operator UAT, Phase 1) |
 | Toolchain auto-install concurrency left unverified | Needs uninstalling 1.99.1; CI installs the pin explicitly | ⚠️ Accepted risk (operator, Phase 1) |
+| Drop Docker: ship rs3 as a native binary on a single Linux server (release build plus an example hardened systemd unit); delete the root `Dockerfile` and the `docker_rs3/` Docker/Ansible multi-container setup, add no `.dockerignore`, and re-word the Docker requirements (DOCK-01..03 → DEPL-01..03) | User decision 2026-10-21: one server for now, so a container runtime adds nothing; the multi-container setup was obsolete. The MSc-era version stays at git tag `msc` | — Pending (Phase 6) |
 
 ## Evolution
 
@@ -110,4 +112,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-20 after Phase 1*
+*Last updated: 2026-10-21: Phase 6 re-scoped from Docker to native deployment*

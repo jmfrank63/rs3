@@ -4,10 +4,10 @@ current_phase: 05
 current_phase_name: JS Execution Limits
 status: verifying
 stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-10-21T00:49:01.939Z"
+last_updated: "2026-10-21T09:26:17.890Z"
 last_activity: 2026-10-21
 last_activity_desc: Phase 05 execution started
-state_head: aad004e6da4cb1b7a44e4840addb2b2458052505
+state_head: 5c28ddefd9b667a86ed66325c5f40be144fd0aad
 progress:
   total_phases: 6
   completed_phases: 1
@@ -127,9 +127,13 @@ Recent decisions affecting current work:
 ### Blockers/Concerns
 
 - [Phase 4 → operator]: the hardened CI scripts at HEAD still need one remote run (push `modernize-toolchain`); the earlier run on fd8f43f was green on ubuntu-26.04 x86_64 (no PKU crash).
-- [Phase 6]: Docker isn't installed on the dev host, so the image build and smoke test need a CI job or another machine.
+- [Phase 6]: systemd (255 on the dev host) ignores dotted names such as `SERVER.HOST` in `Environment=` / `EnvironmentFile=`, so the example unit must bridge them (see the ROADMAP Phase 6 notes).
 - [Env]: `/tmp` is about 96% full. Keep `target/` under the project dir, since a debug build with V8 is about 2.6 GB.
 - [Open]: The user should confirm the behaviour changes (`/list` escaping + sort order — legacy `" : "` whitespace is now preserved; 404 replacing `"[]"`; 400/422 inserts; BOM/malformed .env now fail startup; the op rename) and have them recorded in PROJECT.md Key Decisions.
+
+### Roadmap Evolution
+
+- Phase 6 edited: re-scoped from Docker Image & Documentation to Native Deployment & Documentation (user decision 2026-10-21); edited fields: title, goal, requirements (DOCK-01..03 dropped; DEPL-01..03 and DOCS-04 added), success_criteria, notes
 
 ## Deferred Verification
 

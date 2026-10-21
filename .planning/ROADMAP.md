@@ -11,7 +11,8 @@ in place. Phase 2 brings back the six non-JS routes on injected state, with type
 isolated tests. Phase 3 brings back PATCH and the five JS ops on current deno_core. Phase 4 adds
 an x86_64 CI gate right after the V8 port, so platform crashes that don't occur on aarch64 show
 up early. Phase 5 adds recursion and timeout limits so no script can kill or pin the server.
-Phase 6 ships the Docker image and README. TOOL-03 (`cargo build`, `cargo test`,
+Phase 6 replaces the Docker artefacts with native deployment (a release build and an example
+hardened systemd unit for a single Linux server) and rewrites the README. TOOL-03 (`cargo build`, `cargo test`,
 `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` all green) is established in
 Phase 1 and must still pass at the end of every later phase.
 
@@ -28,7 +29,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 3: JavaScript Runtime Port** - PATCH and the five `op_rs3_*` ops on current deno_core (`#[op2]` + `extension!`), dedicated JS threads, all JS artefacts migrated
 - [ ] **Phase 4: CI Gate on x86_64** - GitHub Actions workflow gating fmt/clippy/test on an x86_64 runner; archived actions-rs workflow removed
 - [ ] **Phase 5: JS Execution Limits** - PATCH nesting depth limit (422) and execution timeout (504) so no script can crash or pin the server
-- [ ] **Phase 6: Docker Image & Documentation** - cargo-chef Dockerfile with slim non-root runtime and `.dockerignore`; README for toolchain, op syntax and behaviour changes
+- [ ] **Phase 6: Native Deployment & Documentation** - Docker artefacts removed; native release build and an example hardened systemd unit; README for toolchain, config, HTTP API, op syntax, behaviour changes and the MIT license
 
 ## Phase Details
 
@@ -174,20 +175,21 @@ Plans:
 
 **Notes**: Research flag: the native stack needed per nesting level (about 16 MiB per JS thread; tune it with a recursion test), and classifying termination by reason rather than by message string. The heap limit, cancel-on-disconnect and 503 backpressure are v2 (JSHD-*).
 
-### Phase 6: Docker Image & Documentation
+### Phase 6: Native Deployment & Documentation
 
-**Goal:** As a new developer or deployer of rs3, I want to run it from a slim, non-root Docker image and learn the toolchain, JS op syntax and behaviour changes from the README, so that I can build, run and extend the modernized server without reading the source.
+**Goal:** As a new developer or operator of rs3, I want to build it as a native binary, run it on a single Linux server under an example hardened systemd unit, and learn the toolchain, configuration, HTTP API, JS op syntax and behaviour changes from the README, so that I can build, deploy and extend the modernized server without reading the source.
 **Mode:** mvp
 **Depends on**: Phase 5
-**Requirements**: DOCK-01, DOCK-02, DOCK-03, DOCS-01, DOCS-02, DOCS-03
+**Requirements**: DEPL-01, DEPL-02, DEPL-03, DOCS-01, DOCS-02, DOCS-03, DOCS-04
 **Success Criteria** (what must be TRUE):
-  1. `docker build` succeeds from a current `rust` toolchain builder with cargo-chef dependency caching and `--locked`, whose Debian release matches the runtime image, and `.dockerignore` keeps `target/` and other non-build files out of the build context
-  2. `docker run` with `SERVER.HOST=0.0.0.0` starts a slim, non-root container, and `curl` to `GET /` from the host returns `"Welcome to rs3"`
-  3. Following only `Readme.md`, a developer can set up Rust 1.99.1 / edition 2024, expect the slow first V8 build, and build, run and test the server
-  4. `Readme.md` documents the `Deno.core.ops.op_rs3_*` syntax with the old-to-new op mapping and a working example, the HTTP error status codes, and a "Behaviour changes" section (404 instead of `"[]"`, 400/422 on insert, escaped `/list`)
+  1. The root `Dockerfile` and the `docker_rs3/` directory are deleted, no `.dockerignore` is added, and no Docker references remain in `Readme.md`, `docs/`, the requirements or the CI scripts; the MSc-era deployment stays reachable at git tag `msc`, and `aws/`, `Vagrantfile` and `experiments/` are untouched (apart from the stale `experiments/web_scrape_s3_api/Cargo.lock`, already removed)
+  2. Following only `Readme.md`, a developer can set up Rust 1.99.1 / edition 2024, expect the slow first V8 build, configure `SERVER.HOST` / `SERVER.PORT`, and build (`cargo build --release --locked`), run and test the server
+  3. `deploy/rs3.service` is an example hardened systemd unit that runs rs3 as an unprivileged user, takes its host and port from an `EnvironmentFile`, restarts on failure and applies sandboxing directives that V8 tolerates; `systemd-analyze verify` accepts it, and a short README install section puts the binary, the unit and the environment file on a single Linux server
+  4. `Readme.md` documents the HTTP API with its status codes, the `Deno.core.ops.op_rs3_*` syntax with the legacy-to-new op mapping and a working example (linking `docs/js-ops.md`), and a "Behaviour changes" section versus the 2021 version (sorted and escaped `/list`, 404 for missing keys, 400/422 errors, op renames, PATCH depth limit and timeout); it states the MIT license, and `Cargo.toml` declares `license = "MIT"`
+  5. CI stays green with zero annotations: `scripts/ci-guards.sh`, `scripts/check-workflow.py` and `scripts/test-ci-guards.sh` stay consistent with every change and pass, and the TOOL-03 gate passes
 
 **Plans**: TBD
-**Notes**: Docker is not installed on the dev host, so the image build and the `docker run` + `curl /` smoke test must run where Docker is available (a CI job or the user's machine). Use a builder image that is not `-slim` (the V8 build.rs needs curl). Leave `docker_rs3/`, `aws/` and the `Vagrantfile` alone apart from trivial Rust-version references.
+**Notes**: Re-scoped on 2026-10-21 from "Docker Image & Documentation" (user decision: native binary on one server). systemd 255 on the dev host ignores variable names containing a dot in `Environment=` / `EnvironmentFile=` (it logs "Ignoring invalid environment assignment 'SERVER.HOST=…'"), so the unit cannot hand `SERVER.HOST` / `SERVER.PORT` to rs3 straight from the file; the plan must bridge this (for example underscore names in the file passed on through `env(1)` in `ExecStart=`) and prove it under a real systemd. Do not set `MemoryDenyWriteExecute=` (V8's JIT needs writable and executable pages), and test any `SystemCallFilter=` against V8, including the PKU `pkey_*` calls on x86_64. Keep it minimal: no packaging and no installer script. The `LICENSE` file is on `main` (9d1596b) and arrives with the merge.
 
 ## Progress
 
@@ -201,4 +203,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 3. JavaScript Runtime Port | 3/3 | In Progress | - |
 | 4. CI Gate on x86_64 | 2/2 | In Progress | - |
 | 5. JS Execution Limits | 3/3 | In Progress | - |
-| 6. Docker Image & Documentation | 0/TBD | Not started | - |
+| 6. Native Deployment & Documentation | 0/TBD | Not started | - |
