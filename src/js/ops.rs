@@ -575,6 +575,37 @@ mod tests {
         assert_eq!(logs, 2);
     }
 
+    /// The depth error a job stopped at `chain` (limit 4) answers.
+    fn depth_err(chain: &[&str]) -> Result<String, ExecError> {
+        Err(ExecError::DepthLimit {
+            limit: 4,
+            chain: chain.iter().map(|k| (*k).to_owned()).collect(),
+        })
+    }
+
+    #[test]
+    fn depth_stop_refuses_later_ops_and_keeps_earlier_writes() {
+        let store = Store::new();
+        store.insert("me".into(), "Deno.core.ops.op_rs3_patch('me')".into());
+        store.insert("keep".into(), "k".into());
+        let src = "Deno.core.ops.op_rs3_insert(JSON.stringify({before: '1'})); \
+                   try { Deno.core.ops.op_rs3_patch('me') } \
+                   catch (e) { \
+                     try { Deno.core.ops.op_rs3_insert(JSON.stringify({after: e.message})) } \
+                     catch (e2) {} \
+                     try { Deno.core.ops.op_rs3_delete('keep') } catch (e2) {} \
+                     try { Deno.core.ops.op_rs3_get('keep') } catch (e2) {} \
+                     'caught' }";
+        assert_eq!(
+            run_js(&store, src),
+            depth_err(&["test", "me", "me", "me", "me"])
+        );
+        // No transactions: the write before the stop stays.
+        assert_eq!(store.get("before"), Ok("1".to_owned()));
+        assert!(store.get("after").is_err(), "a write after the stop landed");
+        assert_eq!(store.get("keep"), Ok("k".to_owned()));
+    }
+
     #[test]
     fn nested_patch_of_missing_key_throws() {
         let store = Store::new();
