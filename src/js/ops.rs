@@ -334,8 +334,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::ExecCtx;
+    use crate::js::executor::JsExecutor;
     use crate::js::runtime::run_script;
-    use crate::js::{DepthStop, ExecError, block_on, run_js, test_executor};
+    use crate::js::{
+        DepthStop, ExecError, JsSettings, block_on, dedicated_executor, run_js, test_executor,
+    };
     use crate::store::{Store, legacy};
 
     /// A top-level context named "test" with a fresh job and the default limit.
@@ -422,6 +425,44 @@ mod tests {
     fn run_ctx(ctx: ExecCtx, source: &str) -> Result<String, ExecError> {
         let source = source.to_owned();
         block_on(test_executor().run(move || run_script(ctx, "test", source)))
+    }
+
+    /// Run `source` against `ctx` as the job of `ctx` on `exec`: the context's
+    /// runtimes are armed by the watchdog and the result is classified. Use it
+    /// for every script that can loop.
+    fn run_ctx_on(exec: &JsExecutor, ctx: ExecCtx, source: &str) -> Result<String, ExecError> {
+        let source = source.to_owned();
+        let job = Arc::clone(&ctx.job);
+        block_on(exec.run_job(job, "test".to_owned(), move || {
+            run_script(ctx, "test", source)
+        }))
+    }
+
+    /// A dedicated one-worker executor with a 300 ms timeout.
+    fn timeout_exec() -> JsExecutor {
+        dedicated_executor(JsSettings {
+            workers: 1,
+            queue_capacity: 4,
+            timeout_ms: 300,
+            ..JsSettings::default()
+        })
+    }
+
+    const TIMEOUT_300: Result<String, ExecError> = Err(ExecError::Timeout { limit_ms: 300 });
+
+    #[test]
+    fn timeout_refuses_writes_after_stop() {
+        let store = Store::new();
+        store.insert("loop".into(), "while(true){}".into());
+        // Straight-line after the catch, so this cannot hang before the fix.
+        let src = r#"try { Deno.core.ops.op_rs3_patch('loop') } catch (e) {}
+                     Deno.core.ops.op_rs3_insert('{"after":"1"}'); 'done'"#;
+        let r = run_ctx_on(&timeout_exec(), ctx_for(&store), src);
+        assert_eq!(r, TIMEOUT_300);
+        assert!(
+            store.get("after").is_err(),
+            "a write after the timeout landed"
+        );
     }
 
     fn failing_at(store: &Store, depth: u32) -> ExecCtx {
