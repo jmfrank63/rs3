@@ -151,6 +151,7 @@ Recent decisions affecting current work:
 | Phase | State | Resume |
 |-------|-------|--------|
 | 02 | verification_deferred_human | /gsd-verify-work 02 |
+| 06 | verification_deferred_human | /gsd-verify-work 06 |
 
 Phase 01 (roadmap-complete): VERIFICATION.md reads `stale` because Phase 02 intentionally evolved files it covered (STORE bridge → injected AppState, `dotenv()` → `dotenv_iter()`, legacy codec). Re-verification of every stale earlier phase is scheduled once, against the final tree, immediately before the milestone audit (`/gsd-execute-phase N` resumes at the verification gates).
 
@@ -160,7 +161,9 @@ Phase 03: UAT complete (operator 2026-10-21: items 1 and 2 pass, item 3 docs/js-
 
 Phase 04: UAT complete (operator 2026-10-21: all 4 pass; CI runs 39507141932 and 39527188207 green on ubuntu-26.04 x86_64 with 0 annotations). VERIFICATION.md reads `stale` (Phase 5 evolved Cargo.toml and scripts/ci-smoke.sh); re-verified before the audit.
 
-Phase 05: complete (2026-10-21). UAT complete (3 pass, late-registration path an accepted-risk follow-up) and VERIFICATION.md canonicalized to `passed`.
+Phase 05: complete (2026-10-21). UAT complete (3 pass, late-registration path an accepted-risk follow-up) and VERIFICATION.md canonicalized to `passed`; Phase 6 then evolved `Cargo.toml`, `docs/js-ops.md` and an `src/js/executor.rs` comment, so the report reads `stale` again and is re-verified with the others before the audit.
+
+Phase 06: executed and verified 2026-10-21 (42/43 must-haves; full D-17 gate, 130-check README replay and five user-manager unit modes green on HEAD 0ee6593; code review 3 fix iterations, 11 findings fixed, ledger 0 open; VALIDATION nyquist-compliant; SECURITY threats_open 0). 7 human items are in `06-UAT.md`: the root-only unit on a real server, x86_64 PKU under the seccomp filter, the sudo Update/Troubleshooting commands, a MemoryMax= sizing-wording decision, README readability, remote CI on HEAD after the operator push, and the judgment-tier prohibitions. Per the user's instruction (record human-only items and finish), the autonomous run continues to the pre-audit re-verification and the milestone lifecycle.
 
 ## Deferred Items
 
