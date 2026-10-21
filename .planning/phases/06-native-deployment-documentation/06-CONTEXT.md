@@ -134,7 +134,7 @@ Not in this phase:
   - security note: rs3 has no authentication, and anyone who can reach the port can store and
     run JavaScript. Keep the loopback default, or put something you control in front (a reverse
     proxy with auth/TLS). TLS is not built in.
-- **D-11 Verification without root.** The dev host has no sudo, and Ubuntu 24.04 blocks
+- **D-11 Verification without root:** The dev host has no sudo, and Ubuntu 24.04 blocks
   unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns = 1`). A user-manager
   unit with `ProtectSystem=` etc. fails with `218/CAPABILITIES`, even with `PrivateUsers=yes`.
   Therefore:
@@ -193,7 +193,7 @@ Not in this phase:
   - the Docker-era research verified many README facts
     (`git show 718065e:.planning/phases/06-docker-image-documentation/06-RESEARCH.md`). It may
     seed research, but re-verify everything.
-- **D-14 Behaviour changes since 2021.** The user's list plus the verified extras:
+- **D-14 Behaviour changes since 2021:** The user's list plus the verified extras:
   - `/list` is sorted by key, with keys and values JSON-escaped. The legacy `" : "` spacing is
     kept, and the `,]` quirk is gone.
   - a missing key in GET/DELETE/PATCH gives 404 JSON `not_found` (also on an empty store),
@@ -212,7 +212,7 @@ Not in this phase:
     exit 1.
 - **D-15 Manifest:** add `license = "MIT"` to `[package]` in `Cargo.toml`. Nothing else changes.
   `Cargo.lock` must stay byte-identical.
-- **D-16 Review carry-overs.** Small doc/comment fixes:
+- **D-16 Review carry-overs:** Small doc/comment fixes:
   - 03-REVIEW IN-03: `docs/js-ops.md` must not claim that stdout output cannot fake log lines.
     stdout prints are raw, and stderr prints are escaped.
   - 05-REVIEW IN-02: fill the gaps in the `docs/js-ops.md` ops table and limits wording.

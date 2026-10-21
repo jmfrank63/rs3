@@ -188,7 +188,18 @@ Plans:
   4. `Readme.md` documents the HTTP API with its status codes, the `Deno.core.ops.op_rs3_*` syntax with the legacy-to-new op mapping and a working example (linking `docs/js-ops.md`), and a "Behaviour changes" section versus the 2021 version (sorted and escaped `/list`, 404 for missing keys, 400/422 errors, op renames, PATCH depth limit and timeout); it states the MIT license, and `Cargo.toml` declares `license = "MIT"`
   5. CI stays green with zero annotations: `scripts/ci-guards.sh`, `scripts/check-workflow.py` and `scripts/test-ci-guards.sh` stay consistent with every change and pass, and the TOOL-03 gate passes
 
-**Plans**: TBD
+**Plans:** 2 plans
+
+Plans:
+**Wave 1**
+- [ ] 06-01-PLAN.md: Native deployment slice (wave 1). The tracer adds license = "MIT", deploy/rs3.service (the D-05..D-08 unit plus StartLimitIntervalSec/StartLimitBurst, SyslogIdentifier and ProtectProc) with deploy/rs3.conf, and the README overview, Deployment and License sections. It proves them under the systemd user manager: the unit's own ExecStart and EnvironmentFile serve GET / and a V8 PATCH with seccomp active, systemd-analyze verify is clean, the exposure is 1.5, and an install dry-run succeeds. Then the failure modes, proven and documented: a seccomp kill-action run with nested PATCH, 422 and 504; the start limit on a broken or missing env file; install over a running binary; and the root-only directives handed to operator UAT. Then the removal of Dockerfile and docker_rs3/ and the dead ignore line, the brief re-scope, and the D-17 gate
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 06-02-PLAN.md: Developer documentation slice (wave 2). The tracer writes Requirements, Quick start, Configuration and HTTP API from live output and adds a replay script that diffs every documented body, status and startup line against the release binary. Then JavaScript ops, Limits and Behaviour changes (413 and Content-Type stated as unchanged), replayed, plus the docs/js-ops.md review fixes (IN-02, IN-03, IN-07). Then the Development section, the IN-05 comment, the D-17 gate with the replay and unit run on the final tree, and the validation map
+
+**Cross-cutting constraints:**
+- At the end of every plan, bash scripts/ci-guards.sh, python3 scripts/check-workflow.py, bash scripts/test-ci-guards.sh, cargo fmt --check, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked, cargo build --release --locked and bash scripts/ci-smoke.sh exit 0 (D-17). ci.yml and scripts/ are not edited, Cargo.lock stays byte-identical, and no word naming the container tool appears outside .planning, aws, Vagrantfile and experiments. No git push, and the dotenv file is never named in a command.
+
 **Notes**: Re-scoped on 2026-10-21 from "Docker Image & Documentation" (user decision: native binary on one server). systemd 255 on the dev host ignores variable names containing a dot in `Environment=` / `EnvironmentFile=` (it logs "Ignoring invalid environment assignment 'SERVER.HOST=…'"), so the unit cannot hand `SERVER.HOST` / `SERVER.PORT` to rs3 straight from the file; the plan must bridge this (for example underscore names in the file passed on through `env(1)` in `ExecStart=`) and prove it under a real systemd. Do not set `MemoryDenyWriteExecute=` (V8's JIT needs writable and executable pages), and test any `SystemCallFilter=` against V8, including the PKU `pkey_*` calls on x86_64. Keep it minimal: no packaging and no installer script. The `LICENSE` file is on `main` (9d1596b) and arrives with the merge.
 
 ## Progress
@@ -203,4 +214,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 3. JavaScript Runtime Port | 3/3 | In Progress | - |
 | 4. CI Gate on x86_64 | 2/2 | In Progress | - |
 | 5. JS Execution Limits | 3/3 | Complete    | 2026-10-21 |
-| 6. Native Deployment & Documentation | 0/TBD | Not started | - |
+| 6. Native Deployment & Documentation | 0/2 | Planned | - |

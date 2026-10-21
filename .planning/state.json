@@ -31,13 +31,13 @@
     {
       "number": "6",
       "name": "Native Deployment & Documentation",
-      "status": "pending"
+      "status": "in_progress"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (verify)",
-    "reason": "Phase 2 of 6 · 33% · ready to verify"
+    "label": "Advance to the next step",
+    "reason": "Phase 6 of 6 · 33% · executing"
   },
-  "updated_at": "2026-10-21T09:30:43.902Z"
+  "updated_at": "2026-10-21T10:35:52.348Z"
 }
