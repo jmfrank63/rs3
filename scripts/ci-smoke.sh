@@ -10,6 +10,20 @@
 #   PATCH /key/m            -> 200 "120"  (stored script run in V8)
 #   PATCH /key/boom         -> 422 {"error":"js_error","message":"Uncaught Error: boom"}
 #   GET / after JS error    -> 200 "Welcome to rs3", and the server process is still alive
+#   POST /insert me, loop   -> 200  (me patches itself, loop = while(true){})
+#   PATCH /key/me           -> 422 {"error":"js_depth_limit","message":"PATCH nesting depth limit (4)
+#                              exceeded: me -> me -> me -> me -> me"}  (one line in the real body)
+#   PATCH /key/loop         -> sent in the background; while it runs:
+#     GET /                 -> 200 "Welcome to rs3"
+#     PATCH /key/m          -> 200 "120" before the loop answers (only when nproc >= 2, because
+#                              the pool has one JS worker per core; skipped with a note otherwise)
+#   PATCH /key/loop         -> 504 {"error":"js_timeout","message":"script exceeded the 5000 ms
+#                              execution limit"}, at least 4900 ms and under 9000 ms after it was sent
+#   PATCH /key/m            -> 200 "120" after the timeout, and the server process is still alive
+# The release binary uses the default JS limits: nesting depth 4 and a 5000 ms timeout. Both are
+# set in code; there is no environment knob, so the timeout check waits about 5 s. This smoke is
+# the only place where the timeout watchdog terminates a script under the protected V8 platform
+# on the x86_64 runner (debug test builds use the unprotected platform).
 # A server that dies fails the smoke with its exit status, whether it dies during startup or
 # during a request. Status 139 (SIGSEGV) is the x86_64 PKU symptom of the protected V8
 # platform. V8 isolates are created lazily on the JS workers, so the crash shows up at the
@@ -23,18 +37,25 @@ BIN="${RS3_BIN:-target/release/rs3}"
 PORT="${RS3_SMOKE_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
 BASE="http://127.0.0.1:${PORT}"
 LOG="$(mktemp)"
+LOOP_OUT="$(mktemp)"
 PID=""
+LOOP_PID=""
 
 # cleanup: SIGTERM, then SIGKILL after 5 s, so a hung graceful shutdown cannot block the job.
+# A still-running background request (LOOP_PID) is killed and reaped first.
 cleanup() {
   local i
+  if [[ -n "$LOOP_PID" ]]; then
+    kill "$LOOP_PID" 2>/dev/null || true
+    wait "$LOOP_PID" 2>/dev/null || true
+  fi
   if [[ -n "$PID" ]]; then
     kill "$PID" 2>/dev/null || true
     for i in $(seq 1 50); do kill -0 "$PID" 2>/dev/null || break; sleep 0.1; done
     kill -9 "$PID" 2>/dev/null || true
     wait "$PID" 2>/dev/null || true
   fi
-  rm -f "$LOG"
+  rm -f "$LOG" "$LOOP_OUT"
 }
 trap cleanup EXIT
 
@@ -123,5 +144,56 @@ req GET /
 [[ "$CODE" == "200" && "$BODY" == '"Welcome to rs3"' ]] || fail "GET / after JS error -> ${CODE} ${BODY}"
 kill -0 "$PID" 2>/dev/null || fail "server died after JS error"
 echo "ci-smoke: ok   GET / after JS error -> 200, server alive"
+
+# Depth limit (default 4): a key that patches itself is stopped at the fifth level.
+req POST /insert '{"me":"Deno.core.ops.op_rs3_patch(\"me\")","loop":"while(true){}"}'
+[[ "$CODE" == "200" ]] || fail "POST /insert me, loop -> ${CODE} ${BODY}"
+echo "ci-smoke: ok   POST /insert me, loop -> 200"
+
+req PATCH /key/me
+[[ "$CODE" == "422" && "$BODY" == '{"error":"js_depth_limit","message":"PATCH nesting depth limit (4) exceeded: me -> me -> me -> me -> me"}' ]] \
+  || fail "PATCH /key/me -> ${CODE} ${BODY}"
+echo "ci-smoke: ok   PATCH /key/me -> 422 js_depth_limit"
+
+# Timeout (default 5000 ms): a never-ending script runs in the background while other
+# requests are answered. Its output (body, newline, status code) lands in LOOP_OUT.
+curl -sS --max-time 30 -w $'\n%{http_code}' -X PATCH "$BASE/key/loop" >"$LOOP_OUT" &
+LOOP_PID=$!
+LOOP_START=$(date +%s%3N)
+sleep 0.5
+
+req GET /
+[[ "$CODE" == "200" && "$BODY" == '"Welcome to rs3"' ]] || fail "GET / during a runaway PATCH -> ${CODE} ${BODY}"
+echo "ci-smoke: ok   GET / during a runaway PATCH -> 200"
+
+CPUS=$(nproc)
+if (( CPUS >= 2 )); then
+  req PATCH /key/m
+  [[ "$CODE" == "200" && "$BODY" == '"120"' ]] || fail "PATCH /key/m during a runaway PATCH -> ${CODE} ${BODY}"
+  # The loop must still be running: its curl has not exited and has written nothing yet.
+  kill -0 "$LOOP_PID" 2>/dev/null && [[ ! -s "$LOOP_OUT" ]] \
+    || fail "PATCH /key/loop answered before PATCH /key/m: $(cat "$LOOP_OUT")"
+  echo "ci-smoke: ok   PATCH /key/m during a runaway PATCH -> 200 \"120\""
+else
+  echo "ci-smoke: skip PATCH /key/m during a runaway PATCH (nproc ${CPUS})"
+fi
+
+loop_rc=0
+wait "$LOOP_PID" || loop_rc=$?
+LOOP_MS=$(( $(date +%s%3N) - LOOP_START ))
+LOOP_PID=""
+(( loop_rc == 0 )) || fail "PATCH /key/loop: transport error (curl status ${loop_rc})"
+loop_raw=$(cat "$LOOP_OUT")
+LOOP_CODE="${loop_raw##*$'\n'}"
+LOOP_BODY="${loop_raw%$'\n'*}"
+[[ "$LOOP_CODE" == "504" && "$LOOP_BODY" == '{"error":"js_timeout","message":"script exceeded the 5000 ms execution limit"}' ]] \
+  || fail "PATCH /key/loop -> ${LOOP_CODE} ${LOOP_BODY} after ${LOOP_MS} ms"
+(( LOOP_MS >= 4900 && LOOP_MS < 9000 )) || fail "PATCH /key/loop -> 504 after ${LOOP_MS} ms (expected 4900 to 8999 ms)"
+echo "ci-smoke: ok   PATCH /key/loop -> 504 js_timeout after ${LOOP_MS} ms"
+
+req PATCH /key/m
+[[ "$CODE" == "200" && "$BODY" == '"120"' ]] || fail "PATCH /key/m after the timeout -> ${CODE} ${BODY}"
+kill -0 "$PID" 2>/dev/null || fail "server died after the timeout"
+echo "ci-smoke: ok   PATCH /key/m after the timeout -> 200 \"120\", server alive"
 
 echo "ci-smoke: OK (${BIN}, port ${PORT})"
