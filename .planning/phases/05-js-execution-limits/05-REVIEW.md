@@ -1,6 +1,6 @@
 ---
 phase: 05-js-execution-limits
-reviewed: 2026-10-21T01:00:00Z
+reviewed: 2026-10-21T02:00:00Z
 depth: standard
 files_reviewed: 9
 files_reviewed_list:
@@ -15,151 +15,88 @@ files_reviewed_list:
   - src/js/runtime.rs
 findings:
   critical: 0
-  warning: 3
-  info: 7
-  total: 10
+  warning: 0
+  info: 8
+  total: 8
 status: issues_found
 ---
 
-# Phase 5: Code Review Report
+# Phase 5: Code Review Report (re-review after fix iteration 1)
 
-**Reviewed:** 2026-10-21T01:00:00Z
+**Reviewed:** 2026-10-21T02:00:00Z
 **Depth:** standard
 **Files Reviewed:** 9
-**Status:** issues_found
+**Status:** issues_found (info only)
 
 ## Summary
 
-I reviewed the Phase 5 watchdog, termination group, classification, depth limit, backstop, docs and release smoke against D-01..D-14 and the resolved research questions. Where a claim could be checked, I checked it in a throwaway copy of the crate under `target/tmp`. That copy has been deleted, and no tracked file was changed.
+This is an `--auto` re-review of the full Phase 5 scope after fix iteration 1: 82d11a3 (WR-01), 1edc2a8 (WR-02, which also fixed IN-04) and dfd1120 (WR-03). The previous report is `05-REVIEW.iter2.md`. I re-read all nine files in full and traced each fix through `run_script`, `run_fresh`, `op_rs3_patch`, `classify`, `worker_loop` and the smoke.
 
-**Verified sound (no finding):**
-- **JobState CAS.** `fire()` and `finish()` share one `AtomicU8`, so a job ends either finished or timed out, never both.
-- **No late kill.** Each job has its own `Arc<JobState>` and isolate list. A late `fire()` on job N cannot reach job N+1. The FIFO `Arm`/`Disarm` channel also keeps the watchdog's commands in order.
-- **register vs fire.** `register()` checks `timed_out()` while holding the registry lock. In every interleaving with `fire()`, either `fire()` sees the handle or `register()` terminates it.
-- **Drop order.** `_registered` is declared after `rt` in `run_fresh`, so it is dropped first. The isolate leaves the group before it is disposed.
-- **Locks.** There is no lock-order inversion between the `isolates` mutex and V8's handle mutex, and a poisoned lock is recovered with `into_inner`.
-- **Depth limit.** The `chain.len() >= max_patch_depth` check matches the documented contract: 4 scripts counting the PATCHed key, chain `me -> me -> me -> me -> me`. The clamp to 1 means no nested PATCH.
-- **Precedence.** `classify` applies host fault > timeout > depth > result.
-- **Production code never unwraps.**
+I ran the five new or affected tests in the main checkout: `host_fault_during_the_timeout_beats_it_and_is_logged`, `nested_boot_without_stack_is_a_catchable_script_error`, `uncaught_nested_boot_without_stack_is_a_script_error`, `only_a_nested_js_boot_failure_is_blamed_on_the_stack` and `patch_after_a_caught_fault_is_refused_without_running`. All five passed. The build went into the gitignored `target/`, and no tracked file was changed. I did not run any unarmed loop or unbounded self-patching script.
 
-**Tested empirically in the scratch copy:**
-- A tight loop over a throwing deno_core built-in op (`op_close(987654)`) never escaped termination in 10 of 10 runs. Neither did a loop over a throwing argument conversion (`op_rs3_get({})`), also 10 of 10. Both throw through deno_core's native error builder, and the 50 ms re-fire covered the few late cases (reply at 351 to 419 ms against a 300 ms limit). The worker served a canary job right after every run.
-- The full suite passed 3 times in a row and 4 times in parallel, at about 5.5 s per run.
+**The previous warnings are resolved:**
+- **WR-01 (smoke):** fixed. The window `4900 <= LOOP_MS < 6500` now ends below the backstop, which answers at about 7000 ms. `worker_loop` writes `error: js timeout in "loop" after 5000 ms` through `JobState::log_error` (an unbuffered `eprintln!`). It does so after `job.finish()` and before `reply.send`, at `executor.rs:363-374`. So when curl has the 504, the line is already in `$LOG`. The grep therefore has no race, and it proves that the worker which timed out was freed.
+- **WR-02 (host fault during a timeout):** fixed. `op_rs3_patch` now logs and records a nested `Internal`/`Unavailable` before the `timed_out()` early return (`ops.rs:322-342`). The `!ctx.host_fault()` guard still makes sure the fault is logged only once. `run_script`'s synthesized `Internal("a nested JS runtime failed ...")` is produced only when the flag is already set, so it is never logged a second time. `classify` then answers 500 ahead of 504. The `map_err` now lists every variant (IN-04 is resolved).
+- **WR-03 (nested boot without stack):** fixed. `boot_failed_for_lack_of_stack` matches on `CoreErrorKind` and requires `depth > 0`. The nested isolate is registered only after `try_new` returns (`runtime.rs:79-84`), so watchdog termination cannot cause a Parse/Execute/Js boot failure. The boot scripts are fixed and run at depth 0 on every request. That leaves the caller's stack as the only realistic cause, so the classification holds. In my run the failure was `Failed to parse ext:core/00_primordials.js`. It was classified as a script error and caught, and the job's later ops still worked. A boot failure that happens after a timeout is not logged, and the op returns `""`, so nothing is thrown into a terminating isolate.
 
-**Problems found:**
-- The release smoke cannot tell a working watchdog from the backstop.
-- A nested host fault that coincides with a timeout is silently dropped: it is not logged, and the request answers 504 instead of 500.
-- A client can trigger a "host fault" 500 by exhausting the JS stack before calling `op_rs3_patch`. I reproduced this.
-
-## Warnings
-
-### WR-01: The smoke's timeout window includes the backstop, so a broken watchdog still passes
-
-**File:** `scripts/ci-smoke.sh:189-197` (also the header comment at `:23-26`)
-**Issue:** The header says this smoke is "the only place where the timeout watchdog terminates a script under the protected V8 platform". Its assertions cannot prove that.
-
-- **Timing window.** The loop check accepts a 504 with the exact `js_timeout` body anywhere in `4900 <= LOOP_MS < 9000`. The backstop (`run_job`, `executor.rs:229-241`) answers the same status and the same body at about `timeout_ms + BACKSTOP_GRACE = 7000 ms`, which is inside that window.
-- **Follow-up request.** The later `PATCH /key/m after the timeout` check runs on a pool with one worker per core. On any runner with `nproc >= 2` (the CI runner included), another worker serves it.
-
-**Consequence:** Suppose `terminate_execution()` from the `-wd` thread silently did nothing on x86_64 with the protected platform (a PKU or thread-ancestry problem, which is exactly what this check exists to catch). The smoke would still see a 504 at about 7 s and a 200 for `m`, and would print `OK`. Meanwhile the server would have a JS worker spinning forever.
-
-**Fix:** Bound the window below the backstop, and assert which path answered:
-```bash
-(( LOOP_MS >= 4900 && LOOP_MS < 6500 )) || fail "PATCH /key/loop -> 504 after ${LOOP_MS} ms (expected 4900 to 6499 ms; ~7000 means the backstop answered, not the watchdog)"
-grep -q 'error: js timeout in "loop" after 5000 ms' "$LOG" || fail "watchdog did not log the timeout"
-! grep -q 'JS worker did not reply' "$LOG" || fail "the backstop answered PATCH /key/loop; the watchdog did not terminate it"
-```
-The `error: js timeout in "loop"` line is written by the worker only after the job returns. If it is present before the final `PATCH /key/m`, the timed-out worker really was freed.
-
-### WR-02: A nested host fault is dropped when the job times out during the nested run
-
-**File:** `src/js/ops.rs:298-303`
-**Issue:** `op_rs3_patch` returns `Ok(String::new())` as soon as `ctx.job.timed_out()` is true, before it looks at `result`. Suppose the nested `run_script` returned `ExecError::Internal`, for example because the nested `JsRuntime::try_new` failed (see WR-03 for a client-triggerable cause), and the watchdog fired while that level was running. Then:
-- `note_host_fault()` is never called, so `classify` answers 504 `js_timeout` instead of 500 `internal`. This violates D-04: a host fault must beat a timeout.
-- The fault is logged nowhere. The `log_error` in the `other` arm is skipped, and `ApiError::from(Timeout)` does not log. The only host failure of the request leaves no trace in stderr.
-
-The window is narrow (the fault and the timeout have to overlap at the level where the fault happens), but the precedence contract is stated as unconditional, and the test `host_fault_beats_timeout` covers only a fault that happens before the timeout.
-
-**Fix:** Record a host fault before applying the "never throw into a terminating script" rule:
-```rust
-let result = super::runtime::run_script(ctx.nested(&key), &key, source);
-if let Err(e @ (ExecError::Internal(_) | ExecError::Unavailable)) = &result
-    && !ctx.host_fault()
-{
-    let detail = match e { ExecError::Internal(m) => m.clone(), e => e.to_string() };
-    ctx.log_error(format_args!(
-        "error: nested JS host failure in {key:?} at depth {}: {detail:?}", ctx.depth + 1));
-    ctx.note_host_fault();
-}
-// Never throw into a terminating script: an Err here would cancel its termination.
-if ctx.job.timed_out() {
-    return Ok(String::new());
-}
-```
-Then simplify the `other` arm so it only returns `internal_error()`.
-
-### WR-03: A client can make a request answer 500 "host fault" by exhausting the JS stack before nesting
-
-**File:** `src/js/runtime.rs:68-72`, `src/js/ops.rs:316-336`. Documented as intended in `src/js/executor.rs:39-41` and `src/js/mod.rs:228-230` ("V8's own stack guard would end the chain first, as a 500").
-**Issue:** I reproduced this in the scratch copy with the default settings (16 MiB stack, depth 4). Each stored key recurses until it is just short of V8's stack limit and then calls `op_rs3_patch` on the next key. The third runtime cannot be created (`cannot create JS runtime: Failed to execute ext:core/00_primordials.js`). The same happens on the 2 MiB floor, already at depth 1. The failure takes the host-fault path:
-- the server logs `error: nested JS host failure in "k3" at depth 2`;
-- the job is poisoned, so every later op throws `Error: internal error`;
-- the request answers **500 `internal`**, even if the script catches the error.
-
-The process did not crash, and the worker served canary jobs normally afterwards, so this is not an availability issue. It is a misclassification: a condition the script itself causes (and which is repeatable from two stored keys) is reported to the client and to operators as a server fault. That undermines the D-04/500 contract ("a runtime cannot be created" means the host is broken), and it creates false alarms in the logs. The path predates this phase, but this phase writes the "as a 500" behaviour into the limits documentation.
-
-**Fix:** Tell a bootstrap that failed under JS stack pressure apart from a real host failure. `JsRuntime::try_new` returns a `CoreError`; when the error is a JS exception during bootstrap (the `CoreErrorKind::Js(..)` variant) in a nested level (`ctx.depth > 0`), map it to a script error that `op_rs3_patch` rethrows as a catchable `Error` (for example `RangeError: not enough stack to start a nested script`). The request then answers 422 `js_error` when the script does not catch it. Keep `ExecError::Internal` for non-JS creation failures and for depth 0. Add a test that uses a two-key deep-recursion chain like the one above, and update the "as a 500" wording in `executor.rs`, `mod.rs` and `docs/js-ops.md`.
+I found no new blocker or warning. Six info items carry over unchanged from iteration 2 (IN-04 dropped). Two new info items come from the WR-03 path, and I observed both in the test output.
 
 ## Info
 
-### IN-01: The backstop's log line has no job label, and the timeout is logged twice
+### IN-01: The backstop's log line has no job label, and the timeout is logged twice (carry-over)
 
-**File:** `src/js/executor.rs:233-237`, `src/http/error.rs:40-42`
-**Issue:** `error: JS worker did not reply within N ms` does not say which key stalled. When the stalled worker finally returns, `worker_loop` also logs `error: js timeout in "<key>" ...`, because the watchdog fired. One request therefore produces two timeout lines, which contradicts the `From<ExecError>` doc ("the JS worker or the backstop already logged it once").
-**Fix:** Pass the label into the backstop branch (`label` is moved into the `Envelope`, so clone it first) and log `{label:?}`. Either reword the doc comment, or skip the worker's line when the reply send fails.
+**File:** `src/js/executor.rs:235-239`, `src/http/error.rs:40-42`
+**Issue:** `error: JS worker did not reply within N ms` does not say which key stalled. When the stalled worker finally returns, `worker_loop` also logs `error: js timeout in "<key>" ...`. One request therefore produces two timeout lines, which contradicts the `From<ExecError>` doc comment ("the JS worker or the backstop already logged it once").
+**Fix:** Clone `label` before moving it into the `Envelope`, log it in the backstop branch as `{label:?}`, and reword the doc comment to say the timeout can be logged twice.
 
-### IN-02: The ops table and the timeout section in the docs are incomplete or inaccurate
+### IN-02: The docs' ops table and limits section are incomplete or inaccurate (carry-over)
 
-**File:** `docs/js-ops.md:25-28`, `:89-92`, `:197-199`, `:210-212`
+**File:** `docs/js-ops.md:25-28`, `:210-212`, `:223-225`
 **Issue:**
-- **Ops table.** The "Throws when" column for `op_rs3_list` says "only after a nested host fault". The `op_rs3_get`/`op_rs3_insert`/`op_rs3_delete` rows also leave out the depth-stop error and the empty-string answer after a timeout. Those are covered only in the intro and the Errors section.
-- **"Every op returns an empty string".** This is not true for argument-type errors. `StrArg::from_v8` runs before `live_ctx`, so `op_rs3_get({})` still throws a `TypeError` after the timeout. This is harmless for termination: it goes through deno_core's native error builder, and I verified that termination is not lost.
-- **"At most 4 scripts run in one PATCH chain".** This can be read as a total. Only the nesting depth is bounded. Sibling `op_rs3_patch` calls at the same level are bounded only by the timeout.
-- **"Other PATCH requests keep being answered meanwhile".** This holds only while a worker is free; otherwise they queue.
+- **Ops table.** The "Throws when" cells for `op_rs3_list`, `op_rs3_get`, `op_rs3_insert` and `op_rs3_delete` mention only the nested host fault. They leave out the depth-stop error and the empty-string answer after a timeout. Only the intro and the Errors section cover those.
+- **"Every op returns an empty string" after a timeout.** This is not true for argument-type errors. `StrArg::from_v8` runs before `live_ctx`, so `op_rs3_get({})` still throws `TypeError`.
+- **"At most 4 scripts run in one PATCH chain".** This reads like a total, but only the nesting depth is bounded. Sibling `op_rs3_patch` calls are bounded only by the timeout.
+- **"Other PATCH requests keep being answered meanwhile".** This holds only while a JS worker is free.
 **Fix:** Add the depth-stop and timeout behaviour to each table row, note the argument-type exception, and say "nesting depth" and "when a JS worker is free".
 
-### IN-03: `ExecCtx::depth` duplicates `chain.len() - 1`
+### IN-03: `ExecCtx::depth` duplicates `chain.len() - 1`, and now drives a classification (carry-over, widened)
 
-**File:** `src/js/ops.rs:24-28`, `:64-78`, `:280`, `:332`
-**Issue:** The depth check uses `chain.len()`, while the log line and the test hook use `depth`. Two sources of truth have to be kept in step by every constructor.
-**Fix:** Drop `depth` and derive it with `fn depth(&self) -> u32 { (self.chain.len() - 1) as u32 }`, or add a `debug_assert_eq!` in `nested`.
+**File:** `src/js/ops.rs:24-28`, `:70-86`, `:296`, `:334`; `src/js/runtime.rs:78`, `:131-137`
+**Issue:** The depth check reads `chain.len()`. The log line, the test hooks and now `boot_failed_for_lack_of_stack` (through `let depth = ctx.depth`) read `depth`. If the two ever drifted apart, a depth-0 boot failure could be reported as a 422 script error instead of a 500 host fault.
+**Fix:** Derive the depth with `fn depth(&self) -> u32 { (self.chain.len() - 1) as u32 }`, or at least add `debug_assert_eq!(self.depth as usize + 1, self.chain.len())` in `nested`.
 
-### IN-04: `op_rs3_patch`'s `map_err` claims to need no wildcard but ends with one
+### IN-04: The smoke compares `nproc` with a pool sized by `available_parallelism` (carry-over)
 
-**File:** `src/js/ops.rs:304-338`
-**Issue:** The comment says the arms are listed "so no wildcard is needed", but `other =>` catches every remaining variant. A future `ExecError` variant would silently be treated as a host fault (logged, then poisoning the job).
-**Fix:** Spell out `ExecError::Internal(m)` and `ExecError::Unavailable` as arms, so the compiler flags any new variant.
+**File:** `scripts/ci-smoke.sh:175-185`
+**Issue:** Older coreutils `nproc` ignores cgroup CPU quotas, while `available_parallelism()` honours them. In a container limited to one CPU on a multi-core host, the smoke expects a second worker that does not exist. The "loop still running" assertion then fails even though nothing is wrong.
+**Fix:** Gate the concurrency check on an explicit opt-in, or report a skip instead of a failure when `m` answers only after the loop.
 
-### IN-05: The smoke compares `nproc` with a pool sized by `available_parallelism`
+### IN-05: The watchdog spawn comment names the wrong thread as the V8 initialiser (carry-over)
 
-**File:** `scripts/ci-smoke.sh:169-179`
-**Issue:** The pool is sized by Rust's `available_parallelism()`, which honours cgroup CPU quotas and affinity. Older coreutils `nproc` ignores cgroup quotas. In a CPU-limited container (`--cpus=1` on a multi-core host), the smoke would expect a second worker that does not exist. `PATCH /key/m` would then wait behind the loop, and the "loop still running" assertion would fail falsely.
-**Fix:** Gate the check on an explicit opt-in such as `RS3_SMOKE_CONCURRENCY=1`, or treat "m answered after the loop" as a skip with a note instead of a failure.
-
-### IN-06: The watchdog spawn comment names the wrong thread as the V8 initialiser
-
-**File:** `src/js/executor.rs:145-146`
-**Issue:** "the watchdog descends from the thread that initialised V8, like the worker itself". `init_platform` runs on the main thread (`src/main.rs:16`), not on the worker. The descendant chain main -> worker -> watchdog is still correct.
+**File:** `src/js/executor.rs:147-148`
+**Issue:** The comment says the watchdog "descends from the thread that initialised V8, like the worker itself". `init_platform` runs on the main thread, not on the worker.
 **Fix:** "so the watchdog descends from the main thread that initialised V8, through the worker".
 
-### IN-07: The timing assertions have tight upper bounds
+### IN-06: The timing assertions have tight upper bounds (carry-over)
 
-**File:** `src/js/executor.rs:762-765` (2100 to 2400 ms window), `src/js/ops.rs:571-574`, `:586-589`, `src/http/mod.rs:403-406`
-**Issue:** The backstop test fails if the backstop reply is delayed by more than 300 ms (the worker's own reply would then arrive first). The suite was stable here (3 runs in a row and 4 in parallel), but a heavily loaded 2-vCPU CI runner leaves little margin.
-**Fix:** Sleep longer in the backstop test (for example 3500 ms, with an upper bound of 3400 ms), or assert that the reply came from the backstop through a flag rather than through elapsed time.
+**File:** `src/js/executor.rs:759-766` (window 2100 to 2400 ms against a 2400 ms sleep), `src/js/ops.rs:590-593`, `:605-608`, `src/http/mod.rs:383`, `:404-406`
+**Issue:** The backstop test fails if the backstop reply is more than 300 ms late. A heavily loaded 2-vCPU CI runner leaves little margin.
+**Fix:** Sleep longer in the backstop test (for example 3500 ms with an upper bound of 3400 ms), or assert that the reply came from the backstop with a flag rather than through elapsed time.
+
+### IN-07: Every boot that runs out of stack writes an unprefixed V8 line to the server's stdout (new)
+
+**File:** `src/js/runtime.rs:79-83` (the `JsRuntime::try_new` path that WR-03 now treats as a normal script error); `docs/js-ops.md:205-206`
+**Issue:** With no message listener installed yet, V8's default message reporter prints `<unknown>:-1: Uncaught RangeError: Maximum call stack size exceeded` to **stdout**, one line per failed boot. I saw 4 lines on stdout and 0 on stderr when running the WR-03 tests. Before WR-03 this happened only on a host fault. Now it is an ordinary, catchable script error that a client can trigger, and a catch-and-retry loop repeats it for up to 5 s. The text is fixed, so it cannot be used to forge log lines. Still, it bypasses rs3's log format, it goes through C stdio buffering (so it can interleave out of order with Rust's stdout), and it contradicts the docs, which say failed-script errors go to stderr in escaped form.
+**Fix:** Document the line in "Sandbox and known limits" next to `Deno.core.print`. Alternatively, install a V8 message listener before bootstrap, if deno_core exposes a hook for one.
+
+### IN-08: The stack-exhaustion log line blames the nested key, not the script that used up the stack (new)
+
+**File:** `src/js/runtime.rs:147-153`
+**Issue:** `creation_error` logs `js error in "<nested key>": RangeError: not enough stack ...`. For example, `nested_boot_without_stack_is_a_catchable_script_error` logs `js error in "leaf": ...` even though `leaf` (`'leaf'`) never ran. The script that recursed was the caller (`test` or `k1`). An operator would look at the wrong stored script.
+**Fix:** Name the caller. The parent key is `watch.chain[watch.chain.len() - 2]` when `depth > 0`. For example: `js error in {caller:?}: {NESTED_STACK_MESSAGE} while starting {name:?} (...)`.
 
 ---
 
-_Reviewed: 2026-10-21T01:00:00Z_
+_Reviewed: 2026-10-21T02:00:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
