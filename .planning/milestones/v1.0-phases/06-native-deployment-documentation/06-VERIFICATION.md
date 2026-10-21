@@ -46,6 +46,10 @@ human_verification:
   - test: "Review the six judgment-tier prohibitions (06-01: DEPL-03 transparency, DEPL-03 safety, DEPL-01 safety; 06-02: DOCS-03 transparency, DOCS-02 transparency, DOCS-01 safety). Non-authoritative verifier verdict: all six hold (see report table)"
     expected: "Human confirms each prohibition holds"
     why_human: "unverified-prohibition — human review recommended (judgment-tier; autonomous verify records only a non-authoritative LLM-judge verdict)"
+audit_acknowledged:
+  milestone: v1.0
+  at: 2026-10-21
+  status: human_needed
 ---
 
 # Phase 6: Native Deployment & Documentation Verification Report
@@ -222,36 +226,43 @@ All seven phase IDs are claimed by a plan; REQUIREMENTS.md maps no other ID to P
 ### Human Verification Required
 
 ### 1. Operator UAT: root-only unit on a real server
+
 **Test:** Follow 06-01-SUMMARY "Pending operator UAT" steps 1-7 as root.
 **Expected:** rs3 active under the DynamicUser (not root); "Welcome to rs3"; PATCH "120"; no `status=31/SYS`; exposure about 1.5.
 **Why human:** No sudo here, and unprivileged user namespaces are blocked; the user manager refuses or ignores the root-only directives.
 
 ### 2. x86_64 with PKU under the seccomp filter
+
 **Test:** Same as 1 on an x86_64 CPU with PKU, including a nested PATCH.
 **Expected:** No SIGSYS or EPERM failure from the `pkey_*` calls.
 **Why human:** All seccomp evidence is from aarch64, which has no PKU.
 
 ### 3. README Update / Troubleshooting commands with sudo
+
 **Test:** Install over the running binary and restart; break the env file, observe the start limit, recover with `reset-failed` + `restart`.
 **Expected:** As documented.
 **Why human:** Needs the system manager and sudo; reset-failed is cited, not run.
 
 ### 4. MemoryMax= sizing paragraph
+
 **Test:** Read Readme.md:397-404 against the measurements above.
 **Expected:** Either accept the "rough" rule as is, or reword the concurrency bound to count GET /list and op_rs3_list() separately (about MemoryMax / (1 + 8 × CPUs) worst case).
 **Why human:** A judgement call on documentation outside the must-haves.
 
 ### 5. README readability
+
 **Test:** Read the README end to end as a newcomer.
 **Expected:** A newcomer can build, configure, run, call, deploy and extend rs3 without reading the source.
 **Why human:** Prose quality is a judgement call.
 
 ### 6. Remote CI on HEAD
+
 **Test:** After the operator pushes, check the GitHub Actions run.
 **Expected:** Green on ubuntu-26.04 with zero annotations.
 **Why human:** The remote run cannot be observed from here.
 
 ### 7. Judgment-tier prohibitions
+
 **Test:** Confirm the six verdicts in the Prohibitions table.
 **Expected:** All hold.
 **Why human:** These verdicts are non-authoritative.

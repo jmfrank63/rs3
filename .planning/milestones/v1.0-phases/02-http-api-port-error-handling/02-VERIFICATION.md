@@ -52,6 +52,10 @@ human_verification:
   - test: "02-UAT item 3. The process environment overrides the dotenv file. Use the same file but change the host line to SERVER.HOST=10.255.255.1. Start with `env -i PATH=\"$PATH\" SERVER.HOST=127.0.0.1 .../rs3` and curl /ip on port 18469."
     expected: "/ip reports 127.0.0.1, because the environment wins over the file."
     why_human: "The same dotenv-file hook applies. Precedence is unit-tested (config::tests::env_overrides_dotenv, env_overrides_dotenv_across_case), but it has not been checked on the live binary with a real file. Still PENDING with the operator in 02-UAT.md."
+audit_acknowledged:
+  milestone: v1.0
+  at: 2026-10-21
+  status: human_needed
 ---
 
 # Phase 2: HTTP API Port & Error Handling Verification Report

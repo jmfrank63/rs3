@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 2
-current_phase_name: HTTP API Port & Error Handling
-status: verifying
+status: Awaiting next milestone
 stopped_at: Phase 4 complete, ready to verify Phase 2
-last_updated: "2026-10-21T11:57:45.518Z"
+last_updated: "2026-10-21T12:10:45.069Z"
 last_activity: 2026-10-21
-last_activity_desc: Phase 4 complete, transitioned to Phase 2
-state_head: 98295d6e92698522c434c9fa9c5cbee01af771b6
+last_activity_desc: Milestone v1.0 completed and archived
+state_head: 7bee22714027c3f2e1fdc8789cf22d0839d20ceb
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 16
   completed_plans: 16
   percent: 67
+current_phase: 2
+current_phase_name: HTTP API Port & Error Handling
 ---
 
 # Project State
@@ -27,12 +27,10 @@ See: .planning/PROJECT.md (updated 2026-10-21)
 
 ## Current Position
 
-Phase: 2 — HTTP API Port & Error Handling
-Plan: 3
-Status: Phase complete — ready for verification
-Last activity: 2026-10-21 — Phase 4 complete, transitioned to Phase 2
-
-Progress: [███████░░░] 67%
+Phase: Milestone v1.0 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-10-21 — Milestone v1.0 completed and archived
 
 ## Performance Metrics
 
@@ -173,10 +171,17 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 | Category | Item | Status | Deferred At | Milestone |
 |----------|------|--------|-------------|-----------|
-| *(none)* | | | | |
+| uat_gaps | 02/02-UAT.md | testing (2 pending: items 2-3, live dotenv-file checks) | 2026-10-21 | v1.0 |
+| uat_gaps | 06/06-UAT.md | testing (7 pending: items 1-7, real-server unit, x86_64 PKU, sudo commands, MemoryMax wording, README readability, remote CI on HEAD, prohibitions) | 2026-10-21 | v1.0 |
+| verification_gaps | 02/02-VERIFICATION.md | human_needed | 2026-10-21 | v1.0 |
+| verification_gaps | 06/06-VERIFICATION.md | human_needed | 2026-10-21 | v1.0 |
 
 ## Session Continuity
 
 Last session: 2026-10-21T11:05:14.796Z
 Stopped at: Phase 4 complete, ready to verify Phase 2
 Resume file: None
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
