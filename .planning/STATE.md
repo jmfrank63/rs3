@@ -91,6 +91,7 @@ Recent decisions affecting current work:
 - [Phase 02]: [02-03] Store::insert_all (infallible, one guard, returns count) replaces insert_many; partial-batch visibility documented; Phase 3 op_rs3_insert reuses parse-then-insert_all
 - [Phase 02]: [02-03] /list escapes keys and values via serde_json Value Display in the legacy envelope; ,] quirk dropped; codec shared with op_rs3_list
 - [Phase 02]: [02-03] [lints.clippy] unwrap_used/expect_used = deny with clippy.toml test allowances; no suppression attributes
+- [Phase 05]: depth limit (max_patch_depth 4, clamp 1..=64) = hard stop → 422 js_depth_limit with key chain; timeout (timeout_ms 5000) via per-worker watchdog thread + per-job termination group + JobState CAS, ops silent after timeout (closes termination-cancellation escape) → 504 js_timeout; backstop at +2 s; precedence host fault > timeout > depth > result; nested boot stack exhaustion → 422
 - [Phase 04]: single `ci` job on ubuntu-26.04 (operator amendment of D-01) — guards (a)–(h) via scripts/ci-guards.sh (+ canonical-lines allowlist of ci.yml, PyYAML structure check), fmt, clippy --locked -D warnings, test --locked, release build, release smoke (protected V8 platform); actions-rs workflow deleted; self-test with 99 planted cases
 - [Phase 03]: JS on a bounded `rs3-js-N` pool (16 MiB stacks, tokio current_thread, fresh JsRuntime per job via try_new, catch_unwind); five #[op2] ops in rs3_ext with op_panic disabled; missing key → generic Error, bad input → TypeError; PATCH 200 String(result) / 422 js_error / 500 internal; nested host fault → 500 and store ops refuse afterwards; dev-only unprotected V8 platform
 - [Phase 02 review-fix]: config keys lowercased before precedence (env always wins over .env); config map restricted to exactly server.host/server.port; /insert: syntax/EOF/invalid-UTF-8/unpaired-surrogate-escape → 400, out-of-range number / valid over-deep nesting → 422 naming the key
@@ -121,7 +122,6 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-- [Phase 5]: Depth limit + timeout (ROBU-05/06); also 03-REVIEW-DISPOSITION carry-overs: op_print WouldBlock retry, catch_unwind comment, clamp stack_bytes, .txt payload parity test.
 - [Phase 6]: docs wording — stdout prints are raw (03 review IN-03); README must document BOM/malformed .env startup failures, 400/422 inserts, escaped /list, 404s, op mapping (docs/js-ops.md).
 
 ### Blockers/Concerns
@@ -138,6 +138,7 @@ Recent decisions affecting current work:
 | 02 | verification_deferred_human | /gsd-verify-work 02 |
 | 03 | verification_deferred_human | /gsd-verify-work 03 |
 | 04 | verification_deferred_human | /gsd-verify-work 04 |
+| 05 | verification_deferred_human | /gsd-verify-work 05 |
 
 Phase 01 (roadmap-complete): VERIFICATION.md reads `stale` because Phase 02 intentionally evolved files it covered (STORE bridge → injected AppState, `dotenv()` → `dotenv_iter()`, legacy codec). Re-verification of every stale earlier phase is scheduled once, against the final tree, immediately before the milestone audit (`/gsd-execute-phase N` resumes at the verification gates).
 
@@ -146,6 +147,8 @@ Phase 02: all automated must-haves verified (18/18, 13/13 requirements). 4 human
 Phase 03: all automated must-haves verified (22/22, 12/12 requirements; live smokes plus a probe of all 98 other built-in ops clean). 3 policy-driven human items are in `03-UAT.md`: unwired test-tier prohibitions (Phase 4 CI grep), the judgment-tier "no self-patching script" rule, and docs/js-ops.md readability. The autonomous run continues to Phase 4.
 
 Phase 04: all automated must-haves verified (29/29). Remote evidence exists: GitHub Actions run 39507141932 (operator push of `fd8f43f`) green on ubuntu-26.04 x86_64, so there is no PKU crash and the D-07 fallback is not needed. 4 human items are in `04-UAT.md`: re-run CI on the hardened HEAD scripts (the autonomous run does not push), confirm the operator push, plus two policy prohibitions. The guards now wire the earlier suppression/ignore/feature/legacy-syntax UAT items (01-UAT 4, 02-UAT 4, 03-UAT 1 code parts). The autonomous run continues to Phase 5.
+
+Phase 05: 35/38 must-haves verified locally. The depth limit gives 422 with the exact chain, `while(true)` gives 504 via the watchdog, other requests keep being answered, and settings are in code. 4 human items are in `05-UAT.md`: the CI run of HEAD (same push as 04-UAT 1), two code paths present but untested (late-registered runtime termination, client disconnect), and judgment-tier prohibitions. The autonomous run continues to Phase 6.
 
 ## Deferred Items
 
