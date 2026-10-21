@@ -25,9 +25,12 @@ struct Limits {
 }
 
 impl Limits {
+    /// Clamp `max_patch_depth` to 1..=64: 1 allows no nested PATCH, and 64 is
+    /// the depth verified on the smallest worker stack (2 MiB). Far above it
+    /// V8's own stack guard would end the chain first, as a 500.
     fn from_settings(settings: &JsSettings) -> Limits {
         Limits {
-            max_patch_depth: settings.max_patch_depth,
+            max_patch_depth: settings.max_patch_depth.clamp(1, 64),
         }
     }
 }
@@ -44,8 +47,8 @@ impl JsExecutor {
     /// Spawn `settings.workers` threads named `rs3-js-{i}` with
     /// `settings.stack_bytes` of stack, each running its own tokio
     /// current_thread runtime. Zero workers or zero queue capacity are clamped
-    /// to 1. Returns once every worker has built its runtime, or the first
-    /// spawn or runtime-build error.
+    /// to 1, and `max_patch_depth` is clamped to 1..=64. Returns once every
+    /// worker has built its runtime, or the first spawn or runtime-build error.
     pub fn start(settings: &JsSettings) -> std::io::Result<JsExecutor> {
         let workers = settings.workers.max(1);
         let capacity = settings.queue_capacity.max(1);
@@ -456,5 +459,70 @@ mod tests {
         assert!(s.workers >= 1);
         assert_eq!(s.queue_capacity, s.workers * 16);
         assert_eq!(s.stack_bytes, 16 * 1024 * 1024);
+        assert_eq!(s.max_patch_depth, 4);
+    }
+
+    /// The depth error for `limit` and `chain`.
+    fn depth_err(limit: u32, chain: &[&str]) -> Result<String, ExecError> {
+        Err(ExecError::DepthLimit {
+            limit,
+            chain: chain.iter().map(|k| (*k).to_owned()).collect(),
+        })
+    }
+
+    #[test]
+    fn max_patch_depth_from_settings() {
+        init_platform();
+        let with_depth = |max_patch_depth| {
+            JsExecutor::start(&JsSettings {
+                workers: 1,
+                queue_capacity: 4,
+                max_patch_depth,
+                ..JsSettings::default()
+            })
+            .expect("dedicated executor")
+        };
+        let store = Store::new();
+        store.insert("k1".into(), "Deno.core.ops.op_rs3_patch('k2')".into());
+        store.insert("k2".into(), "Deno.core.ops.op_rs3_patch('k3')".into());
+        store.insert("k3".into(), "3".into());
+        store.insert("inner".into(), "1".into());
+        let k1 = "Deno.core.ops.op_rs3_patch('k2')".to_owned();
+        assert_eq!(
+            block_on(with_depth(2).execute(store.clone(), "k1".into(), k1)),
+            depth_err(2, &["k1", "k2", "k3"])
+        );
+        // 1 runs the script but refuses any nested PATCH; 0 is clamped to 1.
+        for given in [1, 0] {
+            let src = "Deno.core.ops.op_rs3_patch('inner')".to_owned();
+            assert_eq!(
+                block_on(with_depth(given).execute(store.clone(), "t".into(), src)),
+                depth_err(1, &["t", "inner"]),
+                "max_patch_depth {given}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_depth_leaf_recursion_is_a_catchable_range_error() {
+        // Four levels (test, k1, k2, k3), the default maximum, with a leaf that
+        // recurses until V8's stack guard throws, on the default 16 MiB stack.
+        let store = Store::new();
+        store.insert("k1".into(), "Deno.core.ops.op_rs3_patch('k2')".into());
+        store.insert("k2".into(), "Deno.core.ops.op_rs3_patch('k3')".into());
+        store.insert(
+            "k3".into(),
+            "function f(n) { return f(n + 1) + 1; } \
+             try { f(0); 'no throw' } catch (e) { e instanceof RangeError }"
+                .into(),
+        );
+        assert_eq!(
+            block_on(test_executor().execute(
+                store,
+                "test".into(),
+                "Deno.core.ops.op_rs3_patch('k1')".into()
+            )),
+            Ok("true".to_owned())
+        );
     }
 }

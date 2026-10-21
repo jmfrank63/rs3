@@ -313,6 +313,25 @@ pub(crate) mod tests {
     }
 
     #[actix_web::test]
+    async fn depth_limit_is_repeatable_and_server_keeps_serving() {
+        let state = seeded(&[("me", "Deno.core.ops.op_rs3_patch('me')"), ("m", "6*20")]);
+        let app = atest::init_service(App::new().configure(configure(state))).await;
+        let (code, first) = send(&app, patch_req("me").to_request()).await;
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        let (code, second) = send(&app, patch_req("me").to_request()).await;
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(first, second);
+        let body: serde_json::Value = serde_json::from_slice(&first).expect("JSON error body");
+        assert_eq!(body, depth_body("me -> me -> me -> me -> me"));
+        let (code, body) = send(&app, get_req("/").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""Welcome to rs3""#));
+        let (code, body) = send(&app, patch_req("m").to_request()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, web::Bytes::from_static(br#""120""#));
+    }
+
+    #[actix_web::test]
     async fn test_patch_stringify_exception_is_422_js_error() {
         let src = "({ toString() { throw new Error('x') } })";
         let resp = patch_seeded(&[("t", src)], "t").await;

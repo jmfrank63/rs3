@@ -126,7 +126,10 @@ pub struct JsSettings {
     /// How many PATCH levels one job may run, counting the PATCHed key as
     /// level 1: with 4, a script may nest `op_rs3_patch` three times, and the
     /// fourth nested call is refused with `ExecError::DepthLimit`. Built in
-    /// code and never read from the environment.
+    /// code and never read from the environment. The executor clamps it to
+    /// 1..=64: 1 allows no nested PATCH, and 64 is the depth verified on the
+    /// smallest worker stack (2 MiB); far above that V8's own stack guard would
+    /// end the chain first, as a 500.
     pub max_patch_depth: u32,
 }
 
