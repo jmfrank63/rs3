@@ -16,12 +16,12 @@
     {
       "number": "3",
       "name": "JavaScript Runtime Port",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "4",
       "name": "CI Gate on x86_64",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "5",
@@ -37,7 +37,7 @@
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step (verify)",
-    "reason": "Phase 6 of 6 · 33% · ready to verify"
+    "reason": "Phase 2 of 6 · 67% · ready to verify"
   },
-  "updated_at": "2026-10-21T11:05:12.108Z"
+  "updated_at": "2026-10-21T11:57:45.532Z"
 }

@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 6
-current_phase_name: Native Deployment & Documentation
+current_phase: 2
+current_phase_name: HTTP API Port & Error Handling
 status: verifying
-stopped_at: Completed 06-02-PLAN.md
-last_updated: "2026-10-21T11:05:15.009Z"
+stopped_at: Phase 4 complete, ready to verify Phase 2
+last_updated: "2026-10-21T11:57:45.518Z"
 last_activity: 2026-10-21
-last_activity_desc: Phase 6 execution started
-state_head: a9e720b8673a669cb3376b6bccd04c03f39e9f8a
+last_activity_desc: Phase 4 complete, transitioned to Phase 2
+state_head: 98295d6e92698522c434c9fa9c5cbee01af771b6
 progress:
   total_phases: 6
-  completed_phases: 2
+  completed_phases: 4
   total_plans: 16
   completed_plans: 16
-  percent: 33
+  percent: 67
 ---
 
 # Project State
@@ -23,21 +23,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-21)
 
 **Core value:** rs3 builds, tests and lints cleanly on current stable Rust (edition 2024) with only released dependencies, while every existing HTTP route and the JS-executes-against-the-store behaviour keep working with the same semantics.
-**Current focus:** Phase 6 — Native Deployment & Documentation
+**Current focus:** Milestone audit and completion (phases 02 and 06 carry deferred human verification)
 
 ## Current Position
 
-Phase: 6 (Native Deployment & Documentation) — EXECUTING
-Plan: 2 of 2
+Phase: 2 — HTTP API Port & Error Handling
+Plan: 3
 Status: Phase complete — ready for verification
-Last activity: 2026-10-21 — Phase 6 execution started
+Last activity: 2026-10-21 — Phase 4 complete, transitioned to Phase 2
 
-Progress: [███░░░░░░░] 33%
+Progress: [███████░░░] 67%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
+- Total plans completed: 11
 - Average duration: -
 - Total execution time: 0.0 hours
 
@@ -47,6 +47,8 @@ Progress: [███░░░░░░░] 33%
 |-------|-------|-------|----------|
 | 1 | 3 | - | - |
 | 5 | 3 | - | - |
+| 3 | 3 | - | - |
+| 4 | 2 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -138,9 +140,9 @@ Recent decisions affecting current work:
 
 ### Blockers/Concerns
 
-- [Phase 6]: systemd (255 on the dev host) ignores dotted names such as `SERVER.HOST` in `Environment=` / `EnvironmentFile=`, so the example unit must bridge them (see the ROADMAP Phase 6 notes).
+- [Phase 6 → operator]: the root-only systemd directives, the non-root service user and x86_64 PKU under the seccomp filter can only be confirmed on a real server (06-UAT items 1-3); the dotted-name EnvironmentFile limit is solved by the unit's env(1) bridge.
 - [Env]: `/tmp` is about 96% full. Keep `target/` under the project dir, since a debug build with V8 is about 2.6 GB.
-- [Open]: The user should confirm the behaviour changes (`/list` escaping + sort order — legacy `" : "` whitespace is now preserved; 404 replacing `"[]"`; 400/422 inserts; BOM/malformed .env now fail startup; the op rename) and have them recorded in PROJECT.md Key Decisions.
+- [Phase 2 → operator]: 02-UAT items 2 and 3 (live dotenv-file checks: stray keys; process env overrides the file) are still pending; agents never create or name the dotenv file.
 
 ### Roadmap Evolution
 
@@ -153,13 +155,13 @@ Recent decisions affecting current work:
 | 02 | verification_deferred_human | /gsd-verify-work 02 |
 | 06 | verification_deferred_human | /gsd-verify-work 06 |
 
-Phase 01 (roadmap-complete): VERIFICATION.md reads `stale` because Phase 02 intentionally evolved files it covered (STORE bridge → injected AppState, `dotenv()` → `dotenv_iter()`, legacy codec). Re-verification of every stale earlier phase is scheduled once, against the final tree, immediately before the milestone audit (`/gsd-execute-phase N` resumes at the verification gates).
+Re-verification of phases 01-05 against the final tree ran on 2026-10-21 before the milestone audit (98295d6; shared D-17 gate green on a4a8069): 01 passed 45/45, 02 human_needed 20/20, 03 passed 26/26, 04 passed 29/29, 05 passed 38/38. Plan details that later phases replaced on purpose are recorded as overrides citing those decisions. Code-review gate: no task commits of phases 01-05 since their last reviews; every later change was reviewed in its owning phase. Phases 03 and 04 were then marked complete.
 
-Phase 02: all automated must-haves verified (18/18, 13/13 requirements). Operator UAT 2026-10-21: item 1 (malformed dotenv stops startup) and item 4 (no suppression, now guard-wired) pass. Items 2 and 3, the live dotenv-file checks (stray keys; env overrides the file), are still pending with the operator, because agents never create or name the dotenv file. Report is also `stale`, so it is re-verified with the others.
+Phase 02: re-verified 20/20 on the final tree (3 overrides for Phase 3's PATCH evolution and the WR-02 deep-nesting fix). Operator UAT 2026-10-21: item 1 (malformed dotenv stops startup) and item 4 (no suppression, now guard-wired) pass. Items 2 and 3, the live dotenv-file checks (stray keys; env overrides the file), are still pending with the operator, because agents never create or name the dotenv file. Report is also `stale`, so it is re-verified with the others.
 
-Phase 03: UAT complete (operator 2026-10-21: items 1 and 2 pass, item 3 docs/js-ops.md readability deferred to a later user review). VERIFICATION.md reads `stale` (later phases evolved covered files); re-verified before the audit.
+Phase 03: complete (2026-10-21). UAT complete (operator 2026-10-21: items 1 and 2 pass, item 3 docs/js-ops.md readability deferred to a later user review); re-verified passed 26/26.
 
-Phase 04: UAT complete (operator 2026-10-21: all 4 pass; CI runs 39507141932 and 39527188207 green on ubuntu-26.04 x86_64 with 0 annotations). VERIFICATION.md reads `stale` (Phase 5 evolved Cargo.toml and scripts/ci-smoke.sh); re-verified before the audit.
+Phase 04: complete (2026-10-21). UAT complete (operator 2026-10-21: all 4 pass; CI runs 39507141932 and 39527188207 green on ubuntu-26.04 x86_64 with 0 annotations); re-verified passed 29/29.
 
 Phase 05: complete (2026-10-21). UAT complete (3 pass, late-registration path an accepted-risk follow-up) and VERIFICATION.md canonicalized to `passed`; Phase 6 then evolved `Cargo.toml`, `docs/js-ops.md` and an `src/js/executor.rs` comment, so the report reads `stale` again and is re-verified with the others before the audit.
 
@@ -176,5 +178,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-21T11:05:14.796Z
-Stopped at: Completed 06-02-PLAN.md
+Stopped at: Phase 4 complete, ready to verify Phase 2
 Resume file: None

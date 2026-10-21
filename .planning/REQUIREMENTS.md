@@ -69,7 +69,7 @@ Requirements for the modernization milestone. Each maps to roadmap phases.
 
 - [x] **CI-01**: GitHub Actions workflow uses `actions/checkout` v4+, `dtolnay/rust-toolchain` and `Swatinem/rust-cache`; the archived `actions-rs/*` workflow is removed
 - [x] **CI-02**: CI runs fmt check, clippy (`--all-targets -D warnings`) and tests with `--locked`, and any failure fails the build (no `continue-on-error`)
-- [x] **CI-03**: CI runs on an x86_64 Linux runner and passes (catches V8 platform/PKU issues not visible on aarch64) (implemented; remote x86_64 evidence: GitHub Actions run 39507141932 green on ubuntu-26.04 for operator commit fd8f43f — 171 tests at default threads, release smoke incl. PATCH "120" and 422 on the protected V8 platform; re-run on the hardened HEAD scripts pending as 04-UAT item 1)
+- [x] **CI-03**: CI runs on an x86_64 Linux runner and passes (catches V8 platform/PKU issues not visible on aarch64) (implemented; remote x86_64 evidence: GitHub Actions run 39507141932 green on ubuntu-26.04 for operator commit fd8f43f — 171 tests at default threads, release smoke incl. PATCH "120" and 422 on the protected V8 platform; the hardened Phase 4 scripts then ran green remotely in run 39527188207 at 40afeb7 (0 annotations, 216 tests), recorded as 04-UAT item 1, passed)
 
 ### Deployment
 

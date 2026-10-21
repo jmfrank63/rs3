@@ -36,18 +36,18 @@ behaviour keep working with the same semantics.
 - ✓ `config` crate on the 0.15 builder API, still reading dotted `SERVER.HOST` / `SERVER.PORT` from `.env` or the environment — Phase 1
 - ✓ `lib.rs` + thin `main.rs` with separate `store`, `config`, `http`, `js` modules; startup errors exit 1 instead of panicking — Phase 1
 - ✓ `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` all pass (gate held at every later phase) — Phase 1
+- ✓ JS engine on current released `deno_core` 0.412: five `#[op2]` ops (`op_rs3_list/get/insert/delete/patch`) registered through one `extension!`, called as `Deno.core.ops.op_rs3_*(...)` against the same injected store as the HTTP routes; JS runs on a dedicated `rs3-js-*` pool off the actix workers, V8 initialised once in `main`; script and op errors answer 422 `js_error` instead of aborting — Phase 3
+- ✓ Every JS artefact (`requests/*`, `src/example.js`, tests) migrated to the new op syntax, and the legacy `rs3_*` → `op_rs3_*` mapping documented in `docs/js-ops.md` (and summarised in the README) — Phase 3
+- ✓ CI on GitHub Actions: one `ci` job on an x86_64 `ubuntu-26.04` runner with `actions/checkout@v7`, `dtolnay/rust-toolchain@1.99.1`, `Swatinem/rust-cache@v2`; guards, fmt, clippy `-D warnings`, `cargo test --locked`, release build and release smoke all fail the build (no `continue-on-error`); remote runs 39507141932 and 39527188207 green with 0 annotations — Phase 4
 - ✓ No script can crash or pin the server: a PATCH nesting depth limit (default 4) stops self-patching chains and cycles with 422 `js_depth_limit` and the key chain, and an execution timeout (default 5000 ms, per-worker watchdog) ends runaway scripts with 504 `js_timeout` while other requests keep being answered; both limits are set in code and verified on x86_64 CI (run 39527188207) and by an operator client-disconnect test — Phase 5
 
 ### Active
 
-- [ ] JS engine ported to current `deno_core` (`#[op2]` ops registered via `extension!`), five store ops still callable from JS
-- [ ] JS in tests, `requests/*.js` and `src/example.js` updated to `Deno.core.ops.op_name(...)`; old→new op-name mapping documented
 - [ ] actix-web ported to current 4.x release API (test body handling, `test::init_service`, etc.)
 - [ ] Request handlers return proper HTTP error codes instead of panicking on missing keys, bad JSON, or JS exceptions; response bodies stay compatible where tests assert them
 - [ ] Tests deterministic and isolated — no shared global map races, no `thread::sleep`
 - [ ] No global store: the temporary `LazyLock` bridge is replaced by injected `web::Data` / `OpState` state (ARCH-02)
 - [ ] Store and config injected into the HTTP and JS layers (modules already split in Phase 1)
-- [ ] CI on GitHub Actions with `actions/checkout@v4`+, `dtolnay/rust-toolchain`, `Swatinem/rust-cache`; check/test/fmt/clippy fail the build (no `continue-on-error`)
 - [ ] Native deployment on a single Linux server: release build (`cargo build --release --locked`) and an example hardened systemd unit; the obsolete `Dockerfile` and `docker_rs3/` are removed
 - [ ] `Readme.md` updated for new toolchain, configuration, run instructions, HTTP API, new JS op syntax, behaviour changes and the MIT license (`license = "MIT"` in `Cargo.toml`)
 
@@ -85,15 +85,17 @@ behaviour keep working with the same semantics.
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Port JS ops to `#[op2]` + `extension!`, call via `Deno.core.ops.*` | Old op API removed from deno_core | — Pending |
-| Op names may be renamed to valid identifiers (e.g. `op_rs3_get`), mapping documented | Modern ops are Rust fn identifiers | — Pending |
-| Shared store injected (app state / op state) instead of global | Test isolation + future git/VS Code/TS layers | — Pending |
+| Port JS ops to `#[op2]` + `extension!`, call via `Deno.core.ops.*` | Old op API removed from deno_core | ✓ Good — five ops in one `rs3_ext` extension, `op_panic` disabled (Phase 3) |
+| Op names may be renamed to valid identifiers (e.g. `op_rs3_get`), mapping documented | Modern ops are Rust fn identifiers | ✓ Good — `rs3_*` → `op_rs3_*`, mapping in docs/js-ops.md and the README (Phases 3 and 6) |
+| Shared store injected (app state / op state) instead of global | Test isolation + future git/VS Code/TS layers | ✓ Good — `AppState` built once in `main`, one `web::Data`, per-job `OpState` (Phases 2 and 3) |
 | Replace `flurry` if stale (candidates: `dashmap`, `papaya`) | flurry maintenance status | ✓ Good — `papaya` 0.2.5 behind a `Store` facade returning owned `String`s (Phase 1) |
 | Stay a single binary crate | Brief constraint; no clear justification for a workspace yet | ✓ Good — single package as `lib.rs` + thin `main.rs` (Phase 1) |
 | `GET /list` sorted by key | Legacy order was arbitrary hash order; deterministic output for tests | ✓ Shipped in Phase 1 (only visible store-route change in Phase 1) |
 | Accept inert `v8x 149.4.0-rc.4` optional lock entry | Optional dep of `deno_v8`, never built; DEPS-01 verified on manifest + active graph (D-21) | ✓ Accepted (operator UAT, Phase 1) |
 | Toolchain auto-install concurrency left unverified | Needs uninstalling 1.99.1; CI installs the pin explicitly | ⚠️ Accepted risk (operator, Phase 1) |
 | JS limits are hard stops set in code: depth 4 (clamped 1..=64) → 422, timeout 5000 ms via a per-worker watchdog → 504, decided by reason (job phase CAS), never by message text | A self-patching or never-ending script must neither crash nor starve the server; tests set short limits without env vars | ✓ Good (Phase 5: CI green on x86_64, operator client-disconnect test; late-registration path an accepted risk) |
+| Behaviour changes versus 2021 accepted and documented: `/list` sorted and JSON-escaped, 404 JSON for missing keys (no `"[]"`), 400/422 on bad inserts, ops renamed `rs3_*` → `op_rs3_*`, PATCH errors 422/504/500, depth limit and timeout, strict dotenv handling | The user's Phase 6 scope (2026-10-21) asks the README to document exactly these as "behaviour changes vs the 2021 version" | ✓ Accepted — README "Behaviour changes" section (Phase 6) |
+| One CI job on `ubuntu-26.04` x86_64 (operator amendment of Phase 4 D-01 from `ubuntu-24.04`), workflow pinned by `scripts/check-workflow.py` and guard (g) | Latest runner image; the canonical-lines allow-list keeps the gate from being weakened silently | ✓ Good — remote runs 39507141932 and 39527188207 green, 0 annotations (Phase 4) |
 | Drop Docker: ship rs3 as a native binary on a single Linux server (release build plus an example hardened systemd unit); delete the root `Dockerfile` and the `docker_rs3/` Docker/Ansible multi-container setup, add no `.dockerignore`, and re-word the Docker requirements (DOCK-01..03 → DEPL-01..03) | User decision 2026-10-21: one server for now, so a container runtime adds nothing; the multi-container setup was obsolete. The MSc-era version stays at git tag `msc` | — Pending (Phase 6) |
 
 ## Evolution
@@ -114,4 +116,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-21 after Phase 5 (and the Phase 6 re-scope from Docker to native deployment)*
+*Last updated: 2026-10-21 after Phases 3 and 4 were re-verified and completed (Phase 6 executed; human UAT pending)*

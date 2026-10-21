@@ -26,8 +26,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Toolchain, Dependencies & Foundation** - Rust 1.99.1 / edition 2024, released deps only, lib + thin main with store and config layers; tree compiles (PATCH may answer 501) (completed 2026-10-20)
 - [ ] **Phase 2: HTTP API Port & Error Handling** - Six non-JS routes on actix-web 4.x with injected state, byte-identical bodies, 404/400/422 errors, isolated tests
-- [ ] **Phase 3: JavaScript Runtime Port** - PATCH and the five `op_rs3_*` ops on current deno_core (`#[op2]` + `extension!`), dedicated JS threads, all JS artefacts migrated
-- [ ] **Phase 4: CI Gate on x86_64** - GitHub Actions workflow gating fmt/clippy/test on an x86_64 runner; archived actions-rs workflow removed
+- [x] **Phase 3: JavaScript Runtime Port** - PATCH and the five `op_rs3_*` ops on current deno_core (`#[op2]` + `extension!`), dedicated JS threads, all JS artefacts migrated (completed 2026-10-21)
+- [x] **Phase 4: CI Gate on x86_64** - GitHub Actions workflow gating fmt/clippy/test on an x86_64 runner; archived actions-rs workflow removed (completed 2026-10-21)
 - [x] **Phase 5: JS Execution Limits** - PATCH nesting depth limit (422) and execution timeout (504) so no script can crash or pin the server (completed 2026-10-21)
 - [ ] **Phase 6: Native Deployment & Documentation** - Docker artefacts removed; native release build and an example hardened systemd unit; README for toolchain, config, HTTP API, op syntax, behaviour changes and the MIT license
 
@@ -101,7 +101,7 @@ Plans:
   4. JS runs on dedicated JS threads, not actix worker threads, with the V8 platform initialised once in `main` before any other thread spawns, and the full suite passes under default parallel `cargo test`
   5. Every JS artefact (`requests/*.js`, `requests/*.txt`, `requests/*.http`, `src/example.js`, test scripts) uses `Deno.core.ops.op_rs3_*(...)` with no `Deno.core.ops();` or `opSync` calls left, and the old `rs3_*` to new `op_rs3_*` mapping (including "a missing key throws") is documented
 
-**Plans:** 3/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 **Wave 1**
@@ -132,7 +132,7 @@ Plans:
   2. The workflow runs `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and a failure in any of them fails the build (no `continue-on-error`, no `SERVER.*` env in the workflow)
   3. The archived `actions-rs` workflow is deleted, and the new workflow is the only one in `.github/workflows`
 
-**Plans:** 2/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 **Wave 1**
@@ -211,7 +211,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 |-------|----------------|--------|-----------|
 | 1. Toolchain, Dependencies & Foundation | 3/3 | Complete    | 2026-10-20 |
 | 2. HTTP API Port & Error Handling | 3/3 | In Progress | - |
-| 3. JavaScript Runtime Port | 3/3 | In Progress | - |
-| 4. CI Gate on x86_64 | 2/2 | In Progress | - |
+| 3. JavaScript Runtime Port | 3/3 | Complete    | 2026-10-21 |
+| 4. CI Gate on x86_64 | 2/2 | Complete    | 2026-10-21 |
 | 5. JS Execution Limits | 3/3 | Complete    | 2026-10-21 |
 | 6. Native Deployment & Documentation | 2/2 | In Progress | - |
