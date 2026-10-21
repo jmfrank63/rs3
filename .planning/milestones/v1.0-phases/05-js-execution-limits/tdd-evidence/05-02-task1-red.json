@@ -1,0 +1,13 @@
+{
+  "command": "RUSTC_BOOTSTRAP=1 target/debug/deps/rs3-99cb7436f4311bd2 http::tests::timeout_bounded_busy_loop_is_504 --exact -Z unstable-options --format junit",
+  "exitCode": 101,
+  "output": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"test\" package=\"test\" id=\"0\" errors=\"0\" failures=\"1\" tests=\"1\" skipped=\"0\" ><testcase classname=\"http::tests\" name=\"timeout_bounded_busy_loop_is_504\" time=\"0\"><failure type=\"assert\"/><system-out><![CDATA[]]>&#xA;<![CDATA[thread 'http::tests::timeout_bounded_busy_loop_is_504' (3802749) panicked at src/http/mod.rs:374:9:]]>&#xA;<![CDATA[assertion `left == right` failed]]>&#xA;<![CDATA[  left: 200]]>&#xA;<![CDATA[ right: 504]]>&#xA;<![CDATA[note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace]]>&#xA;<![CDATA[]]></system-out></testcase><system-out/><system-err/></testsuite></testsuites>\n",
+  "targetTest": "http::tests#timeout_bounded_busy_loop_is_504",
+  "targetFile": "src/http/mod.rs",
+  "expected": "On a dedicated executor (workers 1, timeout_ms 300), PATCH /key/busy where busy holds a Date.now()-bounded 1500 ms busy loop answers 504 application/json with exactly {\"error\":\"js_timeout\",\"message\":\"script exceeded the 300 ms execution limit\"} in less than 1500 ms",
+  "actual": "assertion failed at src/http/mod.rs:374 (left: 200, right: 504): the bounded loop ran to completion and PATCH answered 200 \"undefined\" after about 1.5 s, because nothing terminates scripts yet",
+  "reportPath": ".planning/phases/05-js-execution-limits/tdd-evidence/05-02-task1-red.junit.xml",
+  "runStartedAt": "2026-10-21T00:25:45Z",
+  "reportModifiedAt": "2026-10-21T00:25:46.937Z",
+  "semanticAssessment": "Target http::tests::timeout_bounded_busy_loop_is_504 compiled, executed and failed on its planned status assertion (200 vs 504). The busy loop is bounded by Date.now() (D-11), so the run ended by itself after about 1.5 s with 200; no watchdog, termination group or js_timeout mapping exists yet. No build, load or fixture failure; exactly one target failure."
+}

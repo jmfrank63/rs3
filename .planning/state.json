@@ -1,0 +1,43 @@
+{
+  "contract": "1.0.0",
+  "flavor": "core",
+  "milestone": null,
+  "phases": [
+    {
+      "number": "1",
+      "name": "Toolchain, Dependencies & Foundation",
+      "status": "complete"
+    },
+    {
+      "number": "2",
+      "name": "HTTP API Port & Error Handling",
+      "status": "in_progress"
+    },
+    {
+      "number": "3",
+      "name": "JavaScript Runtime Port",
+      "status": "complete"
+    },
+    {
+      "number": "4",
+      "name": "CI Gate on x86_64",
+      "status": "complete"
+    },
+    {
+      "number": "5",
+      "name": "JS Execution Limits",
+      "status": "complete"
+    },
+    {
+      "number": "6",
+      "name": "Native Deployment & Documentation",
+      "status": "in_progress"
+    }
+  ],
+  "next": {
+    "command": "/gsd-progress",
+    "label": "Show progress",
+    "reason": "Unsure of state — showing progress"
+  },
+  "updated_at": "2026-10-21T12:10:45.082Z"
+}

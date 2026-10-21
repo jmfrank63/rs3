@@ -1,0 +1,59 @@
+# Every non-blank, non-comment line here is pinned by CANONICAL in scripts/check-workflow.py
+# (guard (g) in scripts/ci-guards.sh). Update CANONICAL in the same change as any edit here.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: fmt, clippy, test, release smoke (x86_64)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Repo guards
+        run: bash scripts/ci-guards.sh
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --locked
+
+      - name: cargo build --release
+        run: cargo build --release --locked
+
+      # Release binary uses the protected V8 platform (no dev-dependency features).
+      # If V8 crashes here (x86_64 PKU; the smoke reports status 139, usually at the
+      # first script execution, PATCH /key/m, because isolates are created lazily),
+      # move deno_core's unsafe_use_unprotected_platform feature from
+      # [dev-dependencies] to [dependencies] and relax guard (d) in
+      # scripts/ci-guards.sh in the same change.
+      - name: Release smoke
+        run: bash scripts/ci-smoke.sh

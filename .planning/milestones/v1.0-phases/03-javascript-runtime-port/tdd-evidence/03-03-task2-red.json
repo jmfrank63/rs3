@@ -1,0 +1,13 @@
+{
+  "command": "RUSTC_BOOTSTRAP=1 target/debug/deps/rs3-99cb7436f4311bd2 http::tests::test_patch_throw_is_422_js_error --exact -Z unstable-options --format junit",
+  "exitCode": 101,
+  "output": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"test\" package=\"test\" id=\"0\" errors=\"0\" failures=\"1\" tests=\"1\" skipped=\"0\" ><testcase classname=\"http::tests\" name=\"test_patch_throw_is_422_js_error\" time=\"0\"><failure type=\"assert\"/><system-out><![CDATA[js error in \"t\": Error: boom]]>&#xA;<![CDATA[    at t:1:7]]>&#xA;<![CDATA[error: JS execution failed: Uncaught Error: boom]]>&#xA;&#xA;<![CDATA[thread 'http::tests::test_patch_throw_is_422_js_error' (3544032) panicked at src/http/mod.rs:70:9:]]>&#xA;<![CDATA[assertion `left == right` failed]]>&#xA;<![CDATA[  left: 500]]>&#xA;<![CDATA[ right: 422]]>&#xA;<![CDATA[note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace]]>&#xA;<![CDATA[]]></system-out></testcase><system-out/><system-err/></testsuite></testsuites>\n",
+  "targetTest": "http::tests#test_patch_throw_is_422_js_error",
+  "targetFile": "src/http/mod.rs",
+  "expected": "PATCH /key/t with t = throw new Error(\"boom\") answers 422 application/json with exactly {\"error\":\"js_error\",\"message\":\"Uncaught Error: boom\"}",
+  "actual": "assertion `left == right` failed at the status assertion in assert_json_error (src/http/mod.rs:70): left 500, right 422; Task 1's interim From<ExecError> maps ExecError::Script to ApiError::Internal",
+  "reportPath": ".planning/phases/03-javascript-runtime-port/tdd-evidence/03-03-task2-red.junit.xml",
+  "runStartedAt": "2026-10-20T20:20:12Z",
+  "reportModifiedAt": "2026-10-20T20:20:13.119Z",
+  "semanticAssessment": "Target http::tests::test_patch_throw_is_422_js_error compiled, executed and failed on its planned status assertion: the script ran on the rs3-js pool (stderr shows the JS stack and 'error: JS execution failed: Uncaught Error: boom'), and the handler answered 500 internal instead of 422 js_error because the js_error variant and the Script mapping do not exist yet. This is the 500-vs-422 status assertion the plan names; no build, load or fixture failure."
+}

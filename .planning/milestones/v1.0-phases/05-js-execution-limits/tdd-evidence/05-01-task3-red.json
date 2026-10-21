@@ -1,0 +1,13 @@
+{
+  "command": "RUSTC_BOOTSTRAP=1 target/debug/deps/rs3-99cb7436f4311bd2 js::executor::tests::max_patch_depth_is_clamped --exact -Z unstable-options --format junit",
+  "exitCode": 101,
+  "output": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"test\" package=\"test\" id=\"0\" errors=\"0\" failures=\"1\" tests=\"1\" skipped=\"0\" ><testcase classname=\"js::executor::tests\" name=\"max_patch_depth_is_clamped\" time=\"0\"><failure type=\"assert\"/><system-out><![CDATA[]]>&#xA;<![CDATA[thread 'js::executor::tests::max_patch_depth_is_clamped' (3797846) panicked at src/js/executor.rs:405:13:]]>&#xA;<![CDATA[assertion `left == right` failed: max_patch_depth 0]]>&#xA;<![CDATA[  left: 0]]>&#xA;<![CDATA[ right: 1]]>&#xA;<![CDATA[note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace]]>&#xA;<![CDATA[]]></system-out></testcase><system-out/><system-err/></testsuite></testsuites>\n",
+  "targetTest": "js::executor::tests#max_patch_depth_is_clamped",
+  "targetFile": "src/js/executor.rs",
+  "expected": "Limits::from_settings clamps max_patch_depth to 1..=64: 0 -> 1, 1 -> 1, 4 -> 4, 64 -> 64, 65 -> 64, u32::MAX -> 64",
+  "actual": "assertion `left == right` failed: max_patch_depth 0 (src/js/executor.rs:405): left 0, right 1; Limits::from_settings still copies max_patch_depth unclamped",
+  "reportPath": ".planning/phases/05-js-execution-limits/tdd-evidence/05-01-task3-red.junit.xml",
+  "runStartedAt": "2026-10-21T00:20:30Z",
+  "reportModifiedAt": "2026-10-21T00:20:30.173Z",
+  "semanticAssessment": "Target js::executor::tests::max_patch_depth_is_clamped compiled, executed and failed on its planned first case: the pure test (no thread, no V8) called Limits::from_settings with max_patch_depth 0 and got 0 instead of 1, because the clamp does not exist yet. This is the 0-case clamp assertion the plan names; no build, load or fixture failure."
+}

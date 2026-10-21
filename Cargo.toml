@@ -1,20 +1,38 @@
 [package]
 name = "rs3"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["johannes"]
-edition = "2018"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# One package: the rs3 library (src/lib.rs) and the rs3 binary (src/main.rs) are
+# auto-discovered. See https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-actix-web = "4.0.0-beta.8"
-actix-rt = "2.2.0"
-tokio = "1.7.0"
-dotenv = "0.15.0"
-config = "0.11.0"
-serde = "1.0.130"
-serde_json = "1.0.67"
-flurry = "0.3.1"
-deno_core = { git = "https://github.com/denoland/deno", branch = "main" }
-rusty_v8 = "0.27.0"
-lazy_static = "1.4.0"
+actix-web = { version = "4.17.0", default-features = false, features = ["macros"] }
+deno_core = "0.412.0"
+# Must stay "0.7": deno_core pins deno_error =0.7.1. Never `cargo add` it.
+deno_error = "0.7"
+papaya = "0.2.5"
+config = { version = "0.15.27", default-features = false }
+dotenvy = "0.15.7"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+thiserror = "2.0.21"
+# JS worker runtimes and the job queue; the same tokio deno_core already pulls in.
+tokio = { version = "1.54.0", features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+# Unprotected V8 platform for test builds only, so libtest's threads can create isolates.
+# Phase 4 fallback (research question 1): move this feature to [dependencies] if x86 CI crashes.
+deno_core = { version = "0.412.0", features = ["unsafe_use_unprotected_platform"] }
+# tokio::join! in the concurrency tests; the graph already enables this feature.
+tokio = { version = "1.54.0", features = ["macros"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

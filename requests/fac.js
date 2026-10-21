@@ -5,6 +5,5 @@ function factorial(n) {
     return n * factorial(n - 1);
 }
 
-Deno.core.ops();
-let num = Number(Deno.core.opSync("rs3_get", "num").toString());
+let num = Number(Deno.core.ops.op_rs3_get("num").toString());
 factorial(num);

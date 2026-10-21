@@ -1,0 +1,13 @@
+{
+  "command": "RUSTC_BOOTSTRAP=1 target/debug/deps/rs3-99cb7436f4311bd2 js::ops::tests::print_retries_would_block --exact -Z unstable-options --format junit",
+  "exitCode": 101,
+  "output": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"test\" package=\"test\" id=\"0\" errors=\"0\" failures=\"1\" tests=\"1\" skipped=\"0\" ><testcase classname=\"js::ops::tests\" name=\"print_retries_would_block\" time=\"0\"><failure type=\"assert\"/><system-out><![CDATA[]]>&#xA;<![CDATA[thread 'js::ops::tests::print_retries_would_block' (3818662) panicked at src/js/ops.rs:1106:9:]]>&#xA;<![CDATA[write gave up: Err(Kind(WouldBlock))]]>&#xA;<![CDATA[note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace]]>&#xA;<![CDATA[]]></system-out></testcase><system-out/><system-err/></testsuite></testsuites>\n",
+  "targetTest": "js::ops::tests#print_retries_would_block",
+  "targetFile": "src/js/ops.rs",
+  "expected": "write_all_retrying over a sink that answers Interrupted once and WouldBlock twice, then accepts at most 3 bytes per write, returns Ok; flush_retrying over one WouldBlock flush fault returns Ok; the sink holds \"hello, world\" exactly once and the flush was attempted twice",
+  "actual": "assertion failed at src/js/ops.rs:1106 (\"write gave up: Err(Kind(WouldBlock))\"): the stand-in helpers delegate to std's write_all, which retries Interrupted but returns the first WouldBlock error",
+  "reportPath": ".planning/phases/05-js-execution-limits/tdd-evidence/05-03-task2-red.junit.xml",
+  "runStartedAt": "2026-10-21T00:41:22Z",
+  "reportModifiedAt": "2026-10-21T00:41:22.569Z",
+  "semanticAssessment": "Target js::ops::tests::print_retries_would_block compiled, executed and failed on its planned assertion (the write result is Ok). The failure is the intended reason: std write_all passed the Interrupted fault, then gave up on WouldBlock, which is exactly the IN-04 gap; no setup, compile or fixture fault, and the test is the only one run (tests=1 failures=1)."
+}

@@ -1,0 +1,13 @@
+{
+  "command": "RUSTC_BOOTSTRAP=1 target/debug/deps/rs3-d5bd492b7c3dd84a store::tests::insert_then_get -Z unstable-options --format junit",
+  "exitCode": 101,
+  "output": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"test\" package=\"test\" id=\"0\" errors=\"0\" failures=\"1\" tests=\"1\" skipped=\"0\" ><testcase classname=\"store::tests\" name=\"insert_then_get\" time=\"0\"><failure type=\"assert\"/><system-out><![CDATA[]]>&#xA;<![CDATA[thread 'store::tests::insert_then_get' (3392846) panicked at src/store/mod.rs:76:9:]]>&#xA;<![CDATA[assertion `left == right` failed]]>&#xA;<![CDATA[  left: Err(NotFound(\"a\"))]]>&#xA;<![CDATA[ right: Ok(\"1\")]]>&#xA;<![CDATA[note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace]]>&#xA;<![CDATA[]]></system-out></testcase><system-out/><system-err/></testsuite></testsuites>\n",
+  "targetTest": "store::tests#insert_then_get",
+  "targetFile": "src/store/mod.rs",
+  "expected": "store.get(\"a\") returns Ok(\"1\") after insert(\"a\",\"1\")",
+  "actual": "assertion `left == right` failed: left Err(NotFound(\"a\")), right Ok(\"1\")",
+  "reportPath": ".planning/phases/01-toolchain-dependencies-foundation/tdd-evidence/01-01-task2-red.junit.xml",
+  "runStartedAt": "2026-10-20T16:46:16Z",
+  "reportModifiedAt": "2026-10-20T16:46:32.910Z",
+  "semanticAssessment": "Target store::tests::insert_then_get compiled, executed and failed on its planned assert_eq (insert then get returns the value) because Store::insert/get are RED stubs that store nothing. No build, load, fixture or unrelated failure."
+}

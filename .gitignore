@@ -10,4 +10,6 @@ web_scrape_s3_api/apirequests.txt
 /aws/terraform*
 /aws/.terraform.tfstate.lock.info
 /aws/.terraform.lock.hcl
-/docker_rs3/.secrets/
+
+# Local agent tooling (GSD Core install)
+/.claude/

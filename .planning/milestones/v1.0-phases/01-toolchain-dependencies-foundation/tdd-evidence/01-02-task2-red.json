@@ -1,0 +1,13 @@
+{
+  "command": "RUSTC_BOOTSTRAP=1 target/debug/deps/rs3-d5bd492b7c3dd84a store::legacy::tests::format_list_shape --exact -Z unstable-options --format junit",
+  "exitCode": 101,
+  "output": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"test\" package=\"test\" id=\"0\" errors=\"0\" failures=\"1\" tests=\"1\" skipped=\"0\" ><testcase classname=\"store::legacy::tests\" name=\"format_list_shape\" time=\"0\"><failure type=\"assert\"/><system-out><![CDATA[]]>&#xA;<![CDATA[thread 'store::legacy::tests::format_list_shape' (3413345) panicked at src/store/legacy.rs:63:9:]]>&#xA;<![CDATA[assertion `left == right` failed]]>&#xA;<![CDATA[  left: \"\"]]>&#xA;<![CDATA[ right: \"[{\\\"a\\\" : \\\"1\\\"},{\\\"b\\\" : \\\"2\\\"}]\"]]>&#xA;<![CDATA[note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace]]>&#xA;<![CDATA[]]></system-out></testcase><system-out/><system-err/></testsuite></testsuites>\n",
+  "targetTest": "store::legacy::tests#format_list_shape",
+  "targetFile": "src/store/legacy.rs",
+  "expected": "format_list(&[(\"a\",\"1\"),(\"b\",\"2\")]) returns [{\"a\" : \"1\"},{\"b\" : \"2\"}]",
+  "actual": "assertion `left == right` failed: left \"\", right \"[{\\\"a\\\" : \\\"1\\\"},{\\\"b\\\" : \\\"2\\\"}]\"",
+  "reportPath": ".planning/phases/01-toolchain-dependencies-foundation/tdd-evidence/01-02-task2-red.junit.xml",
+  "runStartedAt": "2026-10-20T16:56:15Z",
+  "reportModifiedAt": "2026-10-20T16:56:15.178Z",
+  "semanticAssessment": "Target store::legacy::tests::format_list_shape compiled, executed and failed on its planned assert_eq (two pairs formatted in the legacy list shape) because legacy::format_list is a RED stub returning an empty string. No build, load, fixture or unrelated failure."
+}

@@ -3,8 +3,7 @@ function insertBinTree(t = {value: void 0, left: void 0, right: void 0}, n) {
     return t;
 }
 
-Deno.core.ops();
-let numbers = Deno.core.opSync("rs3_get", "tree").toString();
+let numbers = Deno.core.ops.op_rs3_get("tree").toString();
 let arr = numbers.split(" ");
 arr = arr.map(i => Number(i));
 let tree = arr.reduce(insertBinTree, void 0);

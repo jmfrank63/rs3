@@ -1,0 +1,13 @@
+{
+  "command": "RUSTC_BOOTSTRAP=1 target/debug/deps/rs3-99cb7436f4311bd2 js::ops::tests::timeout_refuses_writes_after_stop --exact -Z unstable-options --format junit",
+  "exitCode": 101,
+  "output": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"test\" package=\"test\" id=\"0\" errors=\"0\" failures=\"1\" tests=\"1\" skipped=\"0\" ><testcase classname=\"js::ops::tests\" name=\"timeout_refuses_writes_after_stop\" time=\"0\"><failure type=\"assert\"/><system-out><![CDATA[error: js timeout in \"test\" after 300 ms]]>&#xA;&#xA;<![CDATA[thread 'js::ops::tests::timeout_refuses_writes_after_stop' (3806361) panicked at src/js/ops.rs:462:9:]]>&#xA;<![CDATA[a write after the timeout landed]]>&#xA;<![CDATA[note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace]]>&#xA;<![CDATA[]]></system-out></testcase><system-out/><system-err/></testsuite></testsuites>\n",
+  "targetTest": "js::ops::tests#timeout_refuses_writes_after_stop",
+  "targetFile": "src/js/ops.rs",
+  "expected": "On a dedicated executor (workers 1, timeout_ms 300) through run_ctx_on, with loop = while(true){}, the script that catches a terminated op_rs3_patch('loop') and then calls op_rs3_insert('{\"after\":\"1\"}') answers Err(ExecError::Timeout { limit_ms: 300 }) and the key after is never written",
+  "actual": "assertion failed at src/js/ops.rs:462 (\"a write after the timeout landed\"): the result was already Timeout (Task 1 phase CAS) but the nested op's Err cancelled the pending termination, the catch ran and op_rs3_insert wrote after=1 because ops do not go silent after a timeout yet",
+  "reportPath": ".planning/phases/05-js-execution-limits/tdd-evidence/05-02-task2-red.junit.xml",
+  "runStartedAt": "2026-10-21T00:29:30Z",
+  "reportModifiedAt": "2026-10-21T00:29:31.252Z",
+  "semanticAssessment": "Target js::ops::tests::timeout_refuses_writes_after_stop compiled, executed and failed on its planned write assertion. The nested while(true){} was terminated by the Task 1 watchdog, and the Timeout result assertion passed (classification by flag), but the throwing op_rs3_patch cancelled the outer termination (research S4) and the straight-line insert after the catch wrote the after key. Bounded by construction: no loop follows the catch. No build, load or fixture failure; exactly one target failure."
+}
