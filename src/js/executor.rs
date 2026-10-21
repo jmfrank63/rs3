@@ -200,7 +200,7 @@ mod tests {
     use tokio::sync::mpsc::error::TrySendError;
     use tokio::sync::oneshot;
 
-    use super::{Envelope, JsExecutor, classify};
+    use super::{Envelope, JsExecutor, Limits, classify};
     use crate::js::{
         DepthStop, ExecError, JobState, JsSettings, block_on, init_platform, test_executor,
     };
@@ -391,6 +391,21 @@ mod tests {
             assert_eq!(
                 block_on(exec.execute(store.clone(), "t".into(), "let q = 1; q".into())),
                 Ok("1".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn max_patch_depth_is_clamped() {
+        for (given, want) in [(0, 1), (1, 1), (4, 4), (64, 64), (65, 64), (u32::MAX, 64)] {
+            let settings = JsSettings {
+                max_patch_depth: given,
+                ..JsSettings::default()
+            };
+            assert_eq!(
+                Limits::from_settings(&settings).max_patch_depth,
+                want,
+                "max_patch_depth {given}"
             );
         }
     }
