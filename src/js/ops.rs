@@ -350,9 +350,19 @@ fn op_rs3_print(#[string] msg: &str, is_err: bool) -> Result<(), std::io::Error>
         writeln!(std::io::stderr().lock(), "js stderr: {msg:?}")
     } else {
         let mut out = std::io::stdout().lock();
-        out.write_all(msg.as_bytes())?;
-        out.flush()
+        write_all_retrying(&mut out, msg.as_bytes())?;
+        flush_retrying(&mut out)
     }
+}
+
+/// Writes all of `bytes` to `w`.
+fn write_all_retrying(w: &mut impl std::io::Write, bytes: &[u8]) -> std::io::Result<()> {
+    w.write_all(bytes)
+}
+
+/// Flushes `w`.
+fn flush_retrying(w: &mut impl std::io::Write) -> std::io::Result<()> {
+    w.flush()
 }
 
 deno_core::extension!(
@@ -1046,6 +1056,57 @@ mod tests {
         let src = "Deno.core.print('out\\n'); \
                    Deno.core.print('x\\nerror: JS host failure: forged', true); 'ok'";
         assert_eq!(run_js(&Store::new(), src), ok("ok"));
+    }
+
+    /// A test sink: answers the queued write faults first, then accepts at most
+    /// 3 bytes per write; answers the queued flush faults before flushing.
+    struct FlakySink {
+        written: Vec<u8>,
+        write_faults: std::collections::VecDeque<std::io::ErrorKind>,
+        flush_faults: std::collections::VecDeque<std::io::ErrorKind>,
+        flush_calls: u32,
+    }
+
+    impl FlakySink {
+        fn new(write_faults: &[std::io::ErrorKind], flush_faults: &[std::io::ErrorKind]) -> Self {
+            FlakySink {
+                written: Vec::new(),
+                write_faults: write_faults.iter().copied().collect(),
+                flush_faults: flush_faults.iter().copied().collect(),
+                flush_calls: 0,
+            }
+        }
+    }
+
+    impl std::io::Write for FlakySink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if let Some(kind) = self.write_faults.pop_front() {
+                return Err(kind.into());
+            }
+            let n = buf.len().min(3);
+            self.written.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flush_calls += 1;
+            match self.flush_faults.pop_front() {
+                Some(kind) => Err(kind.into()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn print_retries_would_block() {
+        use std::io::ErrorKind::{Interrupted, WouldBlock};
+        let mut sink = FlakySink::new(&[Interrupted, WouldBlock, WouldBlock], &[WouldBlock]);
+        let written = super::write_all_retrying(&mut sink, b"hello, world");
+        let flushed = super::flush_retrying(&mut sink);
+        assert!(written.is_ok(), "write gave up: {written:?}");
+        assert!(flushed.is_ok(), "flush gave up: {flushed:?}");
+        assert_eq!(sink.written, b"hello, world");
+        assert_eq!(sink.flush_calls, 2);
     }
 
     #[test]
