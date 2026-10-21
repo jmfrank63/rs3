@@ -329,7 +329,8 @@ mod tests {
 
     use super::{Envelope, JsExecutor, Limits, classify};
     use crate::js::{
-        DepthStop, ExecError, JobState, JsSettings, block_on, init_platform, test_executor,
+        DepthStop, ExecError, JobState, JsSettings, block_on, dedicated_executor, init_platform,
+        test_executor,
     };
     use crate::store::Store;
 
@@ -588,6 +589,90 @@ mod tests {
             classify(&clean, false, 5000, internal("boom")),
             internal("boom")
         );
+    }
+
+    #[test]
+    fn classify_precedence_with_timeout() {
+        let stop = || DepthStop {
+            limit: 4,
+            chain: vec!["a".to_owned(), "b".to_owned()],
+        };
+        let timeout = Err(ExecError::Timeout { limit_ms: 300 });
+        // A host fault beats a timeout.
+        let faulted = JobState::default();
+        faulted.note_host_fault();
+        assert!(matches!(
+            classify(&faulted, true, 300, Ok("x".to_owned())),
+            Err(ExecError::Internal(_))
+        ));
+        // A timeout beats a depth stop.
+        let stopped = JobState::default();
+        stopped.stop_depth(stop());
+        assert_eq!(classify(&stopped, true, 300, Ok("x".to_owned())), timeout);
+        // A value computed after the stop does not survive it.
+        let clean = JobState::default();
+        assert_eq!(classify(&clean, true, 300, Ok("x".to_owned())), timeout);
+        // An Internal result stays Internal.
+        assert_eq!(
+            classify(
+                &clean,
+                true,
+                300,
+                Err(ExecError::Internal("boom".to_owned()))
+            ),
+            Err(ExecError::Internal("boom".to_owned()))
+        );
+    }
+
+    /// A dedicated one-worker executor with a `timeout_ms` limit.
+    fn timeout_exec(timeout_ms: u64) -> JsExecutor {
+        dedicated_executor(JsSettings {
+            workers: 1,
+            queue_capacity: 4,
+            timeout_ms,
+            ..JsSettings::default()
+        })
+    }
+
+    fn exec_js(exec: &JsExecutor, source: &str) -> Result<String, ExecError> {
+        block_on(exec.execute(Store::new(), "t".into(), source.to_owned()))
+    }
+
+    #[test]
+    fn timed_out_worker_serves_next_job() {
+        let exec = timeout_exec(300);
+        for round in 0..3 {
+            assert_eq!(
+                exec_js(&exec, "while(true){}"),
+                Err(ExecError::Timeout { limit_ms: 300 }),
+                "round {round}"
+            );
+            assert_eq!(exec_js(&exec, "1+1"), Ok("2".to_owned()), "round {round}");
+        }
+    }
+
+    #[test]
+    fn late_watchdog_never_hits_next_job() {
+        let exec = timeout_exec(250);
+        for (round, d) in [235, 245, 250, 255, 265]
+            .iter()
+            .cycle()
+            .take(12)
+            .enumerate()
+        {
+            let src = format!("const end = Date.now() + {d}; while (Date.now() < end) {{}}");
+            let near = exec_js(&exec, &src);
+            assert!(
+                near == Ok("undefined".to_owned())
+                    || near == Err(ExecError::Timeout { limit_ms: 250 }),
+                "round {round} ({d} ms): {near:?}"
+            );
+            assert_eq!(
+                exec_js(&exec, "1+1"),
+                Ok("2".to_owned()),
+                "canary after round {round} ({d} ms)"
+            );
+        }
     }
 
     #[test]

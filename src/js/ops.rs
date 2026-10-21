@@ -4,7 +4,10 @@
 //! job throws `Error: internal error` instead of touching the store.
 //! `op_rs3_patch` refuses to nest deeper than the job's `max_patch_depth`; once
 //! it has refused, every op of that job throws the same depth error and
-//! touches nothing. Writes made before either stop stay (no transactions).
+//! touches nothing. Once the job timed out, every op returns an empty string
+//! and touches nothing, without throwing: a thrown op error while the isolate
+//! is terminating would cancel the termination. Writes made before any stop
+//! stay (no transactions).
 use std::sync::Arc;
 
 use deno_core::{FromV8, OpState, op2, v8};
@@ -150,50 +153,70 @@ fn depth_error(stop: &DepthStop) -> JsErrorBox {
     )
 }
 
-/// The job context, or the job's stop error once the job is stopped, in the
-/// D-04 order: `Error: internal error` once any level hit a host fault (the
-/// request answers 500), otherwise the depth error once `op_rs3_patch` refused
-/// a level (the request answers 422 js_depth_limit). Either way no op may read
-/// or change the store any more: writes made before the stop stay, writes
-/// after it are refused.
-fn live_ctx(state: &OpState) -> Result<&ExecCtx, JsErrorBox> {
+/// The job context, or what an op must answer once the job is stopped.
+///
+/// `Ok(None)` once the job timed out, checked first: the op then returns an
+/// empty string without touching the store, and never throws. A slow op's
+/// `Err` while its isolate is terminating makes deno_core cancel the pending
+/// V8 termination (the error builder fails and the try-catch is reset), and
+/// the script would keep running past its timeout.
+///
+/// Otherwise the job's stop error in the D-04 order: `Error: internal error`
+/// once any level hit a host fault (the request answers 500), then the depth
+/// error once `op_rs3_patch` refused a level (the request answers 422
+/// js_depth_limit). Either way no op may read or change the store any more:
+/// writes made before the stop stay, writes after it are refused.
+fn live_ctx(state: &OpState) -> Result<Option<&ExecCtx>, JsErrorBox> {
     let ctx = state.borrow::<ExecCtx>();
-    if ctx.job.host_fault() {
+    if ctx.job.timed_out() {
+        Ok(None)
+    } else if ctx.job.host_fault() {
         Err(internal_error())
     } else if let Some(stop) = ctx.job.depth_stop() {
         Err(depth_error(stop))
     } else {
-        Ok(ctx)
+        Ok(Some(ctx))
     }
 }
 
 /// Returns the whole store as the `GET /list` text, `[{"k" : "v"},...]` sorted
 /// by key, or `[]` when empty. Extra arguments are ignored. Throws only after
-/// a host fault or a depth stop in the same job.
+/// a host fault or a depth stop in the same job; returns an empty string
+/// after a timeout.
 #[op2]
 #[string]
 fn op_rs3_list(state: &mut OpState) -> Result<String, JsErrorBox> {
-    Ok(legacy::format_list(&live_ctx(state)?.store.list()))
+    let Some(ctx) = live_ctx(state)? else {
+        return Ok(String::new());
+    };
+    Ok(legacy::format_list(&ctx.store.list()))
 }
 
 /// Returns the value stored under `key`. Throws `Error: key not found: <key>`
 /// when the key is missing. Like every op, it throws the job's stop error
-/// and touches nothing once the job has a host fault or a depth stop.
+/// and touches nothing once the job has a host fault or a depth stop, and
+/// returns an empty string without touching anything once the job timed out.
 #[op2]
 #[string]
 fn op_rs3_get(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
-    live_ctx(state)?.store.get(&key.0).map_err(to_js)
+    let Some(ctx) = live_ctx(state)? else {
+        return Ok(String::new());
+    };
+    ctx.store.get(&key.0).map_err(to_js)
 }
 
 /// Stores every pair of a JSON object of strings and returns the compact echo
 /// `{"k":"v"}`. Throws `TypeError: malformed JSON: ..` or
 /// `TypeError: invalid input: ..` and writes nothing when the body is rejected.
 /// After a host fault or a depth stop it throws the job's stop error and
-/// writes nothing.
+/// writes nothing; after a timeout it returns an empty string and writes
+/// nothing.
 #[op2]
 #[string]
 fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, JsErrorBox> {
-    let ctx = live_ctx(state)?;
+    let Some(ctx) = live_ctx(state)? else {
+        return Ok(String::new());
+    };
     // Validate the whole body before the first write.
     let entries = legacy::parse_insert_body(&body.0).map_err(to_js)?;
     let echo = legacy::format_insert_echo(&entries);
@@ -203,11 +226,15 @@ fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, 
 
 /// Removes `key` and returns the value it held. Throws
 /// `Error: key not found: <key>` when the key is missing. After a host fault
-/// or a depth stop it throws the job's stop error and removes nothing.
+/// or a depth stop it throws the job's stop error and removes nothing; after
+/// a timeout it returns an empty string and removes nothing.
 #[op2]
 #[string]
 fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
-    live_ctx(state)?.store.remove(&key.0).map_err(to_js)
+    let Some(ctx) = live_ctx(state)? else {
+        return Ok(String::new());
+    };
+    ctx.store.remove(&key.0).map_err(to_js)
 }
 
 /// Runs the script stored under `key` in a fresh nested runtime on the same
@@ -228,6 +255,11 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 /// thrown as a plain `Error: internal error`; the top-level run then answers
 /// `ExecError::Internal` even if the script caught it, and every later op of
 /// the job throws the same error.
+///
+/// Once the job timed out it returns an empty string without reading `key`
+/// or creating a runtime, and it also returns an empty string, never an
+/// error, when the job timed out while the nested script ran: throwing then
+/// would cancel the termination of the calling script.
 //
 // `reentrant` is mandatory: the nested runtime calls ops while this op is on
 // the stack, and debug builds abort without the flag. The depth check runs
@@ -239,7 +271,10 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
 fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsErrorBox> {
     let StrArg(key) = key;
     // Clone the context out so no OpState borrow is held across the nested run.
-    let ctx = live_ctx(state)?.clone();
+    let Some(ctx) = live_ctx(state)? else {
+        return Ok(String::new());
+    };
+    let ctx = ctx.clone();
     // The chain holds every level so far, the PATCHed key being level 1, so the
     // next level would exceed the limit once it already holds the limit.
     if ctx.chain.len() >= ctx.max_patch_depth as usize {
@@ -260,10 +295,18 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
         return Err(depth_error(stop));
     }
     let source = ctx.store.get(&key).map_err(to_js)?;
-    super::runtime::run_script(ctx.nested(&key), &key, source).map_err(|e| match e {
-        // Nested runs never classify depth (the executor does that once), so
-        // this arm is unreachable today; it is listed so no wildcard is needed.
+    let result = super::runtime::run_script(ctx.nested(&key), &key, source);
+    // Never throw into a terminating script: an Err here would cancel its
+    // termination (see live_ctx).
+    if ctx.job.timed_out() {
+        return Ok(String::new());
+    }
+    result.map_err(|e| match e {
+        // Nested runs never classify depth or timeouts (the executor does that
+        // once), so these arms are unreachable today; they are listed so no
+        // wildcard is needed, and neither is a host fault.
         e @ ExecError::DepthLimit { .. } => JsErrorBox::generic(e.to_string()),
+        e @ ExecError::Timeout { .. } => JsErrorBox::generic(e.to_string()),
         ExecError::Script { message } => JsErrorBox::generic(
             message
                 .strip_prefix("Uncaught ")
@@ -463,6 +506,100 @@ mod tests {
             store.get("after").is_err(),
             "a write after the timeout landed"
         );
+    }
+
+    #[test]
+    fn timeout_nested_loop_is_timeout() {
+        let store = Store::new();
+        store.insert("loop".into(), "while(true){}".into());
+        let r = run_ctx_on(
+            &timeout_exec(),
+            ctx_for(&store),
+            "Deno.core.ops.op_rs3_patch('loop')",
+        );
+        assert_eq!(r, TIMEOUT_300);
+    }
+
+    #[test]
+    fn timeout_survives_caught_nested_termination() {
+        let store = Store::new();
+        store.insert("loop".into(), "while(true){}".into());
+        let src = "try { Deno.core.ops.op_rs3_patch('loop') } catch (e) {} while (true) {}";
+        let start = std::time::Instant::now();
+        let r = run_ctx_on(&timeout_exec(), ctx_for(&store), src);
+        let elapsed = start.elapsed();
+        assert_eq!(r, TIMEOUT_300);
+        assert!(
+            elapsed < std::time::Duration::from_millis(1300),
+            "{elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn timeout_throwing_op_loop_is_timeout() {
+        let exec = timeout_exec();
+        let src = "for (;;) { try { Deno.core.ops.op_rs3_get('missing') } catch (e) {} }";
+        for run in 0..3 {
+            let start = std::time::Instant::now();
+            let r = run_ctx_on(&exec, ctx_for(&Store::new()), src);
+            let elapsed = start.elapsed();
+            assert_eq!(r, TIMEOUT_300, "run {run}");
+            assert!(
+                elapsed < std::time::Duration::from_millis(1300),
+                "run {run}: {elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_during_stringify_is_timeout() {
+        let r = run_ctx_on(
+            &timeout_exec(),
+            ctx_for(&Store::new()),
+            "({ toString() { while (true) {} } })",
+        );
+        assert_eq!(r, TIMEOUT_300);
+    }
+
+    #[test]
+    fn timeout_is_logged_once() {
+        let store = Store::new();
+        store.insert("loop".into(), "while(true){}".into());
+        let exec = timeout_exec();
+        for src in [
+            "Deno.core.ops.op_rs3_patch('loop')",
+            "try { Deno.core.ops.op_rs3_patch('loop') } catch (e) {} while (true) {}",
+        ] {
+            let ctx = ctx_for(&store);
+            let job = Arc::clone(&ctx.job);
+            assert_eq!(run_ctx_on(&exec, ctx, src), TIMEOUT_300, "{src}");
+            // Only the worker's timeout line; no per-level js error lines.
+            assert_eq!(job.error_log_count(), 1, "{src}");
+        }
+    }
+
+    #[test]
+    fn timeout_beats_depth_limit() {
+        let store = Store::new();
+        store.insert("me".into(), "Deno.core.ops.op_rs3_patch('me')".into());
+        let src = "try { Deno.core.ops.op_rs3_patch('me') } catch (e) {} while (true) {}";
+        let ctx = ctx_for(&store);
+        let job = Arc::clone(&ctx.job);
+        assert_eq!(run_ctx_on(&timeout_exec(), ctx, src), TIMEOUT_300);
+        // The depth stop happened, and the timeout still wins (D-04).
+        assert!(job.depth_stop().is_some());
+    }
+
+    #[test]
+    fn host_fault_beats_timeout() {
+        let store = Store::new();
+        store.insert("bad".into(), "1".into());
+        let src = "try { Deno.core.ops.op_rs3_patch('bad') } catch (e) {} while (true) {}";
+        let ctx = failing_for(&store, "bad");
+        let job = Arc::clone(&ctx.job);
+        let r = run_ctx_on(&timeout_exec(), ctx, src);
+        assert!(is_internal(&r), "{r:?}");
+        assert!(job.timed_out());
     }
 
     fn failing_at(store: &Store, depth: u32) -> ExecCtx {
