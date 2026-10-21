@@ -34,8 +34,7 @@ pre-release / moving targets that no longer build with a modern toolchain:
 - `rusty_v8 = "0.27.0"` (renamed to the `v8` crate)
 - `config = "0.11"` (old `merge`/`try_into` API), `dotenv` (unmaintained → `dotenvy`),
   `lazy_static` (→ `std::sync::LazyLock`), `flurry` (consider `dashmap`/`papaya` if flurry is stale)
-- Dockerfile uses `rust:1.53`; CI uses the archived `actions-rs/*` actions with
-  `continue-on-error: true` everywhere.
+- CI uses the archived `actions-rs/*` actions with `continue-on-error: true` everywhere.
 
 ## Goal of this milestone
 
@@ -65,13 +64,13 @@ Requirements:
 8. Modernize CI: GitHub Actions using `actions/checkout@v4`+, `dtolnay/rust-toolchain`,
    `Swatinem/rust-cache`; check/test/fmt/clippy must actually fail the build (remove
    `continue-on-error`).
-9. Update the Dockerfile to a current `rust` image (cargo-chef still fine) and a slim
-   runtime image.
+9. Ship rs3 as a native binary on a single Linux server: document the release build
+   (`cargo build --release --locked`) and provide an example hardened systemd unit.
+   (Re-scoped on 2026-10-21; see `.planning/PROJECT.md` Key Decisions.)
 10. Update `Readme.md` for the new toolchain, run instructions, and new JS op syntax.
 
-Out of scope for this milestone (leave untouched): `experiments/`, `aws/`, `docker_rs3/`
-Ansible content, `Vagrantfile` — except where they directly reference the Rust version
-and changing that is trivial.
+Out of scope for this milestone (leave untouched): `experiments/`, `aws/`, `Vagrantfile`
+— except where they directly reference the Rust version and changing that is trivial.
 
 ## Future direction (NOT this milestone — but don't paint us into a corner)
 
