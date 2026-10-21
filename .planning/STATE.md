@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 05
 current_phase_name: JS Execution Limits
-status: executing
-stopped_at: Completed 05-02-PLAN.md
-last_updated: "2026-10-21T00:37:42.447Z"
+status: verifying
+stopped_at: Completed 05-03-PLAN.md
+last_updated: "2026-10-21T00:49:01.939Z"
 last_activity: 2026-10-21
 last_activity_desc: Phase 05 execution started
-state_head: 501cbc80c3256f6973668a183095495a377857ad
+state_head: aad004e6da4cb1b7a44e4840addb2b2458052505
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 14
-  completed_plans: 13
+  completed_plans: 14
   percent: 17
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-20)
 
 Phase: 05 (JS Execution Limits) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-21 — Phase 05 execution started
 
 Progress: [██░░░░░░░░] 17%
@@ -66,6 +66,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 04 P02 | 2 min | 2 tasks | 2 files |
 | Phase 05 P01 | 8 min | 3 tasks | 6 files |
 | Phase 05 P02 | 11 min | 3 tasks | 13 files |
+| Phase 05 P03 | 8 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -113,6 +114,10 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-02: one rs3-js-N-wd watchdog per worker, spawned inside the worker closure; Arm at pickup, Disarm before the next job, 50 ms re-fire
 - [Phase 05]: 05-02: rs3 ops return an empty string and never throw once the job timed out (an op Err cancels V8 termination, research S4)
 - [Phase 05]: 05-02: D-07 backstop in JsExecutor::run_job: timeout_ms + 2 s counted from a started signal at pickup; queue wait untimed
+- [Phase 05]: 05-03: The release smoke asserts 422 js_depth_limit and 504 js_timeout (at least 4900 ms after sending) with GET / and a second PATCH answered during the loop; it also requires the loop's output file to be empty next to kill -0, and its EXIT trap reaps the background curl
+- [Phase 05]: 05-03: op_print writes and flushes through write_all_retrying / flush_retrying (Interrupted retries, WouldBlock yields, Ok(0) is WriteZero, no unwrap); an undrained pipe stalls the worker behind the backstop 504 (documented residual)
+- [Phase 05]: 05-03: Worker stacks are clamped to MIN_STACK_BYTES (2 MiB) via effective_stack_bytes, like workers, queue capacity, depth and timeout
+- [Phase 05]: 05-03: Remote x86_64 CI confirmation of the watchdog on the protected PKU platform (A1) is a pending UAT item; nothing was pushed
 
 ### Pending Todos
 
@@ -152,6 +157,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T00:37:42.251Z
-Stopped at: Completed 05-02-PLAN.md
+Last session: 2026-10-21T00:49:01.742Z
+Stopped at: Completed 05-03-PLAN.md
 Resume file: None

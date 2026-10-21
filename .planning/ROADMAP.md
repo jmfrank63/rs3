@@ -157,7 +157,7 @@ Plans:
   3. The execution timeout comes from settings, so tests set a short timeout in code without environment variables
   4. Every error path has a passing test (404 missing key, 400 malformed insert, 422 bad insert shape, 422 JS exception, 422 depth limit, 504 timeout), both locally and in CI
 
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans executed
 
 Plans:
 **Wave 1**
@@ -167,7 +167,7 @@ Plans:
 - [x] 05-02-PLAN.md: Timeout slice (wave 2). The tracer terminates a runaway script with 504 js_timeout through the job's termination group (every runtime registers its IsolateHandle) and a per-worker watchdog thread with 50 ms re-fire, classified by the phase CAS (host fault > timeout > depth > result). Then silent ops after the timeout so caught nested terminations and throwing-op loops cannot cancel it, no late kill of the next job, the D-07 backstop at timeout + 2 s from pickup, and other requests answered while a script loops
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 05-03-PLAN.md: Release and hardening slice (wave 3). The tracer extends the release smoke (protected V8 platform) with 422 js_depth_limit, 504 js_timeout and requests answered during a loop. Then the Phase 3 carry-overs IN-04 (op_print WouldBlock retry), IN-05 (.txt payload parity), IN-06 (catch_unwind doc) and IN-07 (2 MiB stack floor), the docs/js-ops.md limits rewrite (D-12), the full phase gate (serial, 5x, env -i, the 13 named TEST-04 tests) and the pending remote x86_64 handoff
+- [x] 05-03-PLAN.md: Release and hardening slice (wave 3). The tracer extends the release smoke (protected V8 platform) with 422 js_depth_limit, 504 js_timeout and requests answered during a loop. Then the Phase 3 carry-overs IN-04 (op_print WouldBlock retry), IN-05 (.txt payload parity), IN-06 (catch_unwind doc) and IN-07 (2 MiB stack floor), the docs/js-ops.md limits rewrite (D-12), the full phase gate (serial, 5x, env -i, the 13 named TEST-04 tests) and the pending remote x86_64 handoff
 
 **Cross-cutting constraints:**
 - bash scripts/ci-guards.sh, cargo fmt --check, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked, cargo build --release --locked and the release smoke all exit 0 at the end of every plan (TOOL-03, D-14). Cargo.lock stays byte-identical, ci.yml is not edited, and there is no #[allow] or #[ignore]. No unbounded self-patching script and no un-armed infinite loop in any test or smoke (D-11). No git push.
@@ -200,5 +200,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 2. HTTP API Port & Error Handling | 3/3 | In Progress | - |
 | 3. JavaScript Runtime Port | 3/3 | In Progress | - |
 | 4. CI Gate on x86_64 | 2/2 | In Progress | - |
-| 5. JS Execution Limits | 2/3 | In Progress | - |
+| 5. JS Execution Limits | 3/3 | In Progress | - |
 | 6. Docker Image & Documentation | 0/TBD | Not started | - |
