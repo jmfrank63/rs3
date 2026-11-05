@@ -226,7 +226,8 @@ non-numeric id answers 404 `{"error":"not_found","message":"goal not found: 99"}
 committed so far, so a running generation goal shows a growing prefix. `paused` means a worker
 was taken away from the goal and it waits to resume. When `status` is `failed`, `error` is
 `journal_corrupt` (the goal's log failed its checksum), `replay_diverged` (the script did not repeat what the
-log recorded), `js_error` or `js_timeout`.
+log recorded), `js_error`, `js_timeout` or `storage_failure` (a worker hit a storage error; the goal resumes on the
+next start).
 
 **`DELETE /goals/{id}`** cancels the goal durably and answers 200 with the same JSON as GET. It is idempotent:
 a second DELETE, or a DELETE of a goal that already ended, answers the same and keeps the status. The output committed

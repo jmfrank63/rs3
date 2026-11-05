@@ -55,20 +55,24 @@ DIR="$(mktemp -d)"
 PID=""
 LOOP_PID=""
 
-# cleanup: SIGTERM, then SIGKILL after 5 s, so a hung graceful shutdown cannot block the job.
-# A still-running background request (LOOP_PID) is killed and reaped first.
-cleanup() {
+# stop_server: SIGTERM, then SIGKILL after 5 s, so a hung graceful shutdown cannot block the job.
+stop_server() {
   local i
+  [[ -n "$PID" ]] || return 0
+  kill "$PID" 2>/dev/null || true
+  for i in $(seq 1 50); do kill -0 "$PID" 2>/dev/null || break; sleep 0.1; done
+  kill -9 "$PID" 2>/dev/null || true
+  wait "$PID" 2>/dev/null || true
+  PID=""
+}
+
+# cleanup: stop the server. A still-running background request (LOOP_PID) is killed and reaped first.
+cleanup() {
   if [[ -n "$LOOP_PID" ]]; then
     kill "$LOOP_PID" 2>/dev/null || true
     wait "$LOOP_PID" 2>/dev/null || true
   fi
-  if [[ -n "$PID" ]]; then
-    kill "$PID" 2>/dev/null || true
-    for i in $(seq 1 50); do kill -0 "$PID" 2>/dev/null || break; sleep 0.1; done
-    kill -9 "$PID" 2>/dev/null || true
-    wait "$PID" 2>/dev/null || true
-  fi
+  stop_server
   rm -rf "$LOG" "$LOOP_OUT" "$DIR"
 }
 trap cleanup EXIT
@@ -128,14 +132,6 @@ start_server() {
   (( ready )) || fail "server not ready on ${BASE} after 30s"
   [[ "$body" == '"Welcome to rs3"' ]] || fail "GET / body: ${body}"
   echo "ci-smoke: ok   GET / -> \"Welcome to rs3\""
-}
-
-# stop_server: SIGTERM, then reap.
-stop_server() {
-  local st=0
-  kill "$PID" 2>/dev/null || true
-  { wait "$PID"; } 2>/dev/null || st=$?
-  PID=""
 }
 
 start_server
