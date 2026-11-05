@@ -76,13 +76,14 @@ fn run_fresh(
         ));
     }
     let depth = ctx.depth;
+    let logged = ctx.log.is_some();
     let mut rt = JsRuntime::try_new(RuntimeOptions {
         extensions: vec![rs3_ext::init(ctx)],
         ..Default::default()
     })
     .map_err(|e| creation_error(watch, depth, name, &e))?;
     let _registered = Registered::new(&watch.job, rt.v8_isolate().thread_safe_handle());
-    let global = rt.execute_script(name.to_owned(), source).map_err(|e| {
+    let script_error = |e: Box<JsError>| {
         // Debug-format the script-controlled name and error text (message and
         // stack) so control characters and newlines cannot forge log lines.
         if !watch.job.stopped() {
@@ -91,7 +92,15 @@ fn run_fresh(
         ExecError::Script {
             message: e.exception_message.clone(),
         }
-    })?;
+    };
+    if logged && false {
+        // Its own script, so a "use strict" directive in the source still applies.
+        rt.execute_script("ext:rs3/native.js", NATIVE_PRELUDE)
+            .map_err(script_error)?;
+    }
+    let global = rt
+        .execute_script(name.to_owned(), source)
+        .map_err(script_error)?;
     // Read the value in the runtime's own main context; never build a new one.
     deno_core::scope!(scope, &mut rt);
     let local = v8::Local::new(scope, global);
@@ -107,6 +116,26 @@ fn run_fresh(
         }
     })
 }
+
+/// Run before a logged script: the clock and `Math.random` read the logged ops,
+/// so a replay sees the values the first run saw. Explicit-argument dates keep
+/// working natively. The shift keeps the 53 random bits a double holds, so the
+/// result stays below 1.
+const NATIVE_PRELUDE: &str = r#"(() => {
+    const Native = Date, ops = Deno.core.ops;
+    const now = () => Number(ops.op_rs3_now());
+    function Date_(...args) {
+        if (!new.target) return new Native(now()).toString();
+        return Reflect.construct(Native, args.length ? args : [now()], new.target);
+    }
+    Date_.prototype = Native.prototype;
+    Native.prototype.constructor = Date_;
+    Date_.now = now;
+    Date_.UTC = Native.UTC;
+    Date_.parse = Native.parse;
+    globalThis.Date = Date_;
+    Math.random = () => Number(BigInt(ops.op_rs3_random()) >> 11n) / 2 ** 53;
+})()"#;
 
 /// The message a script sees when the runtime for its `op_rs3_patch` call
 /// cannot boot for lack of stack. `op_rs3_patch` throws it as an `Error`, like

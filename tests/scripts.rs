@@ -14,7 +14,7 @@ mod tests {
     const ITERATIONS: usize = 150;
 
     /// Each pass reads `count` and `trail`, writes both back in one insert, then
-    /// idles 10 ms. Date.now only paces the loop; it never reaches an op argument.
+    /// idles a counted spin of plain JS, which logs nothing.
     const SCRIPT: &str = r#"
         const get = (k) => Deno.core.ops.op_rs3_get(k);
         const insert = (o) => Deno.core.ops.op_rs3_insert(JSON.stringify(o));
@@ -22,8 +22,7 @@ mod tests {
             const n = Number(get('count'));
             const t = get('trail');
             insert({ count: String(n + 1), trail: t + i + ',' });
-            const end = Date.now() + 10;
-            while (Date.now() < end) {}
+            for (let s = 0; s < 3000000; s++) {}
         }
         get('count')
     "#;
@@ -111,5 +110,54 @@ mod tests {
         assert_eq!(done["output"], "150");
         assert_eq!(value(&server, "count"), "150");
         assert_eq!(value(&server, "trail"), prefix(ITERATIONS));
+    }
+
+    /// Writes native time and randomness, branches on them, then keeps writing
+    /// so there is time to kill it. A live value on replay changes an op argument.
+    const NATIVE: &str = r#"
+        const insert = (o) => Deno.core.ops.op_rs3_insert(JSON.stringify(o));
+        const a = Date.now(), b = new Date().getTime(), c = Date(), r = Math.random();
+        insert({ a: String(a), b: String(b), c, r: String(r) });
+        const key = (a % 2 === 0 ? 'even' : 'odd') + (r < 0.5 ? '-low' : '-high');
+        for (let i = 0; i < 150; i++) {
+            insert({ [key]: String(i) });
+            for (let s = 0; s < 3000000; s++) {}
+        }
+        key
+    "#;
+
+    #[test]
+    fn a_killed_script_sees_the_same_time_and_randomness_after_replay() {
+        let dir = TempDir::new("scripts-native");
+        let db = dir.0.join("rs3.db");
+        let server = Server::start(&dir.0, Some(&db), &[]);
+        let seed = json!({"job": NATIVE}).to_string();
+        server.request("POST", "/insert", &seed);
+        let created: Value = serde_json::from_str(&server.request(
+            "POST",
+            "/goals",
+            r#"{"priority":0,"script":"job"}"#,
+        ))
+        .unwrap();
+        let id = created["id"].as_u64().unwrap();
+        let keys = ["a", "b", "c", "r"];
+        poll("the first write", 20, || {
+            server
+                .request("GET", "/key/r", "")
+                .starts_with('"')
+                .then_some(())
+        });
+        let before = keys.map(|k| value(&server, k));
+        drop(server);
+        std::thread::sleep(Duration::from_millis(100));
+        let server = Server::start(&dir.0, Some(&db), &[]);
+        let done = poll("the goal to finish", 30, || {
+            let g = goal(&server, id);
+            assert_ne!(g["status"], "failed", "{g}");
+            (g["status"] == "done").then_some(g)
+        });
+        assert_eq!(keys.map(|k| value(&server, k)), before);
+        let key = done["output"].as_str().unwrap();
+        assert_eq!(value(&server, key), "149");
     }
 }

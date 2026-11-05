@@ -415,6 +415,31 @@ mod tests {
     }
 
     #[test]
+    fn native_time_and_randomness_are_logged_only_in_a_logged_job() {
+        let rig = rig();
+        let probe = "[Date.now.toString(), Math.random.toString()].join('|')";
+        let native = "function now() { [native code] }|function random() { [native code] }";
+        assert_eq!(crate::js::run_js(&rig.store, probe), ok(native));
+        let logged = rig.run(probe).unwrap();
+        assert!(!logged.contains("[native code]"), "{logged}");
+        rig.store.insert("inner".into(), probe.into());
+        let nested = rig.run("Deno.core.ops.op_rs3_patch('inner')").unwrap();
+        assert!(!nested.contains("[native code]"), "{nested}");
+    }
+
+    #[test]
+    fn logged_dates_keep_native_behaviour_and_random_stays_below_one() {
+        let rig = rig();
+        let src = "[new Date(0).toISOString(), Date.UTC(1970, 0, 2), Date.parse('1970-01-02T00:00:00Z'),
+                    new Date() instanceof Date, typeof Date(), Date.now() > 1e12,
+                    Array.from({ length: 50 }, Math.random).every((r) => r >= 0 && r < 1)].join('|')";
+        assert_eq!(
+            rig.run(src),
+            ok("1970-01-01T00:00:00.000Z|86400000|86400000|true|string|true|true")
+        );
+    }
+
+    #[test]
     fn a_mismatched_op_diverges_and_refuses_every_later_op() {
         let mismatches = [
             (
