@@ -6,6 +6,7 @@ pub mod config;
 pub mod http;
 pub mod journal;
 pub mod js;
+pub mod model;
 pub mod state;
 pub mod storage;
 pub mod store;
