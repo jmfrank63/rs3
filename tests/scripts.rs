@@ -11,21 +11,26 @@ mod tests {
 
     use crate::common::{Server, TempDir};
 
-    const ITERATIONS: usize = 150;
+    const ITERATIONS: usize = 300;
+    const KILLS: usize = 20;
 
     /// Each pass reads `count` and `trail`, writes both back in one insert, then
     /// idles a counted spin of plain JS, which logs nothing.
-    const SCRIPT: &str = r#"
+    fn script() -> String {
+        format!(
+            r#"
         const get = (k) => Deno.core.ops.op_rs3_get(k);
         const insert = (o) => Deno.core.ops.op_rs3_insert(JSON.stringify(o));
-        for (let i = 0; i < 150; i++) {
+        for (let i = 0; i < {ITERATIONS}; i++) {{
             const n = Number(get('count'));
             const t = get('trail');
-            insert({ count: String(n + 1), trail: t + i + ',' });
-            for (let s = 0; s < 3000000; s++) {}
-        }
+            insert({{ count: String(n + 1), trail: t + i + ',' }});
+            for (let s = 0; s < 1000000; s++) {{}}
+        }}
         get('count')
-    "#;
+    "#
+        )
+    }
 
     fn value(server: &Server, key: &str) -> String {
         let body = server.request("GET", &format!("/key/{key}"), "");
@@ -62,11 +67,11 @@ mod tests {
     }
 
     #[test]
-    fn a_script_killed_three_times_applies_each_write_exactly_once() {
+    fn a_script_killed_at_least_20_times_applies_each_write_exactly_once() {
         let dir = TempDir::new("scripts-kill");
         let db = dir.0.join("rs3.db");
         let mut server = Server::start(&dir.0, Some(&db), &[]);
-        let seed = json!({"count": "0", "trail": "", "job": SCRIPT}).to_string();
+        let seed = json!({"count": "0", "trail": "", "job": script()}).to_string();
         server.request("POST", "/insert", &seed);
         let created: Value = serde_json::from_str(&server.request(
             "POST",
@@ -78,15 +83,16 @@ mod tests {
 
         let mut last = 0;
         let mut state = 0x2545_F491_4F6C_DD1D_u64;
-        for _ in 0..3 {
+        for _ in 0..KILLS {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            let target = last + 3 + (state % 8) as usize;
+            let target = last + 1 + (state % 6) as usize;
             poll("the script to advance", 20, || {
                 let n = applied(&server);
                 (n >= target).then_some(())
             });
+            std::thread::sleep(Duration::from_millis((state >> 20) % 25));
             drop(server);
             server = Server::start(&dir.0, Some(&db), &[]);
             let n = applied(&server);
@@ -107,8 +113,8 @@ mod tests {
             assert_ne!(g["status"], "failed", "{g}");
             (g["status"] == "done").then_some(g)
         });
-        assert_eq!(done["output"], "150");
-        assert_eq!(value(&server, "count"), "150");
+        assert_eq!(done["output"], ITERATIONS.to_string());
+        assert_eq!(value(&server, "count"), ITERATIONS.to_string());
         assert_eq!(value(&server, "trail"), prefix(ITERATIONS));
     }
 

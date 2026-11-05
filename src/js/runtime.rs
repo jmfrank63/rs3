@@ -93,7 +93,7 @@ fn run_fresh(
             message: e.exception_message.clone(),
         }
     };
-    if logged && false {
+    if logged {
         // Its own script, so a "use strict" directive in the source still applies.
         rt.execute_script("ext:rs3/native.js", NATIVE_PRELUDE)
             .map_err(script_error)?;
