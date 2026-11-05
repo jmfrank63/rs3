@@ -56,6 +56,58 @@ pub enum Record {
     },
     /// The stream is finished. Nothing can be appended after this record.
     InferenceEnd { reason: String },
+    /// First record of a script stream: the script's name and its pinned source.
+    ScriptStart { name: String, source: String },
+    /// The result of one op the script ran, which replay returns instead of
+    /// running the op again.
+    OpResult {
+        op: String,
+        args: Vec<String>,
+        result: Result<String, OpError>,
+    },
+    /// The script is finished. Nothing can be appended after this record.
+    ScriptEnd {
+        outcome: Result<String, ScriptFailure>,
+    },
+}
+
+impl Record {
+    fn starts_stream(&self) -> bool {
+        matches!(
+            self,
+            Record::InferenceStart { .. } | Record::ScriptStart { .. }
+        )
+    }
+
+    fn ends_stream(&self) -> bool {
+        matches!(self, Record::InferenceEnd { .. } | Record::ScriptEnd { .. })
+    }
+}
+
+/// An op error as logged, so replay can throw the same error class again.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct OpError {
+    pub class: String,
+    pub message: String,
+}
+
+/// Why a script ended without a result.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptFailure {
+    JsError,
+    JsTimeout,
+    ReplayDiverged,
+}
+
+impl ScriptFailure {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::JsError => "js_error",
+            Self::JsTimeout => "js_timeout",
+            Self::ReplayDiverged => "replay_diverged",
+        }
+    }
 }
 
 /// A model's thinking state as rebuilt from a verified stream.
@@ -173,12 +225,11 @@ impl Journal {
             if head.as_ref().is_some_and(|h| h.ended) {
                 return Err(JournalError::Ended { stream });
             }
-            let is_start = matches!(record, Record::InferenceStart { .. });
-            if is_start != (next_seq == 0) {
+            if record.starts_stream() != (next_seq == 0) {
                 return Err(JournalError::InvalidRecord {
                     stream,
                     seq: next_seq,
-                    reason: "a stream has one inference_start, as its first record",
+                    reason: "a stream has one start record, as its first record",
                 });
             }
             let body = serde_json::to_vec(record)
@@ -194,7 +245,7 @@ impl Journal {
             let new_head = Head {
                 seq: next_seq,
                 hash,
-                ended: matches!(record, Record::InferenceEnd { .. }),
+                ended: record.ends_stream(),
             };
             heads
                 .insert(stream, new_head.encode(stream).as_slice())
@@ -203,9 +254,9 @@ impl Journal {
         Ok(())
     }
 
-    /// Verify a whole stream and rebuild its thinking state, or `None` when the
+    /// Verify a whole stream and return its records, or an empty list when the
     /// stream does not exist.
-    pub fn restore(&self, stream: u64) -> Result<Option<ThinkingState>, JournalError> {
+    pub fn read(&self, stream: u64) -> Result<Vec<Record>, JournalError> {
         let txn = self.db.begin_read().map_err(storage)?;
         let heads = txn.open_table(HEADS).map_err(storage)?;
         let records = txn.open_table(RECORDS).map_err(storage)?;
@@ -214,8 +265,7 @@ impl Journal {
             None => None,
         };
 
-        let mut state: Option<ThinkingState> = None;
-        let mut next_seq = 0;
+        let mut out = Vec::new();
         let mut prev = [0; HASH_LEN];
         for entry in records
             .range((stream, 0)..=(stream, u64::MAX))
@@ -223,16 +273,28 @@ impl Journal {
         {
             let (key, value) = entry.map_err(storage)?;
             let (_, seq) = key.value();
+            let next_seq = out.len() as u64;
             if seq != next_seq {
                 return Err(corrupt(stream, next_seq, "record is missing"));
             }
             let (hash, record) = decode_record(stream, seq, &prev, value.value())?;
-            state = Some(apply(stream, seq, state, record)?);
+            out.push(record);
             prev = hash;
-            next_seq += 1;
         }
 
-        check_head(stream, head.as_ref(), next_seq, &prev)?;
+        check_head(stream, head.as_ref(), out.len() as u64, &prev)?;
+        Ok(out)
+    }
+
+    /// Verify a whole stream and rebuild its thinking state, or `None` when the
+    /// stream does not exist.
+    pub fn restore(&self, stream: u64) -> Result<Option<ThinkingState>, JournalError> {
+        let mut state = None;
+        let mut next_seq = 0;
+        for record in self.read(stream)? {
+            state = Some(apply(stream, next_seq, state, record)?);
+            next_seq += 1;
+        }
         Ok(state.map(|state| ThinkingState { next_seq, ..state }))
     }
 }
@@ -559,13 +621,133 @@ mod tests {
             Err(JournalError::InvalidRecord {
                 stream: 7,
                 seq,
-                reason: "a stream has one inference_start, as its first record",
+                reason: "a stream has one start record, as its first record",
             })
         };
         assert_eq!(journal.append(7, 0, &tokens(&[1], 1)), bad(0));
         assert_eq!(journal.restore(7), Ok(None));
         journal.append(7, 0, &start()).unwrap();
         assert_eq!(journal.append(7, 1, &start()), bad(1));
+    }
+
+    fn script_start() -> Record {
+        Record::ScriptStart {
+            name: "job".into(),
+            source: "export default () => 1".into(),
+        }
+    }
+
+    fn op_ok(op: &str, result: &str) -> Record {
+        Record::OpResult {
+            op: op.into(),
+            args: vec!["k".into()],
+            result: Ok(result.into()),
+        }
+    }
+
+    fn script_stream(journal: &Journal) -> Vec<Record> {
+        let records = vec![
+            script_start(),
+            op_ok("get", "v"),
+            Record::OpResult {
+                op: "put".into(),
+                args: vec!["k".into(), "v".into()],
+                result: Err(OpError {
+                    class: "storage".into(),
+                    message: "boom".into(),
+                }),
+            },
+        ];
+        for (seq, record) in records.iter().enumerate() {
+            journal.append(9, seq as u64, record).unwrap();
+        }
+        records
+    }
+
+    #[test]
+    fn script_stream_round_trips_through_read_and_reopening() {
+        let dir = TempDir::new();
+        let path = dir.path().join("db");
+        let db = open(&path).unwrap();
+        let journal = Journal::new(db.clone()).unwrap();
+        let mut expected = script_stream(&journal);
+        let end = Record::ScriptEnd {
+            outcome: Err(ScriptFailure::JsTimeout),
+        };
+        journal.append(9, 3, &end).unwrap();
+        expected.push(end);
+        assert_eq!(journal.read(9).unwrap(), expected);
+        drop((journal, db));
+        let journal = Journal::new(open(&path).unwrap()).unwrap();
+        assert_eq!(journal.read(9).unwrap(), expected);
+    }
+
+    #[test]
+    fn reading_a_missing_stream_is_empty() {
+        let (_dir, _db, journal) = journal();
+        assert_eq!(journal.read(5), Ok(vec![]));
+    }
+
+    #[test]
+    fn flipped_byte_in_an_op_record_is_corrupt_at_that_seq() {
+        let (_dir, db, journal) = journal();
+        script_stream(&journal);
+        let txn = db.begin_write().unwrap();
+        {
+            let mut records = txn.open_table(RECORDS).unwrap();
+            let mut raw = records.get((9, 1)).unwrap().unwrap().value().to_vec();
+            let at = raw.windows(1).rposition(|w| w == b"v").unwrap();
+            raw[at] = b'w';
+            records.insert((9, 1), raw.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+        assert!(matches!(
+            journal.read(9),
+            Err(JournalError::Corrupt { seq: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn script_end_refuses_more_records() {
+        let (_dir, _db, journal) = journal();
+        script_stream(&journal);
+        let end = Record::ScriptEnd {
+            outcome: Ok("done".into()),
+        };
+        journal.append(9, 3, &end).unwrap();
+        assert_eq!(
+            journal.append(9, 4, &op_ok("get", "x")),
+            Err(JournalError::Ended { stream: 9 })
+        );
+    }
+
+    #[test]
+    fn script_stream_must_begin_with_exactly_one_script_start() {
+        let (_dir, _db, journal) = journal();
+        let bad = |seq| {
+            Err(JournalError::InvalidRecord {
+                stream: 9,
+                seq,
+                reason: "a stream has one start record, as its first record",
+            })
+        };
+        assert_eq!(journal.append(9, 0, &op_ok("get", "v")), bad(0));
+        journal.append(9, 0, &script_start()).unwrap();
+        assert_eq!(journal.append(9, 1, &script_start()), bad(1));
+    }
+
+    #[test]
+    fn restoring_a_script_stream_reports_corruption() {
+        let (_dir, _db, journal) = journal();
+        script_stream(&journal);
+        assert_eq!(corrupt_seq(journal.restore(9)), 0);
+    }
+
+    #[test]
+    fn script_failures_have_stable_codes() {
+        assert_eq!(ScriptFailure::JsError.code(), "js_error");
+        assert_eq!(ScriptFailure::JsTimeout.code(), "js_timeout");
+        assert_eq!(ScriptFailure::ReplayDiverged.code(), "replay_diverged");
     }
 
     #[test]
