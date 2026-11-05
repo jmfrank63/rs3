@@ -140,7 +140,19 @@ fn to_js(e: StoreError) -> JsErrorBox {
         StoreError::NotFound(_) => JsErrorBox::generic(e.to_string()),
         StoreError::MalformedJson(_) => JsErrorBox::type_error(e.to_string()),
         StoreError::InvalidInput(_) => JsErrorBox::type_error(e.to_string()),
+        StoreError::Storage(_) => internal_error(),
     }
+}
+
+/// The error thrown into a script when a store write fails. A storage failure
+/// is a host fault: it is logged and stops the whole job, so the script cannot
+/// catch it and carry on as if the write had happened.
+fn write_error(ctx: &ExecCtx, e: StoreError) -> JsErrorBox {
+    if let StoreError::Storage(detail) = &e {
+        ctx.log_error(format_args!("error: store write failed: {detail:?}"));
+        ctx.note_host_fault();
+    }
+    to_js(e)
 }
 
 /// The error thrown into a script for a host fault. It carries no host details.
@@ -228,7 +240,9 @@ fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, 
     // Validate the whole body before the first write.
     let entries = legacy::parse_insert_body(&body.0).map_err(to_js)?;
     let echo = legacy::format_insert_echo(&entries);
-    ctx.store.insert_all(entries);
+    ctx.store
+        .insert_all(entries)
+        .map_err(|e| write_error(ctx, e))?;
     Ok(echo)
 }
 
@@ -242,7 +256,7 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
     let Some(ctx) = live_ctx(state)? else {
         return Ok(String::new());
     };
-    ctx.store.remove(&key.0).map_err(to_js)
+    ctx.store.remove(&key.0).map_err(|e| write_error(ctx, e))
 }
 
 /// Runs the script stored under `key` in a fresh nested runtime on the same
@@ -680,6 +694,21 @@ mod tests {
         assert!(is_internal(&r), "{r:?}");
         // The nested host failure line and the worker's timeout line.
         assert_eq!(job.error_log_count(), 2);
+    }
+
+    #[test]
+    fn failed_store_writes_stop_the_job_even_when_caught() {
+        for op in [
+            r#"Deno.core.ops.op_rs3_insert('{"b":"2"}')"#,
+            "Deno.core.ops.op_rs3_delete('a')",
+        ] {
+            let store = Store::failing(&[("a", "1")]);
+            let src = format!("try {{ {op} }} catch (e) {{}}; 'carried on'");
+            let r = run_js(&store, &src);
+            assert!(is_internal(&r), "{op}: {r:?}");
+            assert_eq!(store.get("a"), Ok("1".to_owned()));
+            assert_eq!(store.len(), 1);
+        }
     }
 
     fn failing_at(store: &Store, depth: u32) -> ExecCtx {

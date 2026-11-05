@@ -2,6 +2,18 @@ use std::process::ExitCode;
 
 use actix_web::{App, HttpServer};
 use rs3::config::Settings;
+use rs3::store::Store;
+
+/// The store the settings ask for: durable with `STORAGE.PATH`, else in memory.
+fn open_store(settings: &Settings) -> Result<Store, String> {
+    let Some(path) = &settings.storage.path else {
+        eprintln!("warning: STORAGE.PATH is not set; data is kept in memory only");
+        return Ok(Store::new());
+    };
+    let describe = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let db = rs3::storage::open(path).map_err(|e| describe(&e))?;
+    Store::durable(db).map_err(|e| describe(&e))
+}
 
 #[actix_web::main]
 async fn main() -> ExitCode {
@@ -9,6 +21,13 @@ async fn main() -> ExitCode {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: invalid configuration: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let store = match open_store(&settings) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("error: cannot open storage: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -24,7 +43,7 @@ async fn main() -> ExitCode {
     let host = settings.server.host.clone();
     let port = settings.server.port;
     // One AppState for the whole process; each worker only clones the closure.
-    let state = rs3::state::AppState::new(settings, js);
+    let state = rs3::state::AppState::new(store, settings, js);
     let cfg = rs3::http::configure(state);
     let server = match HttpServer::new(move || App::new().configure(cfg.clone()))
         .bind((host.as_str(), port))

@@ -15,8 +15,10 @@ use crate::store::StoreError;
 /// Errors a handler can return; each maps to one status code and machine code.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
+    /// A client-visible store error. Storage failures never get here: `From`
+    /// logs them and answers `Internal`.
     #[error(transparent)]
-    Store(#[from] StoreError),
+    Store(StoreError),
     /// A stored script threw, failed to parse or left an op error uncaught.
     /// Carries only the JS exception message; the stack went to stderr.
     #[error("{0}")]
@@ -32,6 +34,20 @@ pub enum ApiError {
     /// A host fault. The body message is always the fixed `internal error`.
     #[error("internal error")]
     Internal,
+}
+
+impl From<StoreError> for ApiError {
+    /// A storage failure is a host fault: it is logged to stderr and becomes 500
+    /// `internal`, so host details never reach the client.
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::Storage(detail) => {
+                eprintln!("error: store failure: {detail}");
+                ApiError::Internal
+            }
+            other => ApiError::Store(other),
+        }
+    }
 }
 
 impl From<ExecError> for ApiError {
@@ -74,6 +90,7 @@ impl ApiError {
             ApiError::Store(StoreError::NotFound(_)) => "not_found",
             ApiError::Store(StoreError::MalformedJson(_)) => "malformed_json",
             ApiError::Store(StoreError::InvalidInput(_)) => "invalid_input",
+            ApiError::Store(StoreError::Storage(_)) => "internal",
             ApiError::JsError(_) => "js_error",
             ApiError::JsDepthLimit(_) => "js_depth_limit",
             ApiError::JsTimeout(_) => "js_timeout",
@@ -88,6 +105,7 @@ impl ResponseError for ApiError {
             ApiError::Store(StoreError::NotFound(_)) => StatusCode::NOT_FOUND,
             ApiError::Store(StoreError::MalformedJson(_)) => StatusCode::BAD_REQUEST,
             ApiError::Store(StoreError::InvalidInput(_)) => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiError::Store(StoreError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::JsError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::JsDepthLimit(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::JsTimeout(_) => StatusCode::GATEWAY_TIMEOUT,

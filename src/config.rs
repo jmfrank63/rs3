@@ -4,16 +4,18 @@
 //! its ancestors) overlaid by the process environment, which wins. The process
 //! environment is only read, never modified. A missing dotenv file is ignored;
 //! any other dotenv problem (a line that does not parse, an unreadable file) is
-//! a configuration error. Only the keys `SERVER.HOST` and `SERVER.PORT`
-//! (case-insensitive) are used, and both are required: there are no defaults,
-//! and missing or invalid values are an error.
+//! a configuration error. Only the keys `SERVER.HOST`, `SERVER.PORT` and
+//! `STORAGE.PATH` (case-insensitive) are used. Both server keys are required:
+//! there are no defaults, and missing or invalid values are an error. Without
+//! `STORAGE.PATH` the store keeps its data in memory only.
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 
 /// The only configuration keys read from the dotenv file and the environment.
-const SERVER_KEYS: [&str; 2] = ["server.host", "server.port"];
+const CONFIG_KEYS: [&str; 3] = ["server.host", "server.port", "storage.path"];
 
 /// Address the HTTP server binds to.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -22,10 +24,19 @@ pub struct ServerSettings {
     pub port: u16,
 }
 
+/// Where the store keeps its data.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct StorageSettings {
+    /// The database file. `None` keeps data in memory only.
+    pub path: Option<PathBuf>,
+}
+
 /// Top-level application settings.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Settings {
     pub server: ServerSettings,
+    #[serde(default)]
+    pub storage: StorageSettings,
 }
 
 /// Merge dotenv pairs and environment pairs into one configuration map.
@@ -43,12 +54,12 @@ pub struct Settings {
 /// returned before any pair is used, so a malformed file is never half-applied.
 /// Environment entries whose name or value is not valid UTF-8 are skipped.
 ///
-/// Only the exact keys `server.host` and `server.port` (after lowercasing) are
-/// kept, so unrelated variables (`SERVER`, `PATH`, ...) and deeper or unknown
-/// `server.*` names (`SERVER.HOST.X`, `SERVER.OTHER`) cannot collide with the
-/// server table. The accepted names are the dotted `SERVER.HOST` /
-/// `SERVER.PORT` (in any case); there are no defaults and no double-underscore
-/// alias. The returned keys are lowercase.
+/// Only the exact keys in `CONFIG_KEYS` (after lowercasing) are kept, so
+/// unrelated variables (`SERVER`, `PATH`, ...) and deeper or unknown `server.*`
+/// names (`SERVER.HOST.X`, `SERVER.OTHER`) cannot collide with the settings
+/// tables. The accepted names are the dotted `SERVER.HOST` / `SERVER.PORT` /
+/// `STORAGE.PATH` (in any case); there is no double-underscore alias. The
+/// returned keys are lowercase.
 ///
 /// This function is pure: it touches neither the process environment nor the
 /// filesystem.
@@ -72,7 +83,7 @@ where
             vars.insert(key.to_ascii_lowercase(), value);
         }
     }
-    vars.retain(|key, _| SERVER_KEYS.contains(&key.as_str()));
+    vars.retain(|key, _| CONFIG_KEYS.contains(&key.as_str()));
     Ok(vars)
 }
 
@@ -148,8 +159,25 @@ mod tests {
                     host: "127.0.0.1".into(),
                     port: 5000,
                 },
+                storage: StorageSettings::default(),
             }
         );
+    }
+
+    #[test]
+    fn storage_path_is_optional_and_read_in_any_case() {
+        let merged = merge_dotenv_env(
+            None::<Vec<dotenvy::Result<(String, String)>>>,
+            env(&[
+                ("SERVER.HOST", "h"),
+                ("SERVER.PORT", "1"),
+                ("Storage.Path", "/data/rs3.db"),
+                ("STORAGE.OTHER", "ignored"),
+            ]),
+        )
+        .unwrap();
+        let s = Settings::from_map(merged).unwrap();
+        assert_eq!(s.storage.path, Some(PathBuf::from("/data/rs3.db")));
     }
 
     #[test]

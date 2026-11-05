@@ -1,7 +1,8 @@
 # rs3
 
 rs3 is a small Rust key/value store. An actix-web HTTP server keeps string
-key/value pairs in an in-memory map, and `PATCH /key/{key}` runs the stored
+key/value pairs in memory, or also in a database file when `STORAGE.PATH` is
+set, and `PATCH /key/{key}` runs the stored
 value as JavaScript in an embedded V8 (deno_core), whose ops call back into the
 store. It started as a 2021 Birkbeck MSc Computer Science project and now
 builds on Rust 1.99.1 / edition 2024.
@@ -63,7 +64,7 @@ Alternatively, copy `env.example` (`SERVER.HOST=localhost`,
 
 ## Configuration
 
-rs3 reads exactly two settings, `SERVER.HOST` and `SERVER.PORT`. The names are
+rs3 reads three settings: `SERVER.HOST`, `SERVER.PORT` and `STORAGE.PATH`. The names are
 case-insensitive (`SERVER.HOST`, `server.host` and `Server.Port` all work), but
 the dot is required: underscore names such as `SERVER_HOST` and `SERVER_PORT`
 are not read. Every other variable is ignored.
@@ -71,7 +72,11 @@ are not read. Every other variable is ignored.
 - **Sources:** the process environment, and a dotenv file (`.env`) in the
   working directory or the nearest parent directory that has one. The
   environment wins over the file. A missing file is ignored.
-- **No defaults:** both settings are required.
+- **No defaults:** both `SERVER` settings are required.
+- **Storage:** `STORAGE.PATH` is the database file. It is created when missing,
+  but its directory must exist. A write is answered only after it is flushed to
+  disk, and the data is loaded again at the next start. Without this setting,
+  rs3 prints a warning and keeps its data in memory only, so a restart empties it.
 - **A broken dotenv file stops startup.** A line that does not parse, a file
   that starts with a UTF-8 byte order mark (BOM) or an unreadable file gives a
   line that starts with `error: invalid configuration: .env: ` and exit 1.
@@ -92,6 +97,7 @@ the port used):
 | `SERVER.PORT=70000` | ``error: invalid configuration: invalid type: 64-bit unsigned integer `70000`, expected an unsigned 16 bit integer for key `server.port` `` |
 | `SERVER.PORT=` (empty) | ``error: invalid configuration: invalid type: string "", expected an integer for key `server.port` in the environment`` |
 | `SERVER.HOST=` (empty) | `error: cannot bind :5000: failed to lookup address information: Name or service not known` |
+| `STORAGE.PATH` in a missing directory, or held open by another process | `error: cannot open storage: <path>: <cause>` |
 | port already in use | `error: cannot bind 127.0.0.1:5000: Address already in use (os error 98)` |
 | port 80 as an unprivileged user | `error: cannot bind 127.0.0.1:80: Permission denied (os error 13)` |
 

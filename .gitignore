@@ -13,3 +13,7 @@ web_scrape_s3_api/apirequests.txt
 
 # Local agent tooling (GSD Core install)
 /.claude/
+
+# Quality and GSD tooling output
+/mutants.out*/
+/.gsd/
