@@ -12,7 +12,7 @@ use crate::store::Store;
 
 /// Shared state for every worker: one store, the settings loaded at startup
 /// and the handle to the JS thread pool.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AppState {
     pub store: Store,
     pub settings: Arc<Settings>,

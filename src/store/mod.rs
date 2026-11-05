@@ -27,12 +27,6 @@ enum Persistence {
     Failing,
 }
 
-impl std::fmt::Debug for Persistence {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Persistence")
-    }
-}
-
 fn storage<E: Into<redb::Error>>(e: E) -> StoreError {
     StoreError::Storage(e.into().to_string())
 }
@@ -53,7 +47,7 @@ pub enum StoreError {
 }
 
 /// Shared handle to the key/value map. Clones share the same map.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default)]
 pub struct Store {
     map: Arc<papaya::HashMap<String, String>>,
     persistence: Persistence,

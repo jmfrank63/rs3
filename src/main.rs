@@ -15,50 +15,35 @@ fn open_store(settings: &Settings) -> Result<Store, String> {
     Store::durable(db).map_err(|e| describe(&e))
 }
 
-#[actix_web::main]
-async fn main() -> ExitCode {
-    let settings = match Settings::load() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: invalid configuration: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let store = match open_store(&settings) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("error: cannot open storage: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+/// Start everything and serve until shutdown. The error is the startup or
+/// server failure to report, without the `error: ` prefix.
+async fn run() -> Result<(), String> {
+    let settings = Settings::load().map_err(|e| format!("invalid configuration: {e}"))?;
+    let store = open_store(&settings).map_err(|e| format!("cannot open storage: {e}"))?;
     // V8 is initialised once on the main thread before any other thread (JS pool, actix workers) spawns.
     rs3::js::init_platform();
-    let js = match rs3::js::executor::JsExecutor::start(&rs3::js::JsSettings::default()) {
-        Ok(js) => js,
-        Err(e) => {
-            eprintln!("error: cannot start JS runtime: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let js = rs3::js::executor::JsExecutor::start(&rs3::js::JsSettings::default())
+        .map_err(|e| format!("cannot start JS runtime: {e}"))?;
     let host = settings.server.host.clone();
     let port = settings.server.port;
     // One AppState for the whole process; each worker only clones the closure.
-    let state = rs3::state::AppState::new(store, settings, js);
-    let cfg = rs3::http::configure(state);
-    let server = match HttpServer::new(move || App::new().configure(cfg.clone()))
+    let cfg = rs3::http::configure(rs3::state::AppState::new(store, settings, js));
+    let server = HttpServer::new(move || App::new().configure(cfg.clone()))
         .bind((host.as_str(), port))
-    {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot bind {host}:{port}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+        .map_err(|e| format!("cannot bind {host}:{port}: {e}"))?;
     println!("Starting Http server at host address: {host}, with port: {port}!");
-    match server.run().await {
+    server
+        .run()
+        .await
+        .map_err(|e| format!("server failed: {e}"))
+}
+
+#[actix_web::main]
+async fn main() -> ExitCode {
+    match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: server failed: {e}");
+            eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }

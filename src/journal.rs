@@ -26,8 +26,7 @@ const HEADS: TableDefinition<u64, &[u8]> = TableDefinition::new("journal_heads")
 /// Version byte at the start of every stored record.
 const FORMAT: u8 = 1;
 const HASH_LEN: usize = 32;
-/// Stored record layout: version byte, previous hash, own hash, JSON body.
-const HEADER_LEN: usize = 1 + HASH_LEN + HASH_LEN;
+// Stored record layout: version byte, previous hash, own hash, JSON body.
 /// Stored head layout: last sequence number, last hash, ended flag.
 const HEAD_LEN: usize = 8 + HASH_LEN + 1;
 
@@ -118,12 +117,6 @@ pub struct Journal {
     db: Arc<Database>,
 }
 
-impl std::fmt::Debug for Journal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Journal")
-    }
-}
-
 impl Journal {
     /// Use `db` for the journal, creating its tables when they do not exist.
     pub fn new(db: Arc<Database>) -> Result<Self, JournalError> {
@@ -176,11 +169,7 @@ impl Journal {
             let prev = head.map_or([0; HASH_LEN], |h| h.hash);
             let hash = record_hash(stream, next_seq, &prev, &body);
 
-            let mut stored = Vec::with_capacity(HEADER_LEN + body.len());
-            stored.push(FORMAT);
-            stored.extend_from_slice(&prev);
-            stored.extend_from_slice(&hash);
-            stored.extend_from_slice(&body);
+            let stored = [&[FORMAT], &prev[..], &hash[..], &body[..]].concat();
             let mut records = txn.open_table(RECORDS).map_err(storage)?;
             records
                 .insert((stream, next_seq), stored.as_slice())
@@ -315,14 +304,13 @@ fn decode_record(
     expected_prev: &Hash,
     raw: &[u8],
 ) -> Result<(Hash, Record), JournalError> {
-    if raw.len() < HEADER_LEN {
-        return Err(corrupt(stream, seq, "record is too short"));
+    let short = || corrupt(stream, seq, "record is too short");
+    let (format, rest) = raw.split_first().ok_or_else(short)?;
+    let (prev, rest) = rest.split_at_checked(HASH_LEN).ok_or_else(short)?;
+    let (hash, body) = rest.split_at_checked(HASH_LEN).ok_or_else(short)?;
+    if *format != FORMAT {
+        return Err(corrupt(stream, seq, format!("unknown format {format}")));
     }
-    if raw[0] != FORMAT {
-        return Err(corrupt(stream, seq, format!("unknown format {}", raw[0])));
-    }
-    let (prev, rest) = raw[1..].split_at(HASH_LEN);
-    let (hash, body) = rest.split_at(HASH_LEN);
     if prev != expected_prev {
         return Err(corrupt(
             stream,
@@ -368,9 +356,6 @@ fn apply(
             next_seq: 0,
             ended: None,
         }),
-        (Some(state), _) if state.ended.is_some() => {
-            Err(corrupt(stream, seq, "record after inference_end"))
-        }
         (Some(mut state), Record::Tokens { tokens, rng_state }) => {
             state.tokens.extend(tokens);
             state.rng_state = rng_state;
@@ -547,10 +532,13 @@ mod tests {
     }
 
     #[test]
-    fn flipped_body_bit_is_detected_at_its_record() {
+    fn altered_token_is_detected_even_when_the_record_still_parses() {
         let (_dir, db, journal) = journal();
         three_records(&journal);
-        edit_record(&db, 1, |raw| *raw.last_mut().unwrap() ^= 1);
+        edit_record(&db, 1, |raw| {
+            let at = raw.windows(5).position(|w| w == b"[1,2]").unwrap();
+            raw[at + 3] = b'9';
+        });
         assert_eq!(corrupt_seq(journal.restore(7)), 1);
     }
 
@@ -579,11 +567,13 @@ mod tests {
     }
 
     #[test]
-    fn truncated_record_is_detected() {
+    fn truncated_records_are_detected_at_any_length() {
         let (_dir, db, journal) = journal();
         three_records(&journal);
-        edit_record(&db, 1, |raw| raw.truncate(HEADER_LEN - 1));
-        assert_eq!(corrupt_seq(journal.restore(7)), 1);
+        for len in [64, 33, 32, 1, 0] {
+            edit_record(&db, 1, |raw| raw.truncate(len));
+            assert_eq!(corrupt_seq(journal.restore(7)), 1, "length {len}");
+        }
     }
 
     #[test]

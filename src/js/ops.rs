@@ -17,7 +17,7 @@ use super::{DepthStop, ExecError, JobState};
 use crate::store::{Store, StoreError, legacy};
 
 /// Per-job context the ops read from `OpState`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ExecCtx {
     /// The store of the caller that submitted the job.
     pub store: Store,
