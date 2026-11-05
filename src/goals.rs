@@ -4,7 +4,8 @@
 //! The `goals` table holds only what the stream cannot: priority and budget. It
 //! is written in the same transaction as the stream's start record, so a goal
 //! exists completely or not at all. A goal's id is its stream id.
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
@@ -36,6 +37,7 @@ pub struct GoalSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Goal {
     pub id: u64,
+    pub priority: i64,
     pub budget: u64,
 }
 
@@ -48,18 +50,24 @@ pub struct GoalStatus {
 }
 
 /// The status and error of a goal that has no durable result.
-fn flags(running: bool, failed: bool, done: bool) -> (&'static str, Option<&'static str>) {
-    match (done, failed, running) {
-        (true, _, _) => ("done", None),
-        (_, true, _) => ("failed", Some("storage_failure")),
-        (_, _, true) => ("running", None),
+fn flags(
+    running: bool,
+    failed: bool,
+    done: bool,
+    progress: bool,
+) -> (&'static str, Option<&'static str>) {
+    match (done, failed, running, progress) {
+        (true, ..) => ("done", None),
+        (_, true, ..) => ("failed", Some("storage_failure")),
+        (_, _, true, _) => ("running", None),
+        (.., true) => ("paused", None),
         _ => ("queued", None),
     }
 }
 
 #[derive(Default)]
 struct Sched {
-    queue: VecDeque<Goal>,
+    queue: Vec<Goal>,
     running: HashSet<u64>,
     failures: HashMap<u64, String>,
 }
@@ -100,7 +108,7 @@ impl Goals {
         for goal in goals.all()? {
             match goals.0.journal.read(goal.id) {
                 Ok(records) if records.last().is_some_and(|last| !last.ends_stream()) => {
-                    goals.sched().queue.push_back(goal);
+                    goals.sched().queue.push(goal);
                 }
                 Ok(_) => {}
                 Err(e @ JournalError::Corrupt { .. }) => eprintln!("error: goal {}: {e}", goal.id),
@@ -118,6 +126,7 @@ impl Goals {
             let (id, row) = entry.map_err(storage)?;
             goals.push(Goal {
                 id: id.value(),
+                priority: row.value().0,
                 budget: row.value().1,
             });
         }
@@ -170,7 +179,11 @@ impl Goals {
         };
         self.0.journal.append_in(&txn, id, 0, start)?;
         txn.commit().map_err(storage)?;
-        self.sched().queue.push_back(Goal { id, budget });
+        self.sched().queue.push(Goal {
+            id,
+            priority,
+            budget,
+        });
         self.0.wake.notify_one();
         Ok(id)
     }
@@ -197,18 +210,19 @@ impl Goals {
             }
             Err(e) => return Err(e),
         };
+        let progress = records.len() > 1;
         let (status, error, output) = match records.last() {
             Some(Record::ScriptEnd { outcome: Ok(value) }) => ("done", None, Some(value.clone())),
             Some(Record::ScriptEnd { outcome: Err(f) }) => ("failed", Some(f.code()), None),
             _ if matches!(records.first(), Some(Record::ScriptStart { .. })) => {
-                let (status, error) = flags(running, failed, false);
+                let (status, error) = flags(running, failed, false, progress);
                 (status, error, None)
             }
             _ => {
                 let Some(state) = Journal::rebuild(id, records)? else {
                     return Ok(None);
                 };
-                let (status, error) = flags(running, failed, state.ended.is_some());
+                let (status, error) = flags(running, failed, state.ended.is_some(), progress);
                 (status, error, Some(FakeModel.render(&state.tokens)))
             }
         };
@@ -264,7 +278,9 @@ impl Goals {
     }
 
     fn take(sched: &mut Sched) -> Option<Goal> {
-        let goal = sched.queue.pop_front()?;
+        let next = (0..sched.queue.len())
+            .max_by_key(|&i| (sched.queue[i].priority, Reverse(sched.queue[i].id)))?;
+        let goal = sched.queue.remove(next);
         sched.running.insert(goal.id);
         Some(goal)
     }
@@ -349,30 +365,45 @@ impl Goals {
         log.end(outcome)
     }
 
-    /// Claim `goal`, then step it until it ends. A storage failure is logged
-    /// once and kept in memory only, so the goal resumes on the next start. A
-    /// worker whose lease was taken over stops quietly: that is normal control
-    /// flow, not a failure.
-    pub fn run(&self, goal: Goal) {
-        let result = lease::claim(&self.0.db, goal.id).and_then(|fence| {
-            let records = self.0.journal.read(goal.id)?;
-            if let Some(Record::ScriptStart { name, source }) = records.first() {
-                return self.run_script(&goal, fence, name, source, &records);
-            }
-            loop {
-                if self.step(&goal, &fence)? {
-                    break Ok(());
-                }
-            }
-        });
-        let mut sched = self.sched();
-        if let Err(e) = result
-            && !matches!(e, JournalError::Fenced { .. })
-        {
-            eprintln!("error: goal {}: {e}", goal.id);
-            sched.failures.insert(goal.id, e.to_string());
+    fn drive(&self, goal: &Goal) -> Result<(), JournalError> {
+        let fence = lease::claim(&self.0.db, goal.id)?;
+        let records = self.0.journal.read(goal.id)?;
+        if records.last().is_some_and(Record::ends_stream) {
+            return Ok(());
         }
+        if let Some(Record::ScriptStart { name, source }) = records.first() {
+            return self.run_script(goal, fence, name, source, &records);
+        }
+        while !self.step(goal, &fence)? {}
+        Ok(())
+    }
+
+    /// Claim `goal`, then step it until it ends. A worker whose lease was taken
+    /// over stops quietly, and the goal is queued again, paused. A storage
+    /// failure is logged once and kept in memory only, so the goal resumes on
+    /// the next start.
+    pub fn run(&self, goal: Goal) {
+        let requeue = match self.drive(&goal) {
+            Err(e) if !matches!(e, JournalError::Fenced { .. }) => Err(e),
+            _ => self
+                .0
+                .journal
+                .read(goal.id)
+                .map(|records| records.last().is_some_and(|last| !last.ends_stream())),
+        };
+        let mut sched = self.sched();
         sched.running.remove(&goal.id);
+        match requeue {
+            Ok(true) => {
+                sched.queue.push(goal);
+                self.0.wake.notify_one();
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("error: goal {}: {e}", goal.id);
+                sched.failures.insert(goal.id, e.to_string());
+            }
+        }
     }
 }
 
@@ -474,7 +505,14 @@ mod tests {
                 error: None
             }
         );
-        assert_eq!(goals.next_goal(), Some(Goal { id, budget: 5 }));
+        assert_eq!(
+            goals.next_goal(),
+            Some(Goal {
+                id,
+                priority: 0,
+                budget: 5
+            })
+        );
         assert_eq!(goals.next_goal(), None);
     }
 
@@ -591,6 +629,81 @@ mod tests {
         assert_eq!(output(&goals, id), undisturbed(800, 5));
     }
 
+    fn spec_at(priority: i64) -> GoalSpec {
+        GoalSpec {
+            priority,
+            ..spec(1, 1)
+        }
+    }
+
+    fn order(goals: &Goals) -> Vec<u64> {
+        std::iter::from_fn(|| goals.next_goal().map(|g| g.id)).collect()
+    }
+
+    #[test]
+    fn higher_priorities_come_first_and_ties_keep_creation_order() {
+        let dir = TempDir::new();
+        let path = dir.path().join("db");
+        let goals = goals_at(&path);
+        for p in [1, 5, 5, 3, -1] {
+            goals.create(spec_at(p)).unwrap();
+        }
+        assert_eq!(order(&goals), [2, 3, 4, 1, 5]);
+        drop(goals);
+        assert_eq!(order(&goals_at(&path)), [2, 3, 4, 1, 5]);
+    }
+
+    #[test]
+    fn a_script_goals_priority_counts() {
+        let r = rig();
+        let low = r.script("1");
+        let high = r.goals.create_script(9, "s".into(), "2".into()).unwrap();
+        assert_eq!(order(&r.goals), [high, low]);
+        assert_eq!(order(&r.reopen().goals), [high, low]);
+    }
+
+    #[test]
+    fn a_fenced_generation_goal_is_queued_again_and_paused() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let slow = NonZeroU32::new(80).unwrap();
+        let goals = Goals::open(db.clone(), slow).unwrap();
+        let id = goals.create(spec(800, 5)).unwrap();
+        let goal = goals.next_goal().unwrap();
+        let worker = {
+            let goals = goals.clone();
+            std::thread::spawn(move || goals.run(goal))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while output(&goals, id).is_empty() {
+            assert!(std::time::Instant::now() < deadline, "no batch committed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        lease::claim(&db, id).unwrap();
+        worker.join().unwrap();
+        assert_eq!(status(&goals, id).status, "paused");
+        let goal = goals.next_goal().unwrap();
+        assert_eq!(goal.id, id);
+        assert_eq!(status(&goals, id).status, "running");
+        goals.run(goal);
+        assert_eq!(status(&goals, id).status, "done");
+        assert_eq!(output(&goals, id), undisturbed(800, 5));
+        assert_eq!(goals.next_goal(), None);
+    }
+
+    #[test]
+    fn running_a_finished_goal_changes_nothing() {
+        let dir = TempDir::new();
+        let goals = goals_at(&dir.path().join("db"));
+        let id = goals.create(spec(5, 1)).unwrap();
+        let goal = goals.next_goal().unwrap();
+        goals.run(goal.clone());
+        let before = status(&goals, id);
+        goals.run(goal);
+        assert_eq!(status(&goals, id), before);
+        assert_eq!(goals.next_goal(), None);
+    }
+
     #[test]
     fn a_stale_fence_commits_nothing_even_on_the_final_batch() {
         let dir = TempDir::new();
@@ -663,6 +776,7 @@ mod tests {
                 error: Some("storage_failure")
             }
         );
+        assert_eq!(goals.next_goal(), None);
         drop((goals, db));
         let goals = goals_at(&path);
         drain(&goals);
@@ -824,6 +938,7 @@ mod tests {
         assert_eq!(r.goals.next_goal().map(|g| g.id), Some(queued));
         r.goals.run(Goal {
             id: queued,
+            priority: 0,
             budget: 0,
         });
         let r = r.reopen();
@@ -902,10 +1017,27 @@ mod tests {
         r.store.insert("go".into(), "1".into());
         worker.join().unwrap();
         let s = status(&r.goals, id);
-        assert!(s.status != "failed" && s.status != "running" && s.error.is_none());
+        assert!(s.error.is_none());
         assert!(r.store.get("late").is_err());
         let last = r.journal.read(id).unwrap().pop().unwrap();
         assert!(!matches!(last, Record::ScriptEnd { .. }));
+        assert_eq!(s.status, "paused");
+        assert_eq!(r.goals.next_goal().map(|g| g.id), Some(id));
+    }
+
+    #[test]
+    fn a_script_with_logged_ops_reads_paused_and_finishes_each_write_once() {
+        let r = rig();
+        let id = r.script(
+            r#"Deno.core.ops.op_rs3_insert('{"a":"1"}');
+               Deno.core.ops.op_rs3_insert('{"b":"2"}'); 'x'"#,
+        );
+        assert_eq!(status(&r.goals, id).status, "queued");
+        r.seed(id, &op("op_rs3_insert", &[r#"{"a":"1"}"#], r#"{"a":"1"}"#));
+        assert_eq!(status(&r.goals, id).status, "paused");
+        drain(&r.goals);
+        assert_eq!(status(&r.goals, id), st("done", Some("x"), None));
+        assert_eq!(r.store.get("b").unwrap(), "2");
     }
 
     #[test]
