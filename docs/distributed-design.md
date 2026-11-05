@@ -35,7 +35,7 @@ failure after that finishes.
 ## Build order
 
 1. Durable log and store on one node. **Done:** `src/journal.rs`, `src/store/mod.rs`.
-2. Scheduler and resumable agent on one node, using a deterministic fake model.
+2. Scheduler and resumable agent on one node, using a deterministic fake model. **Done:** `src/goals.rs`, `src/lease.rs`, `src/model.rs`, `src/http/goals.rs`.
 3. Raft on 3 nodes with several workers, then 5.
 4. Reed-Solomon sealing and repair.
 5. T3 Code provider adapter. T3 Code is the control surface: `rs3` owns agent state and failover.
