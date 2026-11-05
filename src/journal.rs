@@ -88,6 +88,9 @@ pub enum JournalError {
         expected: u64,
         actual: u64,
     },
+    /// The caller's lease was taken over by a later claim.
+    #[error("task {task}: fence {held} is stale, the current token is {current}")]
+    Fenced { task: u64, held: u64, current: u64 },
     #[error("stream {stream} has ended")]
     Ended { stream: u64 },
     /// The record is not allowed at this position of the stream.

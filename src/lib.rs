@@ -7,6 +7,7 @@ pub mod goals;
 pub mod http;
 pub mod journal;
 pub mod js;
+pub mod lease;
 pub mod model;
 pub mod state;
 pub mod storage;
