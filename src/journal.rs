@@ -56,6 +56,8 @@ pub enum Record {
     },
     /// The stream is finished. Nothing can be appended after this record.
     InferenceEnd { reason: String },
+    /// The goal was cancelled. Nothing can be appended after this record.
+    Cancelled,
     /// First record of a script stream: the script's name and its pinned source.
     ScriptStart { name: String, source: String },
     /// The result of one op the script ran, which replay returns instead of
@@ -80,7 +82,10 @@ impl Record {
     }
 
     pub fn ends_stream(&self) -> bool {
-        matches!(self, Record::InferenceEnd { .. } | Record::ScriptEnd { .. })
+        matches!(
+            self,
+            Record::InferenceEnd { .. } | Record::ScriptEnd { .. } | Record::Cancelled
+        )
     }
 }
 
@@ -450,6 +455,10 @@ fn apply(
             state.ended = Some(reason);
             Ok(state)
         }
+        (Some(mut state), Record::Cancelled) => {
+            state.ended = Some("cancelled".into());
+            Ok(state)
+        }
         _ => Err(corrupt(stream, seq, "record is not valid at this position")),
     }
 }
@@ -773,6 +782,21 @@ mod tests {
         let state = journal.restore(7).unwrap().unwrap();
         assert_eq!(state.ended.as_deref(), Some("stop"));
         assert_eq!(state.next_seq, 4);
+    }
+
+    #[test]
+    fn cancelled_stream_refuses_more_records_and_restores_its_tokens() {
+        let (_dir, _db, journal) = journal();
+        three_records(&journal);
+        let before = journal.restore(7).unwrap().unwrap();
+        journal.append(7, 3, &Record::Cancelled).unwrap();
+        assert_eq!(
+            journal.append(7, 4, &tokens(&[9], 9)),
+            Err(JournalError::Ended { stream: 7 })
+        );
+        let state = journal.restore(7).unwrap().unwrap();
+        assert_eq!(state.ended.as_deref(), Some("cancelled"));
+        assert_eq!(state.tokens, before.tokens);
     }
 
     #[test]

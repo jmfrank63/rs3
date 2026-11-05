@@ -5,7 +5,7 @@
 //! is written in the same transaction as the stream's start record, so a goal
 //! exists completely or not at all. A goal's id is its stream id.
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
@@ -51,15 +51,17 @@ pub struct GoalStatus {
 
 /// The status and error of a goal that has no durable result.
 fn flags(
+    cancelled: bool,
     running: bool,
     failed: bool,
     done: bool,
     progress: bool,
 ) -> (&'static str, Option<&'static str>) {
-    match (done, failed, running, progress) {
-        (true, ..) => ("done", None),
-        (_, true, ..) => ("failed", Some("storage_failure")),
-        (_, _, true, _) => ("running", None),
+    match (cancelled, done, failed, running, progress) {
+        (true, ..) => ("cancelled", None),
+        (_, true, ..) => ("done", None),
+        (_, _, true, ..) => ("failed", Some("storage_failure")),
+        (_, _, _, true, _) => ("running", None),
         (.., true) => ("paused", None),
         _ => ("queued", None),
     }
@@ -68,7 +70,10 @@ fn flags(
 #[derive(Default)]
 struct Sched {
     queue: Vec<Goal>,
-    running: HashSet<u64>,
+    /// Running goals and their priorities.
+    running: HashMap<u64, i64>,
+    /// The worker count; 0 until `start_workers`, which then counts as unlimited.
+    workers: usize,
     failures: HashMap<u64, String>,
 }
 
@@ -185,6 +190,7 @@ impl Goals {
             budget,
         });
         self.0.wake.notify_one();
+        self.preempt();
         Ok(id)
     }
 
@@ -195,7 +201,7 @@ impl Goals {
         let (running, failed) = {
             let sched = self.sched();
             (
-                sched.running.contains(&id),
+                sched.running.contains_key(&id),
                 sched.failures.contains_key(&id),
             )
         };
@@ -211,18 +217,20 @@ impl Goals {
             Err(e) => return Err(e),
         };
         let progress = records.len() > 1;
+        let cancelled = matches!(records.last(), Some(Record::Cancelled));
         let (status, error, output) = match records.last() {
             Some(Record::ScriptEnd { outcome: Ok(value) }) => ("done", None, Some(value.clone())),
             Some(Record::ScriptEnd { outcome: Err(f) }) => ("failed", Some(f.code()), None),
             _ if matches!(records.first(), Some(Record::ScriptStart { .. })) => {
-                let (status, error) = flags(running, failed, false, progress);
+                let (status, error) = flags(cancelled, running, failed, false, progress);
                 (status, error, None)
             }
             _ => {
                 let Some(state) = Journal::rebuild(id, records)? else {
                     return Ok(None);
                 };
-                let (status, error) = flags(running, failed, state.ended.is_some(), progress);
+                let (status, error) =
+                    flags(cancelled, running, failed, state.ended.is_some(), progress);
                 (status, error, Some(FakeModel.render(&state.tokens)))
             }
         };
@@ -231,6 +239,34 @@ impl Goals {
             output,
             error,
         }))
+    }
+
+    /// End goal `id` durably. The cancel takes over the goal's lease and writes
+    /// the end record in one transaction, so a worker cannot claim in between
+    /// and its next commit is refused. A goal that has already ended, or whose
+    /// stream is corrupt, is left as it is. Returns the goal's status.
+    pub fn cancel(&self, id: u64) -> Result<Option<GoalStatus>, JournalError> {
+        let txn = self.0.db.begin_write().map_err(storage)?;
+        // This transaction holds the writer, so the read sees the latest state.
+        let live = match self.0.journal.read(id) {
+            Ok(records) => records
+                .last()
+                .is_some_and(|last| !last.ends_stream())
+                .then_some(records.len() as u64),
+            Err(JournalError::Corrupt { .. }) => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(seq) = live {
+            lease::claim_in(&txn, id)?;
+            self.0
+                .journal
+                .append_in(&txn, id, seq, &Record::Cancelled)?;
+            txn.commit().map_err(storage)?;
+            self.sched().queue.retain(|g| g.id != id);
+        } else {
+            drop(txn);
+        }
+        self.status(id)
     }
 
     /// Commit the next batch of `goal` in one transaction, after the time the
@@ -277,11 +313,34 @@ impl Goals {
         Ok(finished)
     }
 
+    /// When every worker is busy and a queued goal outranks the lowest running
+    /// one, take over that goal's lease. Its worker's next commit is then
+    /// refused as fenced, so it stops, and `run` queues the goal again. A
+    /// failed claim is logged only: the queued goal is already durable.
+    fn preempt(&self) {
+        let victim = {
+            let sched = self.sched();
+            let queued = sched.queue.iter().map(|g| g.priority).max();
+            let lowest = sched.running.iter().min_by_key(|&(_, &p)| p);
+            match (queued, lowest) {
+                (Some(q), Some((&id, &p))) if sched.running.len() >= sched.workers && q > p => {
+                    Some(id)
+                }
+                _ => None,
+            }
+        };
+        if let Some(id) = victim
+            && let Err(e) = lease::claim(&self.0.db, id)
+        {
+            eprintln!("error: goal {id}: {e}");
+        }
+    }
+
     fn take(sched: &mut Sched) -> Option<Goal> {
         let next = (0..sched.queue.len())
             .max_by_key(|&i| (sched.queue[i].priority, Reverse(sched.queue[i].id)))?;
         let goal = sched.queue.remove(next);
-        sched.running.insert(goal.id);
+        sched.running.insert(goal.id, goal.priority);
         Some(goal)
     }
 
@@ -293,6 +352,7 @@ impl Goals {
     /// Start `workers` threads that run queued goals for the life of the
     /// process. There is no shutdown: the threads end with the process.
     pub fn start_workers(&self, workers: NonZeroUsize) {
+        self.sched().workers = workers.get();
         for _ in 0..workers.get() {
             let goals = self.clone();
             std::thread::spawn(move || {
@@ -367,6 +427,8 @@ impl Goals {
 
     fn drive(&self, goal: &Goal) -> Result<(), JournalError> {
         let fence = lease::claim(&self.0.db, goal.id)?;
+        // A takeover between `take` and this claim was just overwritten.
+        self.preempt();
         let records = self.0.journal.read(goal.id)?;
         if records.last().is_some_and(Record::ends_stream) {
             return Ok(());
@@ -719,6 +781,182 @@ mod tests {
         assert_eq!(goals.next_goal(), None);
     }
 
+    // ---- preemption ----
+
+    fn spec_p(priority: i64, seed: u64) -> GoalSpec {
+        GoalSpec {
+            priority,
+            ..spec(20, seed)
+        }
+    }
+
+    /// Create a goal at `low`, take it and commit one batch under its claim,
+    /// then create a goal at `high`. The takeover lands before `run(low)`.
+    fn low_then_high(low: i64, high: i64) -> (Goals, Goal, u64) {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        std::mem::forget(dir);
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        goals.create(spec_p(low, 1)).unwrap();
+        let goal = goals.next_goal().unwrap();
+        let fence = lease::claim(&db, goal.id).unwrap();
+        assert!(!step(&goals, &goal, &fence).unwrap());
+        let high = goals.create(spec_p(high, 2)).unwrap();
+        (goals, goal, high)
+    }
+
+    fn wait_for(what: &str, cond: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !cond() {
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_higher_goal_takes_the_worker_and_the_lower_one_resumes_after() {
+        let (goals, low, high) = low_then_high(0, 5);
+        run(&goals, low.clone());
+        let s = status(&goals, low.id);
+        assert_eq!(s.status, "paused");
+        assert!(token_count(&s.output.unwrap()) < 20);
+        let next = goals.next_goal().unwrap();
+        assert_eq!(next.id, high);
+        run(&goals, next);
+        assert_eq!(status(&goals, high).status, "done");
+        assert_ne!(status(&goals, low.id).status, "done");
+        drain(&goals);
+        assert_eq!(output(&goals, low.id), undisturbed(20, 1));
+        assert_eq!(output(&goals, high), undisturbed(20, 2));
+    }
+
+    #[test]
+    fn an_equal_priority_goal_does_not_preempt() {
+        let (goals, low, high) = low_then_high(3, 3);
+        run(&goals, low.clone());
+        assert_eq!(status(&goals, low.id).status, "done");
+        assert_eq!(status(&goals, high).status, "queued");
+    }
+
+    #[test]
+    fn the_lowest_running_goal_is_the_victim() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        goals.create(spec_p(3, 1)).unwrap();
+        goals.create(spec_p(1, 2)).unwrap();
+        let (three, one) = (goals.next_goal().unwrap(), goals.next_goal().unwrap());
+        let fence = lease::claim(&db, one.id).unwrap();
+        assert!(!step(&goals, &one, &fence).unwrap());
+        goals.create(spec_p(5, 3)).unwrap();
+        run(&goals, three.clone());
+        assert_eq!(status(&goals, three.id).status, "done");
+        run(&goals, one.clone());
+        assert_eq!(status(&goals, one.id).status, "paused");
+    }
+
+    fn slow_goals(rate: u32) -> (Goals, Arc<Database>, TempDir) {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), NonZeroU32::new(rate).unwrap()).unwrap();
+        (goals, db, dir)
+    }
+
+    #[test]
+    fn a_free_worker_is_not_preempted() {
+        let (goals, db, _dir) = slow_goals(80);
+        goals.start_workers(NonZeroUsize::new(2).unwrap());
+        let low = goals.create(spec_p(0, 1)).unwrap();
+        wait_for("low running", || status(&goals, low).status == "running");
+        let high = goals.create(spec_p(5, 2)).unwrap();
+        wait_for("high done", || status(&goals, high).status == "done");
+        assert_eq!(lease::claim(&db, low).unwrap().token, 2);
+    }
+
+    #[test]
+    fn with_one_worker_the_higher_goal_finishes_first_and_both_come_out_right() {
+        let (goals, _db, _dir) = slow_goals(80);
+        goals.start_workers(NonZeroUsize::new(1).unwrap());
+        let low = goals
+            .create(GoalSpec {
+                priority: 0,
+                budget: 400,
+                seed: 1,
+                prompt: "hello".into(),
+            })
+            .unwrap();
+        wait_for("low progress", || !output(&goals, low).is_empty());
+        let high = goals.create(spec_p(5, 2)).unwrap();
+        wait_for("high done", || status(&goals, high).status == "done");
+        assert_ne!(status(&goals, low).status, "done");
+        assert!(token_count(&output(&goals, low)) < 400);
+        wait_for("low done", || status(&goals, low).status == "done");
+        assert_eq!(output(&goals, low), undisturbed(400, 1));
+        assert_eq!(output(&goals, high), undisturbed(20, 2));
+    }
+
+    fn ops(r: &Rig, id: u64) -> usize {
+        let records = r.journal.read(id).unwrap();
+        records
+            .iter()
+            .filter(|rec| matches!(rec, Record::OpResult { .. }))
+            .count()
+    }
+
+    #[test]
+    fn a_preempted_script_writes_nothing_more_and_finishes_each_write_once() {
+        let r = rig();
+        let id = r.script(r#"Deno.core.ops.op_rs3_insert('{"a":"1"}'); 'x'"#);
+        let low = r.goals.next_goal().unwrap();
+        let high = r.goals.create(spec_p(5, 2)).unwrap();
+        run(&r.goals, low);
+        assert!(r.store.get("a").is_err());
+        assert_eq!(status(&r.goals, id).status, "queued");
+        let next = r.goals.next_goal().unwrap();
+        assert_eq!(next.id, high);
+        run(&r.goals, next);
+        drain(&r.goals);
+        assert_eq!(status(&r.goals, id), st("done", Some("x"), None));
+        assert_eq!(r.store.get("a"), Ok("1".to_owned()));
+        assert_eq!(ops(&r, id), 1);
+    }
+
+    #[test]
+    fn a_preempted_script_does_not_repeat_a_logged_op() {
+        let r = rig();
+        let id = r.script(
+            r#"Deno.core.ops.op_rs3_insert('{"a":"1"}');
+               Deno.core.ops.op_rs3_insert('{"b":"2"}'); 'x'"#,
+        );
+        r.seed(id, &op("op_rs3_insert", &[r#"{"a":"1"}"#], r#"{"a":"1"}"#));
+        let low = r.goals.next_goal().unwrap();
+        r.goals.create(spec_p(5, 2)).unwrap();
+        run(&r.goals, low);
+        assert!(r.store.get("b").is_err());
+        assert_eq!(status(&r.goals, id).status, "paused");
+        drain(&r.goals);
+        assert_eq!(status(&r.goals, id), st("done", Some("x"), None));
+        assert!(r.store.get("a").is_err());
+        assert_eq!(r.store.get("b"), Ok("2".to_owned()));
+        assert_eq!(ops(&r, id), 2);
+    }
+
+    #[test]
+    fn a_preempted_script_that_times_out_is_queued_again_not_failed() {
+        let js = dedicated_executor(JsSettings {
+            timeout_ms: 100,
+            ..JsSettings::default()
+        });
+        let r = rig_with(js, true);
+        let id = r.script("while (true) {}");
+        let low = r.goals.next_goal().unwrap();
+        r.goals.create(spec_p(5, 2)).unwrap();
+        run(&r.goals, low);
+        assert_eq!(status(&r.goals, id), st("queued", None, None));
+        let last = r.journal.read(id).unwrap().pop().unwrap();
+        assert!(!matches!(last, Record::ScriptEnd { .. }));
+    }
+
     #[test]
     fn running_a_finished_goal_changes_nothing() {
         let dir = TempDir::new();
@@ -1031,7 +1269,7 @@ mod tests {
         let r = rig();
         let id = r.script(
             r#"Deno.core.ops.op_rs3_insert('{"a":"1"}');
-               while (Deno.core.ops.op_rs3_get('go') !== '1') {}
+               while (((() => { try { return Deno.core.ops.op_rs3_get('go'); } catch (e) { return ''; } })()) !== '1') {}
                Deno.core.ops.op_rs3_insert('{"late":"1"}'); 'x'"#,
         );
         let goal = r.goals.next_goal().unwrap();
@@ -1112,5 +1350,186 @@ mod tests {
         let r = r.reopen();
         drain(&r.goals);
         assert_eq!(status(&r.goals, id), st("done", Some("later"), None));
+    }
+
+    // ---- cancellation ----
+
+    fn cancelled(output: Option<&str>) -> GoalStatus {
+        st("cancelled", output, None)
+    }
+
+    fn spawn_run(goals: &Goals, goal: Goal) -> std::thread::JoinHandle<()> {
+        let goals = goals.clone();
+        std::thread::spawn(move || goals.run(goal))
+    }
+
+    fn join(worker: std::thread::JoinHandle<()>) {
+        within_deadline(move || worker.join().unwrap());
+    }
+
+    #[test]
+    fn cancelling_a_running_goal_stops_its_worker_and_keeps_its_output() {
+        let (goals, _db, _dir) = slow_goals(80);
+        let id = goals.create(spec(400, 1)).unwrap();
+        let worker = spawn_run(&goals, goals.next_goal().unwrap());
+        wait_for("progress", || !output(&goals, id).is_empty());
+        let result = goals.cancel(id).unwrap().unwrap();
+        join(worker);
+        assert_eq!(result.status, "cancelled");
+        assert_eq!(result.error, None);
+        assert!(token_count(result.output.as_ref().unwrap()) < 400);
+        assert_eq!(status(&goals, id), result);
+        assert_eq!(goals.next_goal(), None);
+    }
+
+    #[test]
+    fn a_cancel_survives_a_reopen() {
+        let dir = TempDir::new();
+        let path = dir.path().join("db");
+        let goals = goals_at(&path);
+        let id = goals.create(spec(20, 1)).unwrap();
+        let goal = goals.next_goal().unwrap();
+        let fence = lease::claim(&goals.0.db, id).unwrap();
+        step(&goals, &goal, &fence).unwrap();
+        let result = goals.cancel(id).unwrap().unwrap();
+        assert!(!result.output.as_ref().unwrap().is_empty());
+        drop(goals);
+        let goals = goals_at(&path);
+        assert_eq!(goals.next_goal(), None);
+        assert_eq!(status(&goals, id), result);
+    }
+
+    #[test]
+    fn cancelling_a_queued_goal_leaves_the_others_queued() {
+        let dir = TempDir::new();
+        let goals = goals_at(&dir.path().join("db"));
+        let a = goals.create(spec(5, 1)).unwrap();
+        let b = goals.create(spec(5, 2)).unwrap();
+        assert_eq!(goals.cancel(a).unwrap().unwrap(), cancelled(Some("")));
+        assert_eq!(goals.next_goal().map(|g| g.id), Some(b));
+        assert_eq!(goals.next_goal(), None);
+    }
+
+    #[test]
+    fn a_goal_cancelled_after_it_was_taken_runs_nothing() {
+        let r = rig();
+        let id = r.script(r#"Deno.core.ops.op_rs3_insert('{"a":"1"}'); 'x'"#);
+        let goal = r.goals.next_goal().unwrap();
+        r.goals.cancel(id).unwrap();
+        run(&r.goals, goal);
+        assert!(r.store.get("a").is_err());
+        assert_eq!(status(&r.goals, id), cancelled(None));
+        assert_eq!(r.goals.next_goal(), None);
+    }
+
+    #[test]
+    fn a_generation_goal_cancelled_after_it_was_taken_stays_cancelled() {
+        let dir = TempDir::new();
+        let goals = goals_at(&dir.path().join("db"));
+        let id = goals.create(spec(20, 1)).unwrap();
+        let goal = goals.next_goal().unwrap();
+        goals.cancel(id).unwrap();
+        run(&goals, goal);
+        assert_eq!(status(&goals, id), cancelled(Some("")));
+        assert_eq!(goals.next_goal(), None);
+    }
+
+    #[test]
+    fn cancelling_a_running_script_refuses_its_next_op() {
+        let r = rig();
+        let id = r.script(
+            r#"Deno.core.ops.op_rs3_insert('{"a":"1"}');
+               while (((() => { try { return Deno.core.ops.op_rs3_get('go'); } catch (e) { return ''; } })()) !== '1') {}
+               Deno.core.ops.op_rs3_insert('{"late":"1"}'); 'x'"#,
+        );
+        let worker = spawn_run(&r.goals, r.goals.next_goal().unwrap());
+        wait_for("first write", || r.store.get("a").is_ok());
+        r.goals.cancel(id).unwrap();
+        r.store.insert("go".into(), "1".into());
+        join(worker);
+        assert!(r.store.get("late").is_err());
+        assert_eq!(status(&r.goals, id), cancelled(None));
+        assert_eq!(r.goals.next_goal(), None);
+    }
+
+    #[test]
+    fn a_cancel_takes_over_the_lease_so_an_earlier_fence_is_stale() {
+        let dir = TempDir::new();
+        let goals = goals_at(&dir.path().join("db"));
+        let id = goals.create(spec(20, 1)).unwrap();
+        let goal = goals.next_goal().unwrap();
+        let stale = lease::claim(&goals.0.db, id).unwrap();
+        goals.cancel(id).unwrap();
+        assert!(!matches!(step(&goals, &goal, &stale), Ok(false)));
+        assert_eq!(status(&goals, id), cancelled(Some("")));
+        assert_eq!(lease::claim(&goals.0.db, id).unwrap().token, 3);
+    }
+
+    #[test]
+    fn cancelling_twice_ends_the_stream_once() {
+        let dir = TempDir::new();
+        let goals = goals_at(&dir.path().join("db"));
+        let id = goals.create(spec(5, 1)).unwrap();
+        let first = goals.cancel(id).unwrap();
+        assert_eq!(goals.cancel(id).unwrap(), first);
+        let ends = goals.0.journal.read(id).unwrap();
+        assert_eq!(ends.iter().filter(|r| r.ends_stream()).count(), 1);
+        assert_eq!(lease::claim(&goals.0.db, id).unwrap().token, 2);
+    }
+
+    #[test]
+    fn a_cancel_changes_no_goal_that_has_already_ended() {
+        let r = rig();
+        let done = r.goals.create(spec(5, 1)).unwrap();
+        let failed = r.script("throw new Error('boom')");
+        drain(&r.goals);
+        let (d, f) = (status(&r.goals, done), status(&r.goals, failed));
+        assert_eq!(d.status, "done");
+        assert_eq!(r.goals.cancel(done).unwrap(), Some(d));
+        assert_eq!(f.error, Some("js_error"));
+        assert_eq!(r.goals.cancel(failed).unwrap(), Some(f));
+        assert_eq!(r.goals.cancel(99).unwrap(), None);
+    }
+
+    #[test]
+    fn cancelling_a_corrupt_goal_leaves_its_bytes_alone() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        let id = goals.create(spec(5, 1)).unwrap();
+        tamper_record(&db, (id, 0));
+        let before = head_bytes(&db, id);
+        assert_eq!(
+            goals.cancel(id).unwrap(),
+            Some(st("failed", None, Some("journal_corrupt")))
+        );
+        assert_eq!(head_bytes(&db, id), before);
+    }
+
+    #[test]
+    fn a_goal_with_a_storage_failure_can_be_cancelled() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        let id = goals.create(spec(20, 4)).unwrap();
+        let original = head_bytes(&db, id);
+        flip_head(&db, id);
+        drain(&goals);
+        set_head(&db, id, &original);
+        assert_eq!(status(&goals, id).status, "failed");
+        assert_eq!(goals.cancel(id).unwrap(), Some(cancelled(Some(""))));
+    }
+
+    #[test]
+    fn cancelling_with_a_broken_journal_table_is_an_error() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.delete_table(HEADS).unwrap();
+        txn.open_table(TableDefinition::<&str, &str>::new("journal_heads"))
+            .unwrap();
+        txn.commit().unwrap();
+        assert!(goals.cancel(1).is_err());
     }
 }

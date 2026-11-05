@@ -1,6 +1,6 @@
 //! Durable leases. A claim bumps a task's fencing token; a commit checks its
 //! token inside its own transaction, so a stale holder can never commit.
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, TableDefinition, WriteTransaction};
 
 use crate::journal::{JournalError, storage};
 
@@ -17,19 +17,22 @@ pub struct Fence {
 /// claim always succeeds.
 pub fn claim(db: &Database, task: u64) -> Result<Fence, JournalError> {
     let txn = db.begin_write().map_err(storage)?;
-    let token = {
-        let mut leases = txn.open_table(LEASES).map_err(storage)?;
-        let token = leases.get(task).map_err(storage)?.map_or(0, |t| t.value()) + 1;
-        leases.insert(task, token).map_err(storage)?;
-        token
-    };
+    let fence = claim_in(&txn, task)?;
     txn.commit().map_err(storage)?;
+    Ok(fence)
+}
+
+/// Take over `task` inside `txn`, so the claim commits with the caller's writes.
+pub fn claim_in(txn: &WriteTransaction, task: u64) -> Result<Fence, JournalError> {
+    let mut leases = txn.open_table(LEASES).map_err(storage)?;
+    let token = leases.get(task).map_err(storage)?.map_or(0, |t| t.value()) + 1;
+    leases.insert(task, token).map_err(storage)?;
     Ok(Fence { task, token })
 }
 
 /// Refuse with `Fenced` unless `fence` is the latest claim, judged inside
 /// `txn`, so the check and the writes that follow commit together.
-pub fn check_in(txn: &redb::WriteTransaction, fence: &Fence) -> Result<(), JournalError> {
+pub fn check_in(txn: &WriteTransaction, fence: &Fence) -> Result<(), JournalError> {
     let leases = txn.open_table(LEASES).map_err(storage)?;
     let current = leases
         .get(fence.task)
