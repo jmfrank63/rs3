@@ -1,19 +1,21 @@
 //! Goal routes: `POST /goals` creates a generation goal, or a script goal that
 //! runs the script stored under a key (pinned at creation), and `GET /goals/{id}`
-//! reports its status and committed output. Both answer 503 `goals_unavailable`
+//! reports its status and committed output, and `DELETE /goals/{id}` cancels it
+//! durably and answers the same way. All answer 503 `goals_unavailable`
 //! when the server runs without a database.
-use actix_web::{HttpResponse, get, post, web};
+use actix_web::{HttpResponse, delete, get, post, web};
 use serde::Deserialize;
 
 use super::error::ApiError;
 use super::kv::blocking_failed;
-use crate::goals::{GoalSpec, Goals};
+use crate::goals::{GoalSpec, GoalStatus, Goals};
+use crate::journal::JournalError;
 use crate::state::AppState;
 use crate::store::StoreError;
 
 /// Register the goal routes. The shared `AppState` is registered by `http::configure`.
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(create).service(get_goal);
+    cfg.service(create).service(get_goal).service(cancel_goal);
 }
 
 /// What a client sends to create a goal: generation fields, or a script key.
@@ -79,18 +81,19 @@ async fn create(state: web::Data<AppState>, body: web::Bytes) -> Result<HttpResp
     Ok(HttpResponse::Created().json(serde_json::json!({ "id": id })))
 }
 
-/// `GET /goals/{id}` answers 200 `{status, output, error}`, or 404 `not_found`.
-#[get("/goals/{id}")]
-async fn get_goal(
+/// Run `act` on goal `path` off the async threads and answer 200
+/// `{status, output, error}`; an id that is not a goal answers 404 `not_found`.
+async fn goal_status(
     state: web::Data<AppState>,
     path: web::Path<String>,
+    act: fn(&Goals, u64) -> Result<Option<GoalStatus>, JournalError>,
 ) -> Result<HttpResponse, ApiError> {
     let goals = goals(&state)?;
     let raw = path.into_inner();
     let id: u64 = raw
         .parse()
         .map_err(|_| ApiError::GoalNotFound(raw.clone()))?;
-    let status = web::block(move || goals.status(id))
+    let status = web::block(move || act(&goals, id))
         .await
         .map_err(blocking_failed)??
         .ok_or(ApiError::GoalNotFound(raw))?;
@@ -99,6 +102,25 @@ async fn get_goal(
         "output": status.output,
         "error": status.error,
     })))
+}
+
+/// `GET /goals/{id}` answers 200 `{status, output, error}`, or 404 `not_found`.
+#[get("/goals/{id}")]
+async fn get_goal(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    goal_status(state, path, Goals::status).await
+}
+
+/// `DELETE /goals/{id}` durably cancels the goal and answers like GET; a goal
+/// that already ended keeps its status, and the committed output stays readable.
+#[delete("/goals/{id}")]
+async fn cancel_goal(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    goal_status(state, path, Goals::cancel).await
 }
 
 #[cfg(test)]
@@ -160,6 +182,16 @@ mod tests {
 
     fn get_request(id: impl std::fmt::Display) -> atest::TestRequest {
         atest::TestRequest::get().uri(&format!("/goals/{id}"))
+    }
+
+    fn delete_request(id: impl std::fmt::Display) -> atest::TestRequest {
+        atest::TestRequest::delete().uri(&format!("/goals/{id}"))
+    }
+
+    async fn delete(state: &AppState, id: u64) -> Value {
+        let resp = call(state, delete_request(id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        atest::read_body_json(resp).await
     }
 
     async fn create(state: &AppState, body: &Value) -> u64 {
@@ -270,19 +302,62 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn deleting_a_queued_goal_cancels_it() {
+        let f = fixture(1_000_000, None);
+        let id = create(&f.state, &goal_body(3)).await;
+        let want = json!({"status": "cancelled", "output": "", "error": null});
+        assert_eq!(delete(&f.state, id).await, want);
+        assert_eq!(get(&f.state, id).await, want);
+        assert_eq!(delete(&f.state, id).await, want);
+    }
+
+    #[actix_web::test]
+    async fn deleting_a_running_goal_keeps_its_committed_output() {
+        let f = fixture(80, Some(1));
+        let id = create(&f.state, &goal_body(100)).await;
+        wait_for(&f.state, id, "running").await;
+        let cancelled = delete(&f.state, id).await;
+        assert_eq!(cancelled["status"], "cancelled");
+        assert!(tokens(&cancelled) < 100);
+        actix_web::rt::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(get(&f.state, id).await, cancelled);
+    }
+
+    #[actix_web::test]
+    async fn deleting_a_done_goal_leaves_it_done() {
+        let f = fixture(1_000_000, Some(1));
+        let id = create(&f.state, &goal_body(2)).await;
+        let done = wait_for(&f.state, id, "done").await;
+        assert_eq!(delete(&f.state, id).await, done);
+    }
+
+    #[actix_web::test]
+    async fn deleting_a_script_goal_answers_cancelled_with_null_output() {
+        let f = fixture(1_000_000, None);
+        put(&f.state, "job", "1").await;
+        let id = create(&f.state, &script_body("job")).await;
+        assert_eq!(
+            delete(&f.state, id).await,
+            json!({"status": "cancelled", "output": null, "error": null})
+        );
+    }
+
+    #[actix_web::test]
     async fn unknown_and_malformed_ids_are_json_404s() {
         let f = fixture(1_000_000, None);
         for id in ["42", "abc", "99999999999999999999999"] {
-            let resp = call(&f.state, get_request(id)).await;
-            let body = assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
-            assert_eq!(body["message"], format!("goal not found: {id}"));
+            for req in [get_request(id), delete_request(id)] {
+                let resp = call(&f.state, req).await;
+                let body = assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+                assert_eq!(body["message"], format!("goal not found: {id}"));
+            }
         }
     }
 
     #[actix_web::test]
-    async fn without_a_database_both_routes_answer_503() {
+    async fn without_a_database_all_routes_answer_503() {
         let state = test_state();
-        for req in [post(VALID), get_request(1)] {
+        for req in [post(VALID), get_request(1), delete_request(1)] {
             let resp = call(&state, req).await;
             assert_json_error(resp, StatusCode::SERVICE_UNAVAILABLE, "goals_unavailable").await;
         }
@@ -296,7 +371,7 @@ mod tests {
         txn.open_table(TableDefinition::<&str, &str>::new("journal_heads"))
             .unwrap();
         txn.commit().unwrap();
-        for req in [post(VALID), get_request(1)] {
+        for req in [post(VALID), get_request(1), delete_request(1)] {
             internal_error_body(call(&f.state, req).await).await;
         }
     }

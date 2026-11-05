@@ -15,7 +15,12 @@ mod tests {
     const RATE: &[(&str, &str)] = &[("MODEL.TOKENS_PER_SECOND", "500")];
 
     fn create(server: &Server, seed: u64, budget: usize) -> u64 {
-        let body = format!(r#"{{"priority":0,"budget":{budget},"seed":{seed},"prompt":"p"}}"#);
+        create_with_priority(server, 0, seed, budget)
+    }
+
+    fn create_with_priority(server: &Server, priority: u8, seed: u64, budget: usize) -> u64 {
+        let body =
+            format!(r#"{{"priority":{priority},"budget":{budget},"seed":{seed},"prompt":"p"}}"#);
         let created: Value =
             serde_json::from_str(&server.request("POST", "/goals", &body)).unwrap();
         created["id"].as_u64().unwrap()
@@ -29,19 +34,41 @@ mod tests {
         goal["output"].as_str().unwrap().to_owned()
     }
 
-    fn wait_done(server: &Server, id: u64) -> Value {
+    fn wait_until(server: &Server, id: u64, what: &str, ready: impl Fn(&Value) -> bool) -> Value {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let goal = get(server, id);
-            if goal["status"] == "done" {
+            if ready(&goal) {
                 return goal;
             }
             assert!(
                 Instant::now() < deadline,
-                "goal {id} never finished: {goal}"
+                "goal {id} never became {what}: {goal}"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    fn wait_done(server: &Server, id: u64) -> Value {
+        wait_until(server, id, "done", |goal| goal["status"] == "done")
+    }
+
+    fn has_output(goal: &Value) -> bool {
+        !goal["output"].as_str().unwrap().is_empty()
+    }
+
+    fn words(goal: &Value) -> usize {
+        output(goal).split_whitespace().count()
+    }
+
+    /// The output of goals run to the end on an undisturbed, fast server.
+    fn reference(name: &str, goals: &[(u64, usize)]) -> Vec<String> {
+        let dir = TempDir::new(name);
+        let server = Server::start(&dir.0, Some(&dir.0.join("rs3.db")), &[]);
+        let ids: Vec<u64> = goals.iter().map(|(s, b)| create(&server, *s, *b)).collect();
+        ids.iter()
+            .map(|id| output(&wait_done(&server, *id)))
+            .collect()
     }
 
     #[test]
@@ -119,5 +146,59 @@ mod tests {
         let server = Server::start(&dir.0, Some(&db), RATE);
         let goal = wait_done(&server, id);
         assert_eq!(output(&goal).split_whitespace().count(), 600);
+    }
+
+    #[test]
+    fn a_higher_goal_takes_the_only_worker_and_both_outputs_are_correct() {
+        let expected = reference("ref-preempt", &[(1, 400), (2, 80)]);
+        let dir = TempDir::new("goals-preempt");
+        let env = [
+            ("SCHEDULER.WORKERS", "1"),
+            ("MODEL.TOKENS_PER_SECOND", "100"),
+        ];
+        let server = Server::start(&dir.0, Some(&dir.0.join("rs3.db")), &env);
+        let low = create_with_priority(&server, 1, 1, 400);
+        wait_until(&server, low, "started", has_output);
+        let high = create_with_priority(&server, 5, 2, 80);
+        wait_until(&server, low, "paused", |goal| goal["status"] == "paused");
+        wait_done(&server, high);
+        let mid = get(&server, low);
+        assert_ne!(mid["status"], "done", "{mid}");
+        assert!((1..400).contains(&words(&mid)), "{mid}");
+
+        let low_goal = wait_done(&server, low);
+        assert_eq!(output(&low_goal), expected[0]);
+        assert_eq!(words(&low_goal), 400);
+        let high_goal = get(&server, high);
+        assert_eq!(output(&high_goal), expected[1]);
+        assert_eq!(words(&high_goal), 80);
+    }
+
+    #[test]
+    fn a_cancelled_goal_stays_cancelled_with_its_output_across_kill_9() {
+        let expected = reference("ref-cancel", &[(1, 400), (2, 60)]);
+        let dir = TempDir::new("goals-cancel");
+        let db = dir.0.join("rs3.db");
+        let env = [("MODEL.TOKENS_PER_SECOND", "100")];
+        let mut server = Server::start(&dir.0, Some(&db), &env);
+        let doomed = create(&server, 1, 400);
+        wait_until(&server, doomed, "started", has_output);
+        let other = create(&server, 2, 60);
+        let cancelled: Value =
+            serde_json::from_str(&server.request("DELETE", &format!("/goals/{doomed}"), ""))
+                .unwrap();
+        assert_eq!(cancelled["status"], "cancelled");
+        let kept = output(&cancelled);
+        assert!(expected[0].starts_with(&kept), "{cancelled}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(output(&get(&server, doomed)), kept);
+
+        drop(server);
+        server = Server::start(&dir.0, Some(&db), &env);
+        std::thread::sleep(Duration::from_millis(200));
+        let after = get(&server, doomed);
+        assert_eq!(after["status"], "cancelled");
+        assert_eq!(output(&after), kept);
+        assert_eq!(output(&wait_done(&server, other)), expected[1]);
     }
 }
