@@ -863,6 +863,25 @@ mod tests {
     }
 
     #[test]
+    fn a_record_corrupted_while_running_fails_that_goal_and_frees_its_worker() {
+        let (goals, db, _dir) = slow_goals(80);
+        goals.start_workers(NonZeroUsize::new(1).unwrap());
+        let bad = goals.create(spec(100_000, 1)).unwrap();
+        wait_for("bad progress", || !output(&goals, bad).is_empty());
+        let good = goals.create(spec(20, 2)).unwrap();
+        tamper_record(&db, (bad, 0));
+        let failed = GoalStatus {
+            status: "failed",
+            output: None,
+            error: Some("journal_corrupt"),
+        };
+        assert_eq!(status(&goals, bad), failed);
+        wait_for("good done", || status(&goals, good).status == "done");
+        assert_eq!(output(&goals, good), undisturbed(20, 2));
+        assert_eq!(status(&goals, bad), failed);
+    }
+
+    #[test]
     fn a_free_worker_is_not_preempted() {
         let (goals, db, _dir) = slow_goals(80);
         goals.start_workers(NonZeroUsize::new(2).unwrap());

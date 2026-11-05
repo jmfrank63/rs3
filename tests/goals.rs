@@ -7,6 +7,7 @@ mod tests {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
+    use redb::{Database, ReadableTable, TableDefinition};
     use serde_json::Value;
 
     use crate::common::{Server, TempDir};
@@ -69,6 +70,21 @@ mod tests {
         ids.iter()
             .map(|id| output(&wait_done(&server, *id)))
             .collect()
+    }
+
+    /// Flips the last byte of one journal record in the stopped server's database.
+    fn tamper_record(db: &std::path::Path, key: (u64, u64)) {
+        const RECORDS: TableDefinition<(u64, u64), &[u8]> = TableDefinition::new("journal_records");
+        let db = Database::open(db).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(RECORDS).unwrap();
+            let mut bytes = table.get(key).unwrap().unwrap().value().to_vec();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+            table.insert(key, bytes.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
     }
 
     #[test]
@@ -200,5 +216,32 @@ mod tests {
         assert_eq!(after["status"], "cancelled");
         assert_eq!(output(&after), kept);
         assert_eq!(output(&wait_done(&server, other)), expected[1]);
+    }
+
+    #[test]
+    fn a_corrupted_journal_record_fails_that_goal_while_another_finishes_after_restart() {
+        let expected = reference("ref-corrupt", &[(22, BUDGET)]);
+        let dir = TempDir::new("goals-corrupt");
+        let db = dir.0.join("rs3.db");
+        let server = Server::start(&dir.0, Some(&db), RATE);
+        let a = create(&server, 11, BUDGET);
+        let b = create(&server, 22, BUDGET);
+        wait_until(&server, a, "started", has_output);
+        assert_ne!(get(&server, a)["status"], "done");
+        assert_ne!(get(&server, b)["status"], "done");
+
+        drop(server);
+        tamper_record(&db, (a, 1));
+        let server = Server::start(&dir.0, Some(&db), RATE);
+
+        let failed = get(&server, a);
+        assert_eq!(failed["status"], "failed", "{failed}");
+        assert_eq!(failed["error"], "journal_corrupt", "{failed}");
+        assert!(failed["output"].is_null(), "{failed}");
+
+        let healthy = wait_done(&server, b);
+        assert_eq!(output(&healthy), expected[0]);
+        assert_eq!(words(&healthy), BUDGET);
+        assert_eq!(get(&server, a), failed);
     }
 }
