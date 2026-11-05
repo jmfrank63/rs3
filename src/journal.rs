@@ -27,8 +27,7 @@ const HEADS: TableDefinition<u64, &[u8]> = TableDefinition::new("journal_heads")
 const FORMAT: u8 = 1;
 const HASH_LEN: usize = 32;
 // Stored record layout: version byte, previous hash, own hash, JSON body.
-/// Stored head layout: last sequence number, last hash, ended flag.
-const HEAD_LEN: usize = 8 + HASH_LEN + 1;
+// Stored head layout: last sequence number, last hash, ended flag, checksum.
 
 type Hash = [u8; HASH_LEN];
 
@@ -180,7 +179,7 @@ impl Journal {
                 ended: matches!(record, Record::InferenceEnd { .. }),
             };
             heads
-                .insert(stream, new_head.encode().as_slice())
+                .insert(stream, new_head.encode(stream).as_slice())
                 .map_err(storage)?;
         }
         txn.commit().map_err(storage)
@@ -254,27 +253,25 @@ struct Head {
 }
 
 impl Head {
-    fn encode(&self) -> [u8; HEAD_LEN] {
-        let mut out = [0; HEAD_LEN];
-        out[..8].copy_from_slice(&self.seq.to_le_bytes());
-        out[8..8 + HASH_LEN].copy_from_slice(&self.hash);
-        out[HEAD_LEN - 1] = u8::from(self.ended);
-        out
+    fn encode(&self, stream: u64) -> Vec<u8> {
+        let ended = [u8::from(self.ended)];
+        let checksum = record_hash(stream, self.seq, &self.hash, &ended);
+        [&self.seq.to_le_bytes()[..], &self.hash, &ended, &checksum].concat()
     }
 
     fn decode(stream: u64, raw: &[u8]) -> Result<Self, JournalError> {
-        let bad = || corrupt(stream, 0, "stream head is malformed");
-        let raw: &[u8; HEAD_LEN] = raw.try_into().map_err(|_| bad())?;
-        let (seq, rest) = raw.split_at(8);
-        let (hash, ended) = rest.split_at(HASH_LEN);
-        Ok(Self {
-            seq: u64::from_le_bytes(seq.try_into().map_err(|_| bad())?),
-            hash: hash.try_into().map_err(|_| bad())?,
-            ended: match ended {
-                [0] => false,
-                [1] => true,
-                _ => return Err(bad()),
-            },
+        Self::parse(stream, raw).ok_or_else(|| corrupt(stream, 0, "stream head is corrupt"))
+    }
+
+    fn parse(stream: u64, raw: &[u8]) -> Option<Self> {
+        let (seq, rest) = raw.split_first_chunk::<8>()?;
+        let (hash, rest) = rest.split_first_chunk::<HASH_LEN>()?;
+        let (ended, checksum) = rest.split_first()?;
+        let seq = u64::from_le_bytes(*seq);
+        (checksum == record_hash(stream, seq, hash, &[*ended])).then_some(Self {
+            seq,
+            hash: *hash,
+            ended: *ended == 1,
         })
     }
 }
@@ -590,6 +587,55 @@ mod tests {
         three_records(&journal);
         delete_record(&db, 2);
         assert_eq!(corrupt_seq(journal.restore(7)), 2);
+    }
+
+    #[test]
+    fn any_corrupted_head_byte_stops_reads_and_writes() {
+        let (_dir, db, journal) = journal();
+        three_records(&journal);
+        journal
+            .append(
+                7,
+                3,
+                &Record::InferenceEnd {
+                    reason: "stop".into(),
+                },
+            )
+            .unwrap();
+        let edit_head = |edit: &dyn Fn(&mut Vec<u8>)| {
+            let txn = db.begin_write().unwrap();
+            {
+                let mut heads = txn.open_table(HEADS).unwrap();
+                let mut raw = heads.get(7).unwrap().unwrap().value().to_vec();
+                edit(&mut raw);
+                heads.insert(7, raw.as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+        };
+        let len = db
+            .begin_read()
+            .unwrap()
+            .open_table(HEADS)
+            .unwrap()
+            .get(7)
+            .unwrap()
+            .unwrap()
+            .value()
+            .len();
+        for at in 0..len {
+            edit_head(&|raw| raw[at] ^= 1);
+            let read = journal.restore(7);
+            assert!(
+                matches!(read, Err(JournalError::Corrupt { .. })),
+                "byte {at}: {read:?}"
+            );
+            let write = journal.append(7, 4, &tokens(&[9], 9));
+            assert!(
+                matches!(write, Err(JournalError::Corrupt { .. })),
+                "byte {at}: {write:?}"
+            );
+            edit_head(&|raw| raw[at] ^= 1);
+        }
     }
 
     #[test]
