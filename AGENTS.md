@@ -11,6 +11,8 @@ isolates. Read `docs/distributed-design.md` for the target design and the decisi
 - **Behavioural tests only.** A test states what a caller or client observes: HTTP responses, store contents,
   what survives a crash, the output of a restored stream. Do not test private functions, call order, internal
   structure or mocks of our own code. A test must keep passing through a refactor that preserves behaviour.
+- A test must fail, never hang, when the behaviour it checks breaks: bound every wait with a deadline.
+  Prefer tests that act through the public HTTP or goal API.
 - A failure the public API cannot produce, such as disk corruption, may be injected, as long as the test
   asserts what the caller then observes.
 

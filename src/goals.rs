@@ -430,10 +430,37 @@ mod tests {
         Goals::open(open(path).unwrap(), FAST).unwrap()
     }
 
-    fn drain(goals: &Goals) {
-        while let Some(goal) = goals.next_goal() {
-            goals.run(goal);
+    /// Run `f` on its own thread and fail the test, never hang it, if it takes
+    /// over 30 s. A stuck thread dies with the test process.
+    fn within_deadline<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(value) => value,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("stuck for over 30 s"),
+            Err(_) => std::panic::resume_unwind(thread.join().unwrap_err()),
         }
+    }
+
+    fn run(goals: &Goals, goal: Goal) {
+        let goals = goals.clone();
+        within_deadline(move || goals.run(goal));
+    }
+
+    fn step(goals: &Goals, goal: &Goal, fence: &Fence) -> Result<bool, JournalError> {
+        let (goals, goal, fence) = (goals.clone(), goal.clone(), fence.clone());
+        within_deadline(move || goals.step(&goal, &fence))
+    }
+
+    fn drain(goals: &Goals) {
+        let goals = goals.clone();
+        within_deadline(move || {
+            while let Some(goal) = goals.next_goal() {
+                goals.run(goal);
+            }
+        });
     }
 
     fn status(goals: &Goals, id: u64) -> GoalStatus {
@@ -584,9 +611,9 @@ mod tests {
         let id = goals.create(spec(20, 9)).unwrap();
         let goal = goals.next_goal().unwrap();
         let fence = lease::claim(&db, id).unwrap();
-        assert!(!goals.step(&goal, &fence).unwrap());
+        assert!(!step(&goals, &goal, &fence).unwrap());
         let first = output(&goals, id);
-        assert!(!goals.step(&goal, &fence).unwrap());
+        assert!(!step(&goals, &goal, &fence).unwrap());
         let second = output(&goals, id);
         drop((goals, db));
         let goals = goals_at(&path);
@@ -618,14 +645,15 @@ mod tests {
         }
         lease::claim(&db, id).unwrap();
         let snapshot = output(&goals, id);
-        worker.join().unwrap();
+        within_deadline(move || worker.join().unwrap());
         let s = status(&goals, id);
         assert_eq!(s.output.as_deref(), Some(snapshot.as_str()));
         assert!(token_count(&snapshot) < 800);
         assert!(s.status != "failed" && s.status != "running");
         assert_eq!(s.error, None);
         let fence = lease::claim(&db, id).unwrap();
-        while !goals.step(&goal, &fence).unwrap() {}
+        let stepper = goals.clone();
+        within_deadline(move || while !stepper.step(&goal, &fence).unwrap() {});
         assert_eq!(output(&goals, id), undisturbed(800, 5));
     }
 
@@ -680,12 +708,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         lease::claim(&db, id).unwrap();
-        worker.join().unwrap();
+        within_deadline(move || worker.join().unwrap());
         assert_eq!(status(&goals, id).status, "paused");
         let goal = goals.next_goal().unwrap();
         assert_eq!(goal.id, id);
         assert_eq!(status(&goals, id).status, "running");
-        goals.run(goal);
+        run(&goals, goal);
         assert_eq!(status(&goals, id).status, "done");
         assert_eq!(output(&goals, id), undisturbed(800, 5));
         assert_eq!(goals.next_goal(), None);
@@ -697,9 +725,9 @@ mod tests {
         let goals = goals_at(&dir.path().join("db"));
         let id = goals.create(spec(5, 1)).unwrap();
         let goal = goals.next_goal().unwrap();
-        goals.run(goal.clone());
+        run(&goals, goal.clone());
         let before = status(&goals, id);
-        goals.run(goal);
+        run(&goals, goal);
         assert_eq!(status(&goals, id), before);
         assert_eq!(goals.next_goal(), None);
     }
@@ -714,7 +742,7 @@ mod tests {
         let stale = lease::claim(&db, id).unwrap();
         lease::claim(&db, id).unwrap();
         assert!(matches!(
-            goals.step(&goal, &stale),
+            step(&goals, &goal, &stale),
             Err(JournalError::Fenced { .. })
         ));
         let s = status(&goals, id);
@@ -936,11 +964,14 @@ mod tests {
         let queued = r.script("1");
         let r = r.reopen();
         assert_eq!(r.goals.next_goal().map(|g| g.id), Some(queued));
-        r.goals.run(Goal {
-            id: queued,
-            priority: 0,
-            budget: 0,
-        });
+        run(
+            &r.goals,
+            Goal {
+                id: queued,
+                priority: 0,
+                budget: 0,
+            },
+        );
         let r = r.reopen();
         assert_eq!(r.goals.next_goal(), None);
         assert_eq!(status(&r.goals, queued).status, "done");
@@ -1015,7 +1046,7 @@ mod tests {
         }
         lease::claim(&r.db, id).unwrap();
         r.store.insert("go".into(), "1".into());
-        worker.join().unwrap();
+        within_deadline(move || worker.join().unwrap());
         let s = status(&r.goals, id);
         assert!(s.error.is_none());
         assert!(r.store.get("late").is_err());
