@@ -12,6 +12,7 @@ use std::time::Duration;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::journal::{Journal, JournalError, Record, storage};
+use crate::lease::{self, Fence};
 use crate::model::{FakeModel, Model};
 
 const GOALS: TableDefinition<u64, (i64, u64)> = TableDefinition::new("goals");
@@ -177,8 +178,9 @@ impl Goals {
     }
 
     /// Commit the next batch of `goal` in one transaction, after the time the
-    /// model needs for it. Returns whether the goal has ended.
-    pub fn step(&self, goal: &Goal) -> Result<bool, JournalError> {
+    /// model needs for it, under `fence`. Returns whether the goal has ended;
+    /// a stale fence is refused as `Fenced` and commits nothing.
+    pub fn step(&self, goal: &Goal, fence: &Fence) -> Result<bool, JournalError> {
         let state = self
             .0
             .journal
@@ -199,6 +201,7 @@ impl Goals {
         let finished = done + count >= goal.budget;
         std::thread::sleep(Duration::from_secs_f64(count as f64 * self.0.token_secs));
         let txn = self.0.db.begin_write().map_err(storage)?;
+        lease::check_in(&txn, fence)?;
         let record = Record::Tokens {
             tokens,
             rng_state: rng,
@@ -254,18 +257,22 @@ impl Goals {
         }
     }
 
-    /// Step `goal` until it ends. A storage failure is logged once and kept in
-    /// memory only, so the goal resumes on the next start.
+    /// Claim `goal`, then step it until it ends. A storage failure is logged
+    /// once and kept in memory only, so the goal resumes on the next start. A
+    /// worker whose lease was taken over stops quietly: that is normal control
+    /// flow, not a failure.
     pub fn run(&self, goal: Goal) {
-        let result = loop {
-            match self.step(&goal) {
-                Ok(false) => {}
-                Ok(true) => break Ok(()),
-                Err(e) => break Err(e),
+        let result = lease::claim(&self.0.db, goal.id).and_then(|fence| {
+            loop {
+                if self.step(&goal, &fence)? {
+                    break Ok(());
+                }
             }
-        };
+        });
         let mut sched = self.sched();
-        if let Err(e) = result {
+        if let Err(e) = result
+            && !matches!(e, JournalError::Fenced { .. })
+        {
             eprintln!("error: goal {}: {e}", goal.id);
             sched.failures.insert(goal.id, e.to_string());
         }
@@ -438,14 +445,16 @@ mod tests {
     fn a_resumed_goal_matches_an_undisturbed_one() {
         let dir = TempDir::new();
         let path = dir.path().join("db");
-        let goals = goals_at(&path);
+        let db = open(&path).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
         let id = goals.create(spec(20, 9)).unwrap();
         let goal = goals.next_goal().unwrap();
-        assert!(!goals.step(&goal).unwrap());
+        let fence = lease::claim(&db, id).unwrap();
+        assert!(!goals.step(&goal, &fence).unwrap());
         let first = output(&goals, id);
-        assert!(!goals.step(&goal).unwrap());
+        assert!(!goals.step(&goal, &fence).unwrap());
         let second = output(&goals, id);
-        drop(goals);
+        drop((goals, db));
         let goals = goals_at(&path);
         drain(&goals);
         let last = output(&goals, id);
@@ -453,6 +462,55 @@ mod tests {
         assert_eq!(token_count(&first), 8);
         assert_eq!(token_count(&second), 16);
         assert_eq!(last, undisturbed(20, 9));
+    }
+
+    #[test]
+    fn a_worker_whose_lease_is_taken_over_stops_quietly() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let slow = NonZeroU32::new(80).unwrap();
+        let goals = Goals::open(db.clone(), slow).unwrap();
+        let id = goals.create(spec(800, 5)).unwrap();
+        let goal = goals.next_goal().unwrap();
+        let worker = {
+            let goals = goals.clone();
+            let goal = goal.clone();
+            std::thread::spawn(move || goals.run(goal))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while output(&goals, id).is_empty() {
+            assert!(std::time::Instant::now() < deadline, "no batch committed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        lease::claim(&db, id).unwrap();
+        let snapshot = output(&goals, id);
+        worker.join().unwrap();
+        let s = status(&goals, id);
+        assert_eq!(s.output.as_deref(), Some(snapshot.as_str()));
+        assert!(token_count(&snapshot) < 800);
+        assert!(s.status != "failed" && s.status != "running");
+        assert_eq!(s.error, None);
+        let fence = lease::claim(&db, id).unwrap();
+        while !goals.step(&goal, &fence).unwrap() {}
+        assert_eq!(output(&goals, id), undisturbed(800, 5));
+    }
+
+    #[test]
+    fn a_stale_fence_commits_nothing_even_on_the_final_batch() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        let id = goals.create(spec(8, 2)).unwrap();
+        let goal = goals.next_goal().unwrap();
+        let stale = lease::claim(&db, id).unwrap();
+        lease::claim(&db, id).unwrap();
+        assert!(matches!(
+            goals.step(&goal, &stale),
+            Err(JournalError::Fenced { .. })
+        ));
+        let s = status(&goals, id);
+        assert_eq!(s.output.as_deref(), Some(""));
+        assert_ne!(s.status, "done");
     }
 
     #[test]
