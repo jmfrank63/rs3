@@ -12,7 +12,8 @@
 //! transaction as each record, also catches records missing from the end. The
 //! chain detects corruption; it is not protection against a deliberate forgery.
 //!
-//! `append` returns only after the commit has been flushed to disk. It takes the
+//! `append` returns only after the commit has been flushed to disk. `append_in`
+//! writes inside a caller's transaction instead, and the caller commits. Both take the
 //! sequence number the caller expects to write, so a writer working from a stale
 //! view of a stream is refused instead of forking it.
 use std::sync::Arc;
@@ -106,7 +107,7 @@ pub enum JournalError {
     },
 }
 
-fn storage<E: Into<redb::Error>>(e: E) -> JournalError {
+pub(crate) fn storage<E: Into<redb::Error>>(e: E) -> JournalError {
     JournalError::Storage(e.into().to_string())
 }
 
@@ -138,6 +139,20 @@ impl Journal {
         record: &Record,
     ) -> Result<(), JournalError> {
         let txn = self.db.begin_write().map_err(storage)?;
+        self.append_in(&txn, stream, expected_seq, record)?;
+        txn.commit().map_err(storage)
+    }
+
+    /// Append `record` inside the caller's transaction, so it commits or rolls
+    /// back together with the caller's other writes. Nothing is committed here.
+    /// Later calls on the same transaction see the records written by earlier ones.
+    pub fn append_in(
+        &self,
+        txn: &redb::WriteTransaction,
+        stream: u64,
+        expected_seq: u64,
+        record: &Record,
+    ) -> Result<(), JournalError> {
         {
             let mut heads = txn.open_table(HEADS).map_err(storage)?;
             let head = match heads.get(stream).map_err(storage)? {
@@ -182,7 +197,7 @@ impl Journal {
                 .insert(stream, new_head.encode(stream).as_slice())
                 .map_err(storage)?;
         }
-        txn.commit().map_err(storage)
+        Ok(())
     }
 
     /// Verify a whole stream and rebuild its thinking state, or `None` when the
@@ -432,6 +447,45 @@ mod tests {
             Err(JournalError::Corrupt { seq, .. }) => seq,
             other => panic!("expected corruption, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn records_appended_in_one_transaction_commit_together() {
+        let (_dir, db, journal) = journal();
+        let txn = db.begin_write().unwrap();
+        journal.append_in(&txn, 7, 0, &start()).unwrap();
+        journal.append_in(&txn, 7, 1, &tokens(&[1], 1)).unwrap();
+        txn.commit().unwrap();
+        let state = journal.restore(7).unwrap().unwrap();
+        assert_eq!(state.tokens, [1]);
+        assert_eq!(state.next_seq, 2);
+    }
+
+    #[test]
+    fn dropped_transaction_leaves_the_stream_unchanged() {
+        let (_dir, db, journal) = journal();
+        journal.append(7, 0, &start()).unwrap();
+        let txn = db.begin_write().unwrap();
+        journal.append_in(&txn, 7, 1, &tokens(&[1], 1)).unwrap();
+        drop(txn);
+        assert_eq!(journal.restore(7).unwrap().unwrap().next_seq, 1);
+        journal.append(7, 1, &tokens(&[2], 2)).unwrap();
+        assert_eq!(journal.restore(7).unwrap().unwrap().tokens, [2]);
+    }
+
+    #[test]
+    fn second_append_in_a_transaction_sees_the_first() {
+        let (_dir, db, journal) = journal();
+        let txn = db.begin_write().unwrap();
+        journal.append_in(&txn, 7, 0, &start()).unwrap();
+        assert_eq!(
+            journal.append_in(&txn, 7, 0, &start()),
+            Err(JournalError::SeqConflict {
+                stream: 7,
+                expected: 0,
+                actual: 1
+            })
+        );
     }
 
     #[test]
