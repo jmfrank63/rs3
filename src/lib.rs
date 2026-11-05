@@ -3,6 +3,7 @@
 //! embedded JavaScript runtime that can call back into the store.
 
 pub mod config;
+pub mod goals;
 pub mod http;
 pub mod journal;
 pub mod js;
