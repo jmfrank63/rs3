@@ -59,7 +59,7 @@ pub async fn delete_key(
 }
 
 /// The blocking pool that runs a durable write is gone or the write panicked.
-fn blocking_failed(e: actix_web::error::BlockingError) -> ApiError {
+pub(super) fn blocking_failed(e: actix_web::error::BlockingError) -> ApiError {
     eprintln!("error: store write did not finish: {e}");
     ApiError::Internal
 }

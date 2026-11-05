@@ -5,7 +5,9 @@
 //! is written in the same transaction as the stream's start record, so a goal
 //! exists completely or not at all. A goal's id is its stream id.
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
@@ -51,6 +53,10 @@ struct Inner {
     db: Arc<Database>,
     journal: Journal,
     sched: Mutex<Sched>,
+    /// Signalled when a goal is queued.
+    wake: Condvar,
+    /// Seconds one token takes.
+    token_secs: f64,
 }
 
 /// Shared handle to the goals of one database.
@@ -60,7 +66,8 @@ pub struct Goals(Arc<Inner>);
 impl Goals {
     /// Use `db` for goals, queueing every goal that has not ended. A goal whose
     /// stream fails verification is logged once and left out.
-    pub fn open(db: Arc<Database>) -> Result<Self, JournalError> {
+    /// Workers emit `rate` tokens per second.
+    pub fn open(db: Arc<Database>, rate: NonZeroU32) -> Result<Self, JournalError> {
         let journal = Journal::new(db.clone())?;
         let txn = db.begin_write().map_err(storage)?;
         txn.open_table(GOALS).map_err(storage)?;
@@ -69,6 +76,8 @@ impl Goals {
             db,
             journal,
             sched: Mutex::default(),
+            wake: Condvar::new(),
+            token_secs: 1.0 / f64::from(rate.get()),
         }));
         for goal in goals.all()? {
             match goals.0.journal.restore(goal.id) {
@@ -127,6 +136,7 @@ impl Goals {
             id,
             budget: spec.budget,
         });
+        self.0.wake.notify_one();
         Ok(id)
     }
 
@@ -166,8 +176,8 @@ impl Goals {
         }))
     }
 
-    /// Commit the next batch of `goal` in one transaction. Returns whether the
-    /// goal has ended. It does not sleep.
+    /// Commit the next batch of `goal` in one transaction, after the time the
+    /// model needs for it. Returns whether the goal has ended.
     pub fn step(&self, goal: &Goal) -> Result<bool, JournalError> {
         let state = self
             .0
@@ -187,6 +197,7 @@ impl Goals {
             rng = next;
         }
         let finished = done + count >= goal.budget;
+        std::thread::sleep(Duration::from_secs_f64(count as f64 * self.0.token_secs));
         let txn = self.0.db.begin_write().map_err(storage)?;
         let record = Record::Tokens {
             tokens,
@@ -207,12 +218,40 @@ impl Goals {
         Ok(finished)
     }
 
-    /// Take the next queued goal and mark it running. Pair it with `run`.
-    pub fn next_goal(&self) -> Option<Goal> {
-        let mut sched = self.sched();
+    fn take(sched: &mut Sched) -> Option<Goal> {
         let goal = sched.queue.pop_front()?;
         sched.running.insert(goal.id);
         Some(goal)
+    }
+
+    /// Take the next queued goal and mark it running. Pair it with `run`.
+    pub fn next_goal(&self) -> Option<Goal> {
+        Self::take(&mut self.sched())
+    }
+
+    /// Start `workers` threads that run queued goals for the life of the
+    /// process. There is no shutdown: the threads end with the process.
+    pub fn start_workers(&self, workers: NonZeroUsize) {
+        for _ in 0..workers.get() {
+            let goals = self.clone();
+            std::thread::spawn(move || {
+                loop {
+                    let mut sched = goals.sched();
+                    let goal = loop {
+                        if let Some(goal) = Self::take(&mut sched) {
+                            break goal;
+                        }
+                        sched = goals
+                            .0
+                            .wake
+                            .wait(sched)
+                            .unwrap_or_else(PoisonError::into_inner);
+                    };
+                    drop(sched);
+                    goals.run(goal);
+                }
+            });
+        }
     }
 
     /// Step `goal` until it ends. A storage failure is logged once and kept in
@@ -240,6 +279,7 @@ mod tests {
     use crate::storage::{TempDir, open};
     use std::path::Path;
 
+    const FAST: NonZeroU32 = NonZeroU32::new(1_000_000).unwrap();
     const HEADS: TableDefinition<u64, &[u8]> = TableDefinition::new("journal_heads");
     const RECORDS: TableDefinition<(u64, u64), &[u8]> = TableDefinition::new("journal_records");
 
@@ -253,7 +293,7 @@ mod tests {
     }
 
     fn goals_at(path: &Path) -> Goals {
-        Goals::open(open(path).unwrap()).unwrap()
+        Goals::open(open(path).unwrap(), FAST).unwrap()
     }
 
     fn drain(goals: &Goals) {
@@ -359,7 +399,7 @@ mod tests {
     fn a_failed_create_leaves_no_goal_behind() {
         let dir = TempDir::new();
         let db = open(&dir.path().join("db")).unwrap();
-        let goals = Goals::open(db.clone()).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
         let txn = db.begin_write().unwrap();
         txn.delete_table(HEADS).unwrap();
         txn.open_table(TableDefinition::<&str, &str>::new("journal_heads"))
@@ -432,7 +472,7 @@ mod tests {
         let dir = TempDir::new();
         let path = dir.path().join("db");
         let db = open(&path).unwrap();
-        let goals = Goals::open(db.clone()).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
         let bad = goals.create(spec(10, 1)).unwrap();
         let good = goals.create(spec(10, 2)).unwrap();
         tamper_record(&db, (bad, 0));
@@ -455,7 +495,7 @@ mod tests {
         let dir = TempDir::new();
         let path = dir.path().join("db");
         let db = open(&path).unwrap();
-        let goals = Goals::open(db.clone()).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
         let id = goals.create(spec(20, 4)).unwrap();
         let original = head_bytes(&db, id);
         flip_head(&db, id);
@@ -479,7 +519,7 @@ mod tests {
     fn unknown_goals_and_unreadable_storage() {
         let dir = TempDir::new();
         let db = open(&dir.path().join("db")).unwrap();
-        let goals = Goals::open(db.clone()).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
         assert_eq!(goals.status(7), Ok(None));
         let txn = db.begin_write().unwrap();
         txn.delete_table(HEADS).unwrap();

@@ -5,6 +5,7 @@ use crate::state::AppState;
 use error::ApiError;
 
 pub mod error;
+pub mod goals;
 pub mod kv;
 
 /// Build the app configuration for one shared `AppState`.
@@ -19,7 +20,8 @@ pub fn configure(state: AppState) -> impl Fn(&mut web::ServiceConfig) + Clone + 
             .service(index)
             .service(status)
             .service(patch_key)
-            .configure(kv::configure);
+            .configure(kv::configure)
+            .configure(goals::configure);
     }
 }
 

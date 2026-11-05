@@ -145,4 +145,34 @@ mod tests {
         );
         assert_eq!(stderr.lines().count(), 1, "{stderr}");
     }
+
+    #[test]
+    fn a_goal_finishes_with_its_budget_and_is_unavailable_without_storage() {
+        let dir = TempDir::new("goals");
+        let db = dir.0.join("rs3.db");
+        let server = Server::start(&dir.0, Some(&db));
+        let created = server.request(
+            "POST",
+            "/goals",
+            r#"{"priority":0,"budget":20,"seed":3,"prompt":"hi"}"#,
+        );
+        assert_eq!(created, r#"{"id":1}"#);
+        let mut goal = serde_json::Value::Null;
+        for _ in 0..400 {
+            goal = serde_json::from_str(&server.request("GET", "/goals/1", "")).unwrap();
+            if goal["status"] == "done" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(goal["status"], "done", "{goal}");
+        assert_eq!(
+            goal["output"].as_str().unwrap().split_whitespace().count(),
+            20
+        );
+
+        let memory = Server::start(&dir.0, None);
+        let body = memory.request("GET", "/goals/1", "");
+        assert!(body.contains("goals_unavailable"), "{body}");
+    }
 }

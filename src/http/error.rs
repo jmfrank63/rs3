@@ -6,9 +6,12 @@
 //! `js_error` (422, the message is only the JS exception message),
 //! `js_depth_limit` (422, the message names the limit and the PATCH key chain),
 //! `js_timeout` (504, the message names the execution limit in milliseconds)
+//! `goals_unavailable` (503, fixed message: the server has no database for goals)
 //! and `internal` (500, fixed message `internal error`; details go to stderr).
+//! An unknown goal answers `not_found` (404, `goal not found: {id}`).
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 
+use crate::journal::JournalError;
 use crate::js::ExecError;
 use crate::store::StoreError;
 
@@ -31,6 +34,12 @@ pub enum ApiError {
     /// the message naming the limit.
     #[error("{0}")]
     JsTimeout(String),
+    /// The server runs without a database, so it has no goals.
+    #[error("goals need a database; set STORAGE.PATH")]
+    GoalsUnavailable,
+    /// No goal has this id (as given in the path).
+    #[error("goal not found: {0}")]
+    GoalNotFound(String),
     /// A host fault. The body message is always the fixed `internal error`.
     #[error("internal error")]
     Internal,
@@ -47,6 +56,15 @@ impl From<StoreError> for ApiError {
             }
             other => ApiError::Store(other),
         }
+    }
+}
+
+impl From<JournalError> for ApiError {
+    /// A journal failure is a host fault: it is logged to stderr and becomes
+    /// 500 `internal`, so host details never reach the client.
+    fn from(e: JournalError) -> Self {
+        eprintln!("error: journal failure: {e}");
+        ApiError::Internal
     }
 }
 
@@ -94,6 +112,8 @@ impl ApiError {
             ApiError::JsError(_) => "js_error",
             ApiError::JsDepthLimit(_) => "js_depth_limit",
             ApiError::JsTimeout(_) => "js_timeout",
+            ApiError::GoalsUnavailable => "goals_unavailable",
+            ApiError::GoalNotFound(_) => "not_found",
             ApiError::Internal => "internal",
         }
     }
@@ -109,6 +129,8 @@ impl ResponseError for ApiError {
             ApiError::JsError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::JsDepthLimit(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::JsTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
+            ApiError::GoalsUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::GoalNotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

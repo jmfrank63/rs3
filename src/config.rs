@@ -4,18 +4,27 @@
 //! its ancestors) overlaid by the process environment, which wins. The process
 //! environment is only read, never modified. A missing dotenv file is ignored;
 //! any other dotenv problem (a line that does not parse, an unreadable file) is
-//! a configuration error. Only the keys `SERVER.HOST`, `SERVER.PORT` and
-//! `STORAGE.PATH` (case-insensitive) are used. Both server keys are required:
-//! there are no defaults, and missing or invalid values are an error. Without
-//! `STORAGE.PATH` the store keeps its data in memory only.
+//! a configuration error. Only the keys `SERVER.HOST`, `SERVER.PORT`,
+//! `STORAGE.PATH`, `SCHEDULER.WORKERS` and `MODEL.TOKENS_PER_SECOND`
+//! (case-insensitive) are used. Both server keys are required: there are no
+//! defaults, and missing or invalid values are an error. Without `STORAGE.PATH`
+//! the store keeps its data in memory only. `SCHEDULER.WORKERS` (default 2) and
+//! `MODEL.TOKENS_PER_SECOND` (default 1000) must be positive integers.
 use std::ffi::OsString;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 
 use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 
 /// The only configuration keys read from the dotenv file and the environment.
-const CONFIG_KEYS: [&str; 3] = ["server.host", "server.port", "storage.path"];
+const CONFIG_KEYS: [&str; 5] = [
+    "server.host",
+    "server.port",
+    "storage.path",
+    "scheduler.workers",
+    "model.tokens_per_second",
+];
 
 /// Address the HTTP server binds to.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -31,12 +40,44 @@ pub struct StorageSettings {
     pub path: Option<PathBuf>,
 }
 
+/// How many goals run at once.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SchedulerSettings {
+    pub workers: NonZeroUsize,
+}
+
+impl Default for SchedulerSettings {
+    fn default() -> Self {
+        Self {
+            workers: NonZeroUsize::MIN.saturating_add(1),
+        }
+    }
+}
+
+/// How fast a worker emits tokens.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ModelSettings {
+    pub tokens_per_second: NonZeroU32,
+}
+
+impl Default for ModelSettings {
+    fn default() -> Self {
+        Self {
+            tokens_per_second: NonZeroU32::MIN.saturating_add(999),
+        }
+    }
+}
+
 /// Top-level application settings.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Settings {
     pub server: ServerSettings,
     #[serde(default)]
     pub storage: StorageSettings,
+    #[serde(default)]
+    pub scheduler: SchedulerSettings,
+    #[serde(default)]
+    pub model: ModelSettings,
 }
 
 /// Merge dotenv pairs and environment pairs into one configuration map.
@@ -160,8 +201,46 @@ mod tests {
                     port: 5000,
                 },
                 storage: StorageSettings::default(),
+                scheduler: SchedulerSettings::default(),
+                model: ModelSettings::default(),
             }
         );
+        assert_eq!(s.scheduler.workers.get(), 2);
+        assert_eq!(s.model.tokens_per_second.get(), 1000);
+    }
+
+    #[test]
+    fn scheduler_and_model_are_read_in_any_case() {
+        let merged = merge_dotenv_env(
+            None::<Vec<dotenvy::Result<(String, String)>>>,
+            env(&[
+                ("SERVER.HOST", "h"),
+                ("SERVER.PORT", "1"),
+                ("Scheduler.Workers", "5"),
+                ("model.TOKENS_per_second", "250"),
+            ]),
+        )
+        .unwrap();
+        let s = Settings::from_map(merged).unwrap();
+        assert_eq!(s.scheduler.workers.get(), 5);
+        assert_eq!(s.model.tokens_per_second.get(), 250);
+    }
+
+    #[test]
+    fn zero_and_non_numeric_scheduler_and_model_values_are_errors() {
+        for (key, value) in [
+            ("SCHEDULER.WORKERS", "0"),
+            ("SCHEDULER.WORKERS", "many"),
+            ("MODEL.TOKENS_PER_SECOND", "0"),
+            ("MODEL.TOKENS_PER_SECOND", "fast"),
+        ] {
+            let r = Settings::from_map(vars(&[
+                ("SERVER.HOST", "h"),
+                ("SERVER.PORT", "1"),
+                (key, value),
+            ]));
+            assert!(r.is_err(), "{key}={value} accepted: {r:?}");
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::config::Settings;
+use crate::goals::Goals;
 use crate::js::executor::JsExecutor;
 use crate::store::Store;
 
@@ -17,6 +18,8 @@ pub struct AppState {
     pub store: Store,
     pub settings: Arc<Settings>,
     pub js: JsExecutor,
+    /// Generation goals. `None` when the server has no database.
+    pub goals: Option<Goals>,
 }
 
 impl AppState {
@@ -26,6 +29,7 @@ impl AppState {
             store,
             settings: Arc::new(settings),
             js,
+            goals: None,
         }
     }
 }
