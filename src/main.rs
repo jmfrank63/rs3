@@ -30,6 +30,7 @@ async fn run() -> Result<(), String> {
     let js = rs3::js::executor::JsExecutor::start(&rs3::js::JsSettings::default())
         .map_err(|e| format!("cannot start JS runtime: {e}"))?;
     if let Some(goals) = &goals {
+        goals.enable_scripts(store.clone(), js.clone());
         goals.start_workers(settings.scheduler.workers);
     }
     let host = settings.server.host.clone();

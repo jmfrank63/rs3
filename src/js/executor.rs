@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, mpsc, oneshot};
 
+use super::oplog::OpLog;
 use super::ops::ExecCtx;
 use super::runtime::run_script;
 use super::{ExecError, JobState, JsSettings};
@@ -271,8 +272,33 @@ impl JsExecutor {
         name: String,
         source: String,
     ) -> Result<String, ExecError> {
+        self.execute_with(store, name, source, None).await
+    }
+
+    /// Like `execute`, and every op is replayed from or appended to `log`, one
+    /// ordered log across all PATCH levels. The caller reads `log.stopped()`
+    /// after the run: a fenced or diverged log decides the outcome, whatever
+    /// the script returned.
+    pub async fn execute_logged(
+        &self,
+        store: Store,
+        name: String,
+        source: String,
+        log: Arc<OpLog>,
+    ) -> Result<String, ExecError> {
+        self.execute_with(store, name, source, Some(log)).await
+    }
+
+    async fn execute_with(
+        &self,
+        store: Store,
+        name: String,
+        source: String,
+        log: Option<Arc<OpLog>>,
+    ) -> Result<String, ExecError> {
         let job = Arc::new(JobState::default());
-        let ctx = ExecCtx::new(store, Arc::clone(&job), &name, self.limits.max_patch_depth);
+        let mut ctx = ExecCtx::new(store, Arc::clone(&job), &name, self.limits.max_patch_depth);
+        ctx.log = log;
         self.run_job(job, name.clone(), move || run_script(ctx, &name, source))
             .await
     }

@@ -79,7 +79,7 @@ impl Record {
         )
     }
 
-    fn ends_stream(&self) -> bool {
+    pub fn ends_stream(&self) -> bool {
         matches!(self, Record::InferenceEnd { .. } | Record::ScriptEnd { .. })
     }
 }
@@ -289,9 +289,17 @@ impl Journal {
     /// Verify a whole stream and rebuild its thinking state, or `None` when the
     /// stream does not exist.
     pub fn restore(&self, stream: u64) -> Result<Option<ThinkingState>, JournalError> {
+        Self::rebuild(stream, self.read(stream)?)
+    }
+
+    /// Rebuild the thinking state from the verified `records` of `stream`.
+    pub fn rebuild(
+        stream: u64,
+        records: Vec<Record>,
+    ) -> Result<Option<ThinkingState>, JournalError> {
         let mut state = None;
         let mut next_seq = 0;
-        for record in self.read(stream)? {
+        for record in records {
             state = Some(apply(stream, next_seq, state, record)?);
             next_seq += 1;
         }

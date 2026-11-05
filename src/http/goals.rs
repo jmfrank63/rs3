@@ -1,4 +1,5 @@
-//! Goal routes: `POST /goals` creates a generation goal and `GET /goals/{id}`
+//! Goal routes: `POST /goals` creates a generation goal, or a script goal that
+//! runs the script stored under a key (pinned at creation), and `GET /goals/{id}`
 //! reports its status and committed output. Both answer 503 `goals_unavailable`
 //! when the server runs without a database.
 use actix_web::{HttpResponse, get, post, web};
@@ -15,14 +16,28 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(create).service(get_goal);
 }
 
-/// What a client sends to create a goal.
+/// What a client sends to create a goal: generation fields, or a script key.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NewGoal {
+    Generation(Generation),
+    Script(ScriptGoal),
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct NewGoal {
+struct Generation {
     priority: i64,
     budget: i64,
     seed: u64,
     prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScriptGoal {
+    priority: i64,
+    script: String,
 }
 
 fn goals(state: &AppState) -> Result<Goals, ApiError> {
@@ -41,19 +56,26 @@ async fn create(state: web::Data<AppState>, body: web::Bytes) -> Result<HttpResp
         serde_json::from_str(text).map_err(|e| StoreError::MalformedJson(e.to_string()))?;
     let new: NewGoal = serde_json::from_value(value)
         .map_err(|e| StoreError::InvalidInput(format!("invalid goal: {e}")))?;
-    let budget = u64::try_from(new.budget)
-        .ok()
-        .filter(|b| *b >= 1)
-        .ok_or_else(|| StoreError::InvalidInput("budget must be at least 1".into()))?;
-    let spec = GoalSpec {
-        priority: new.priority,
-        budget,
-        seed: new.seed,
-        prompt: new.prompt,
-    };
-    let id = web::block(move || goals.create(spec))
-        .await
-        .map_err(blocking_failed)??;
+    let id = match new {
+        NewGoal::Generation(g) => {
+            let budget = u64::try_from(g.budget)
+                .ok()
+                .filter(|b| *b >= 1)
+                .ok_or_else(|| StoreError::InvalidInput("budget must be at least 1".into()))?;
+            let spec = GoalSpec {
+                priority: g.priority,
+                budget,
+                seed: g.seed,
+                prompt: g.prompt,
+            };
+            web::block(move || goals.create(spec)).await
+        }
+        NewGoal::Script(g) => {
+            let source = state.store.get(&g.script)?;
+            web::block(move || goals.create_script(g.priority, g.script, source)).await
+        }
+    }
+    .map_err(blocking_failed)??;
     Ok(HttpResponse::Created().json(serde_json::json!({ "id": id })))
 }
 
@@ -108,17 +130,15 @@ mod tests {
         let dir = TempDir::new();
         let db = open(&dir.path().join("db")).unwrap();
         let goals = Goals::open(db.clone(), NonZeroU32::new(rate).unwrap()).unwrap();
+        let store = Store::durable(db.clone()).unwrap();
+        goals.enable_scripts(store.clone(), crate::js::test_executor());
         if let Some(n) = workers {
             goals.start_workers(NonZeroUsize::new(n).unwrap());
         }
         let base = test_state();
         let state = AppState {
             goals: Some(goals),
-            ..AppState::new(
-                Store::durable(db.clone()).unwrap(),
-                (*base.settings).clone(),
-                base.js.clone(),
-            )
+            ..AppState::new(store, (*base.settings).clone(), base.js.clone())
         };
         Fixture {
             _dir: dir,
@@ -317,5 +337,92 @@ mod tests {
         let id = create(&fast.state, &goal_body(16)).await;
         wait_for(&fast.state, id, "done").await;
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    async fn put(state: &AppState, key: &str, value: &str) {
+        let req = atest::TestRequest::post()
+            .uri("/insert")
+            .set_payload(json!({ key: value }).to_string());
+        assert_eq!(call(state, req).await.status(), StatusCode::OK);
+    }
+
+    fn script_body(key: &str) -> Value {
+        json!({"priority": 0, "script": key})
+    }
+
+    #[actix_web::test]
+    async fn a_script_goal_runs_the_stored_script_and_reports_its_output() {
+        let f = fixture(1_000_000, Some(1));
+        put(
+            &f.state,
+            "job",
+            r#"Deno.core.ops.op_rs3_insert('{"a":"x"}'); Deno.core.ops.op_rs3_get('a') + '!'"#,
+        )
+        .await;
+        let id = create(&f.state, &script_body("job")).await;
+        let goal = wait_for(&f.state, id, "done").await;
+        assert_eq!(
+            goal,
+            json!({"status": "done", "output": "x!", "error": null})
+        );
+        assert_eq!(f.state.store.get("a").unwrap(), "x");
+    }
+
+    #[actix_web::test]
+    async fn a_missing_script_key_is_404_and_creates_no_goal() {
+        let f = fixture(1_000_000, None);
+        let resp = call(&f.state, post(script_body("nope").to_string())).await;
+        assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+        let resp = call(&f.state, get_request(1)).await;
+        assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+    }
+
+    #[actix_web::test]
+    async fn bodies_fitting_neither_goal_shape_are_rejected() {
+        let f = fixture(1_000_000, None);
+        put(&f.state, "job", "1").await;
+        for body in [
+            r#"{"priority":0,"budget":1,"seed":1,"prompt":"p","script":"job"}"#,
+            r#"{"priority":0,"budget":1,"script":"job"}"#,
+            r#"{"priority":0,"script":5}"#,
+            r#"{"script":"job"}"#,
+            r#"{"priority":0,"script":"job","extra":1}"#,
+        ] {
+            let resp = call(&f.state, post(body)).await;
+            assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "invalid_input").await;
+        }
+        let resp = call(&f.state, get_request(1)).await;
+        assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+    }
+
+    #[actix_web::test]
+    async fn script_goals_answer_503_without_a_database() {
+        let resp = call(&test_state(), post(script_body("job").to_string())).await;
+        assert_json_error(resp, StatusCode::SERVICE_UNAVAILABLE, "goals_unavailable").await;
+    }
+
+    #[actix_web::test]
+    async fn changing_the_script_key_after_creation_changes_nothing() {
+        let f = fixture(1_000_000, None);
+        put(&f.state, "job", "'old'").await;
+        let id = create(&f.state, &script_body("job")).await;
+        put(&f.state, "job", "'new'").await;
+        f.state
+            .goals
+            .as_ref()
+            .unwrap()
+            .start_workers(NonZeroUsize::new(1).unwrap());
+        assert_eq!(wait_for(&f.state, id, "done").await["output"], "old");
+    }
+
+    #[actix_web::test]
+    async fn a_failing_script_reports_failed_with_js_error_and_no_output() {
+        let f = fixture(1_000_000, Some(1));
+        put(&f.state, "job", "throw new Error('boom')").await;
+        let id = create(&f.state, &script_body("job")).await;
+        assert_eq!(
+            wait_for(&f.state, id, "failed").await,
+            json!({"status": "failed", "output": null, "error": "js_error"})
+        );
     }
 }

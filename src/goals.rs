@@ -6,14 +6,18 @@
 //! exists completely or not at all. A goal's id is its stream id.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
-use crate::journal::{Journal, JournalError, Record, storage};
+use crate::journal::{Journal, JournalError, Record, ScriptFailure, storage};
+use crate::js::ExecError;
+use crate::js::executor::JsExecutor;
+use crate::js::oplog::{LogStop, OpLog};
 use crate::lease::{self, Fence};
 use crate::model::{FakeModel, Model};
+use crate::store::Store;
 
 const GOALS: TableDefinition<u64, (i64, u64)> = TableDefinition::new("goals");
 
@@ -43,6 +47,16 @@ pub struct GoalStatus {
     pub error: Option<&'static str>,
 }
 
+/// The status and error of a goal that has no durable result.
+fn flags(running: bool, failed: bool, done: bool) -> (&'static str, Option<&'static str>) {
+    match (done, failed, running) {
+        (true, _, _) => ("done", None),
+        (_, true, _) => ("failed", Some("storage_failure")),
+        (_, _, true) => ("running", None),
+        _ => ("queued", None),
+    }
+}
+
 #[derive(Default)]
 struct Sched {
     queue: VecDeque<Goal>,
@@ -58,6 +72,8 @@ struct Inner {
     wake: Condvar,
     /// Seconds one token takes.
     token_secs: f64,
+    /// What script goals run against; unset until `enable_scripts`.
+    scripts: OnceLock<(Store, JsExecutor)>,
 }
 
 /// Shared handle to the goals of one database.
@@ -79,10 +95,13 @@ impl Goals {
             sched: Mutex::default(),
             wake: Condvar::new(),
             token_secs: 1.0 / f64::from(rate.get()),
+            scripts: OnceLock::new(),
         }));
         for goal in goals.all()? {
-            match goals.0.journal.restore(goal.id) {
-                Ok(Some(state)) if state.ended.is_none() => goals.sched().queue.push_back(goal),
+            match goals.0.journal.read(goal.id) {
+                Ok(records) if records.last().is_some_and(|last| !last.ends_stream()) => {
+                    goals.sched().queue.push_back(goal);
+                }
                 Ok(_) => {}
                 Err(e @ JournalError::Corrupt { .. }) => eprintln!("error: goal {}: {e}", goal.id),
                 Err(e) => return Err(e),
@@ -109,20 +128,14 @@ impl Goals {
         self.0.sched.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Run script goals against `store` on `js`. Call it once, before the
+    /// workers start; a script goal that runs earlier fails in memory only.
+    pub fn enable_scripts(&self, store: Store, js: JsExecutor) {
+        let _ = self.0.scripts.set((store, js));
+    }
+
     /// Create a goal and queue it. The caller validates the budget.
     pub fn create(&self, spec: GoalSpec) -> Result<u64, JournalError> {
-        let txn = self.0.db.begin_write().map_err(storage)?;
-        let id = {
-            let mut table = txn.open_table(GOALS).map_err(storage)?;
-            let id = table
-                .last()
-                .map_err(storage)?
-                .map_or(1, |(key, _)| key.value() + 1);
-            table
-                .insert(id, (spec.priority, spec.budget))
-                .map_err(storage)?;
-            id
-        };
         let start = Record::InferenceStart {
             engine: "fake".into(),
             model_hash: "fake".into(),
@@ -131,12 +144,33 @@ impl Goals {
             rng_state: FakeModel.start_state(spec.seed, &spec.prompt),
             prompt_tokens: spec.prompt.bytes().map(u32::from).collect(),
         };
-        self.0.journal.append_in(&txn, id, 0, &start)?;
+        self.insert_goal(spec.priority, spec.budget, &start)
+    }
+
+    /// Create a goal that runs `source` as the script `name`, and queue it.
+    pub fn create_script(
+        &self,
+        priority: i64,
+        name: String,
+        source: String,
+    ) -> Result<u64, JournalError> {
+        self.insert_goal(priority, 0, &Record::ScriptStart { name, source })
+    }
+
+    fn insert_goal(&self, priority: i64, budget: u64, start: &Record) -> Result<u64, JournalError> {
+        let txn = self.0.db.begin_write().map_err(storage)?;
+        let id = {
+            let mut table = txn.open_table(GOALS).map_err(storage)?;
+            let id = table
+                .last()
+                .map_err(storage)?
+                .map_or(1, |(key, _)| key.value() + 1);
+            table.insert(id, (priority, budget)).map_err(storage)?;
+            id
+        };
+        self.0.journal.append_in(&txn, id, 0, start)?;
         txn.commit().map_err(storage)?;
-        self.sched().queue.push_back(Goal {
-            id,
-            budget: spec.budget,
-        });
+        self.sched().queue.push_back(Goal { id, budget });
         self.0.wake.notify_one();
         Ok(id)
     }
@@ -152,9 +186,8 @@ impl Goals {
                 sched.failures.contains_key(&id),
             )
         };
-        let state = match self.0.journal.restore(id) {
-            Ok(Some(state)) => state,
-            Ok(None) => return Ok(None),
+        let records = match self.0.journal.read(id) {
+            Ok(records) => records,
             Err(JournalError::Corrupt { .. }) => {
                 return Ok(Some(GoalStatus {
                     status: "failed",
@@ -164,15 +197,24 @@ impl Goals {
             }
             Err(e) => return Err(e),
         };
-        let (status, error) = match (state.ended.is_some(), failed, running) {
-            (true, _, _) => ("done", None),
-            (_, true, _) => ("failed", Some("storage_failure")),
-            (_, _, true) => ("running", None),
-            _ => ("queued", None),
+        let (status, error, output) = match records.last() {
+            Some(Record::ScriptEnd { outcome: Ok(value) }) => ("done", None, Some(value.clone())),
+            Some(Record::ScriptEnd { outcome: Err(f) }) => ("failed", Some(f.code()), None),
+            _ if matches!(records.first(), Some(Record::ScriptStart { .. })) => {
+                let (status, error) = flags(running, failed, false);
+                (status, error, None)
+            }
+            _ => {
+                let Some(state) = Journal::rebuild(id, records)? else {
+                    return Ok(None);
+                };
+                let (status, error) = flags(running, failed, state.ended.is_some());
+                (status, error, Some(FakeModel.render(&state.tokens)))
+            }
         };
         Ok(Some(GoalStatus {
             status,
-            output: Some(FakeModel.render(&state.tokens)),
+            output,
             error,
         }))
     }
@@ -257,12 +299,66 @@ impl Goals {
         }
     }
 
+    /// Run the script of `goal` against its op log, then end its stream with
+    /// the outcome. A fenced stop ends nothing: the new holder carries on. A
+    /// host failure is a storage error, so the goal resumes on the next start.
+    fn run_script(
+        &self,
+        goal: &Goal,
+        fence: Fence,
+        name: &str,
+        source: &str,
+        records: &[Record],
+    ) -> Result<(), JournalError> {
+        let Some((store, js)) = self.0.scripts.get() else {
+            return Err(JournalError::Storage("scripts are not enabled".into()));
+        };
+        let log = Arc::new(OpLog::new(
+            self.0.db.clone(),
+            self.0.journal.clone(),
+            fence,
+            records,
+        ));
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| JournalError::Storage(e.to_string()))?
+            .block_on(js.execute_logged(
+                store.clone(),
+                name.to_owned(),
+                source.to_owned(),
+                log.clone(),
+            ));
+        let outcome = match (log.stopped(), result) {
+            (Some(LogStop::Fenced), _) => return Ok(()),
+            (Some(LogStop::Diverged), _) => Err(ScriptFailure::ReplayDiverged),
+            (None, Err(ExecError::Internal(e))) => return Err(JournalError::Storage(e)),
+            (None, Err(ExecError::Unavailable)) => {
+                return Err(JournalError::Storage(ExecError::Unavailable.to_string()));
+            }
+            (None, Err(ExecError::Timeout { .. })) => Err(ScriptFailure::JsTimeout),
+            (None, Ok(_) | Err(ExecError::Script { .. } | ExecError::DepthLimit { .. }))
+                if !log.fully_replayed() =>
+            {
+                eprintln!("error: goal {}: the script does not match its log", goal.id);
+                Err(ScriptFailure::ReplayDiverged)
+            }
+            (None, Ok(value)) => Ok(value),
+            (None, Err(_)) => Err(ScriptFailure::JsError),
+        };
+        log.end(outcome)
+    }
+
     /// Claim `goal`, then step it until it ends. A storage failure is logged
     /// once and kept in memory only, so the goal resumes on the next start. A
     /// worker whose lease was taken over stops quietly: that is normal control
     /// flow, not a failure.
     pub fn run(&self, goal: Goal) {
         let result = lease::claim(&self.0.db, goal.id).and_then(|fence| {
+            let records = self.0.journal.read(goal.id)?;
+            if let Some(Record::ScriptStart { name, source }) = records.first() {
+                return self.run_script(&goal, fence, name, source, &records);
+            }
             loop {
                 if self.step(&goal, &fence)? {
                     break Ok(());
@@ -585,5 +681,273 @@ mod tests {
             .unwrap();
         txn.commit().unwrap();
         assert!(goals.status(1).is_err());
+    }
+
+    // ---- script goals ----
+
+    use crate::journal::OpError;
+    use crate::js::{JsSettings, dedicated_executor, test_executor};
+
+    struct Rig {
+        _dir: TempDir,
+        db: Arc<Database>,
+        store: Store,
+        goals: Goals,
+        journal: Journal,
+    }
+
+    fn rig_with(js: JsExecutor, enable: bool) -> Rig {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let store = Store::durable(db.clone()).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        if enable {
+            goals.enable_scripts(store.clone(), js);
+        }
+        let journal = Journal::new(db.clone()).unwrap();
+        Rig {
+            _dir: dir,
+            db,
+            store,
+            goals,
+            journal,
+        }
+    }
+
+    fn rig() -> Rig {
+        rig_with(test_executor(), true)
+    }
+
+    impl Rig {
+        fn script(&self, source: &str) -> u64 {
+            self.goals
+                .create_script(0, "s".into(), source.into())
+                .unwrap()
+        }
+
+        /// Append `record` to the stream of `id`, as an earlier run would have.
+        fn seed(&self, id: u64, record: &Record) {
+            let next = self.journal.read(id).unwrap().len() as u64;
+            self.journal.append(id, next, record).unwrap();
+        }
+
+        /// Open the same database again, with scripts enabled.
+        fn reopen(self) -> Rig {
+            let Rig {
+                _dir, db, store, ..
+            } = self;
+            let goals = Goals::open(db.clone(), FAST).unwrap();
+            goals.enable_scripts(store.clone(), test_executor());
+            let journal = Journal::new(db.clone()).unwrap();
+            Rig {
+                _dir,
+                db,
+                store,
+                goals,
+                journal,
+            }
+        }
+    }
+
+    fn op(name: &str, args: &[&str], result: &str) -> Record {
+        Record::OpResult {
+            op: name.into(),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+            result: Ok::<_, OpError>(result.into()),
+        }
+    }
+
+    fn st(status: &'static str, output: Option<&str>, error: Option<&'static str>) -> GoalStatus {
+        GoalStatus {
+            status,
+            output: output.map(str::to_owned),
+            error,
+        }
+    }
+
+    #[test]
+    fn a_script_goal_runs_to_done_with_its_value_and_writes() {
+        let r = rig();
+        let id = r.script(
+            r#"Deno.core.ops.op_rs3_insert('{"n":"1"}');
+               const n = Number(Deno.core.ops.op_rs3_get('n'));
+               Deno.core.ops.op_rs3_insert(JSON.stringify({n: String(n + 1)}));
+               'finished'"#,
+        );
+        assert_eq!(r.goals.status(id).unwrap().unwrap().status, "queued");
+        drain(&r.goals);
+        assert_eq!(status(&r.goals, id), st("done", Some("finished"), None));
+        assert_eq!(r.store.get("n"), Ok("2".to_owned()));
+    }
+
+    #[test]
+    fn a_script_without_ops_ends_with_its_value() {
+        let r = rig();
+        let id = r.script("6 * 7");
+        drain(&r.goals);
+        assert_eq!(status(&r.goals, id), st("done", Some("42"), None));
+    }
+
+    #[test]
+    fn a_crashed_script_does_not_repeat_its_logged_write() {
+        let r = rig();
+        let id = r.script(
+            r#"Deno.core.ops.op_rs3_insert('{"a":"1"}');
+               Deno.core.ops.op_rs3_insert('{"b":"2"}');
+               'ok'"#,
+        );
+        // The first run logged its first write, which the store lacks.
+        r.seed(id, &op("op_rs3_insert", &[r#"{"a":"1"}"#], r#"{"a":"1"}"#));
+        let r = r.reopen();
+        drain(&r.goals);
+        assert_eq!(status(&r.goals, id), st("done", Some("ok"), None));
+        assert!(r.store.get("a").is_err());
+        assert_eq!(r.store.get("b"), Ok("2".to_owned()));
+    }
+
+    #[test]
+    fn a_fully_logged_script_finishes_without_running_anything() {
+        let r = rig();
+        let id = r.script(r#"Deno.core.ops.op_rs3_insert('{"a":"1"}'); 'ok'"#);
+        r.seed(id, &op("op_rs3_insert", &[r#"{"a":"1"}"#], r#"{"a":"1"}"#));
+        let r = r.reopen();
+        drain(&r.goals);
+        assert_eq!(status(&r.goals, id), st("done", Some("ok"), None));
+        assert!(r.store.get("a").is_err());
+    }
+
+    #[test]
+    fn queued_script_goals_survive_reopen_and_finished_ones_do_not() {
+        let r = rig();
+        let queued = r.script("1");
+        let r = r.reopen();
+        assert_eq!(r.goals.next_goal().map(|g| g.id), Some(queued));
+        r.goals.run(Goal {
+            id: queued,
+            budget: 0,
+        });
+        let r = r.reopen();
+        assert_eq!(r.goals.next_goal(), None);
+        assert_eq!(status(&r.goals, queued).status, "done");
+    }
+
+    #[test]
+    fn script_errors_are_durable_failures_with_no_output() {
+        let r = rig();
+        let thrown = r.script("throw new Error('boom')");
+        r.store
+            .insert("loop".into(), "Deno.core.ops.op_rs3_patch('loop')".into());
+        let deep = r.script("Deno.core.ops.op_rs3_patch('loop')");
+        drain(&r.goals);
+        let r = r.reopen();
+        assert_eq!(r.goals.next_goal(), None);
+        for id in [thrown, deep] {
+            assert_eq!(status(&r.goals, id), st("failed", None, Some("js_error")));
+        }
+    }
+
+    #[test]
+    fn a_script_that_runs_too_long_fails_with_js_timeout() {
+        let js = dedicated_executor(JsSettings {
+            timeout_ms: 100,
+            ..JsSettings::default()
+        });
+        let r = rig_with(js, true);
+        let id = r.script("while (true) {}");
+        drain(&r.goals);
+        assert_eq!(status(&r.goals, id), st("failed", None, Some("js_timeout")));
+    }
+
+    #[test]
+    fn a_script_that_disagrees_with_its_log_fails_with_replay_diverged() {
+        let r = rig();
+        let mismatch = r.script("Deno.core.ops.op_rs3_get('a')");
+        r.seed(mismatch, &op("op_rs3_get", &["b"], "1"));
+        let longer = r.script("'short'");
+        r.seed(longer, &op("op_rs3_get", &["a"], "1"));
+        let writer =
+            r.script(r#"Deno.core.ops.op_rs3_get('x'); Deno.core.ops.op_rs3_insert('{"w":"1"}')"#);
+        r.seed(writer, &op("op_rs3_get", &["y"], "1"));
+        let r = r.reopen();
+        drain(&r.goals);
+        for id in [mismatch, longer, writer] {
+            assert_eq!(
+                status(&r.goals, id),
+                st("failed", None, Some("replay_diverged"))
+            );
+        }
+        assert!(r.store.get("w").is_err());
+        assert_eq!(r.journal.read(longer).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_script_whose_lease_is_taken_over_stops_without_ending() {
+        let r = rig();
+        let id = r.script(
+            r#"Deno.core.ops.op_rs3_insert('{"a":"1"}');
+               while (Deno.core.ops.op_rs3_get('go') !== '1') {}
+               Deno.core.ops.op_rs3_insert('{"late":"1"}'); 'x'"#,
+        );
+        let goal = r.goals.next_goal().unwrap();
+        let worker = {
+            let goals = r.goals.clone();
+            std::thread::spawn(move || goals.run(goal))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while r.store.get("a").is_err() {
+            assert!(std::time::Instant::now() < deadline, "no write");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        lease::claim(&r.db, id).unwrap();
+        r.store.insert("go".into(), "1".into());
+        worker.join().unwrap();
+        let s = status(&r.goals, id);
+        assert!(s.status != "failed" && s.status != "running" && s.error.is_none());
+        assert!(r.store.get("late").is_err());
+        let last = r.journal.read(id).unwrap().pop().unwrap();
+        assert!(!matches!(last, Record::ScriptEnd { .. }));
+    }
+
+    #[test]
+    fn a_corrupt_script_record_fails_that_goal_only() {
+        let r = rig();
+        let bad = r.script("1");
+        let good = r.script("2");
+        tamper_record(&r.db, (bad, 0));
+        let r = r.reopen();
+        drain(&r.goals);
+        assert_eq!(
+            status(&r.goals, bad),
+            st("failed", None, Some("journal_corrupt"))
+        );
+        assert_eq!(status(&r.goals, good), st("done", Some("2"), None));
+    }
+
+    #[test]
+    fn without_scripts_enabled_a_script_goal_fails_in_memory_and_runs_after_reopen() {
+        let r = rig_with(test_executor(), false);
+        let id = r.script("'later'");
+        drain(&r.goals);
+        assert_eq!(
+            status(&r.goals, id),
+            st("failed", None, Some("storage_failure"))
+        );
+        let r = r.reopen();
+        drain(&r.goals);
+        assert_eq!(status(&r.goals, id), st("done", Some("later"), None));
+    }
+
+    #[test]
+    fn a_closed_js_pool_fails_in_memory_and_the_goal_resumes() {
+        let r = rig_with(JsExecutor::closed(), true);
+        let id = r.script("'later'");
+        drain(&r.goals);
+        assert_eq!(
+            status(&r.goals, id),
+            st("failed", None, Some("storage_failure"))
+        );
+        let r = r.reopen();
+        drain(&r.goals);
+        assert_eq!(status(&r.goals, id), st("done", Some("later"), None));
     }
 }
