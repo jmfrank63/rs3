@@ -11,6 +11,10 @@ use redb::{Database, WriteTransaction};
 
 use crate::journal::{Journal, JournalError, OpError, Record, ScriptFailure, storage};
 use crate::lease::{Fence, check_in};
+use crate::store::{Command, Response};
+
+/// How a cluster node commits a command through Raft and waits for its own copy to apply it.
+pub type Propose = Arc<dyn Fn(Command) -> Result<Response, JournalError> + Send + Sync>;
 
 /// Why a logged job may not run any more ops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +23,8 @@ pub enum LogStop {
     Fenced,
     /// The script did something the log says it did not do the first time.
     Diverged,
+    /// The cluster could not answer. The goal runs again from its committed log.
+    Unavailable,
 }
 
 /// What the log says about the op a script is about to run.
@@ -30,6 +36,22 @@ pub enum Replay {
     Logged(Result<String, OpError>),
     /// The op differs from the logged one. The log is now stopped.
     Diverged,
+}
+
+/// Why a command was not committed: a taken-over lease is `Fenced`, any other answer is a bug.
+fn not_appended(answer: Response) -> JournalError {
+    match answer {
+        Response::Fenced {
+            task,
+            held,
+            current,
+        } => JournalError::Fenced {
+            task,
+            held,
+            current,
+        },
+        other => JournalError::Storage(format!("unexpected answer: {other:?}")),
+    }
 }
 
 struct Logged {
@@ -50,6 +72,8 @@ pub struct OpLog {
     db: Arc<Database>,
     journal: Journal,
     fence: Fence,
+    /// Set on a cluster node: ops commit through Raft instead of the local database.
+    propose: Option<Propose>,
     state: Mutex<State>,
 }
 
@@ -72,6 +96,7 @@ impl OpLog {
             db,
             journal,
             fence,
+            propose: None,
             state: Mutex::new(State {
                 ops,
                 cursor: 0,
@@ -79,6 +104,17 @@ impl OpLog {
                 stop: None,
             }),
         }
+    }
+
+    /// Commit every op and the end through `propose` instead of the local database.
+    pub fn in_cluster(mut self, propose: Propose) -> Self {
+        self.propose = Some(propose);
+        self
+    }
+
+    /// Whether ops commit through Raft.
+    pub fn is_cluster(&self) -> bool {
+        self.propose.is_some()
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -157,16 +193,73 @@ impl OpLog {
         args: &[String],
         result: &Result<String, OpError>,
     ) -> Result<(), JournalError> {
+        if self.is_cluster() {
+            return self.commit(op, args, result, None).map(drop);
+        }
         let txn = self.db.begin_write().map_err(storage)?;
         self.append(&txn, op, args, result)?;
         txn.commit().map_err(storage)
     }
 
+    /// Commit a live op through Raft: its record and `write` apply as one command under the
+    /// fence. The answer is `Removed` with the value a `Remove` took out, or `Missing` when
+    /// that key was already gone: the record is appended as given and nothing else is written.
+    pub fn commit(
+        &self,
+        op: &str,
+        args: &[String],
+        result: &Result<String, OpError>,
+        write: Option<Command>,
+    ) -> Result<Response, JournalError> {
+        let Some(propose) = &self.propose else {
+            return Err(JournalError::Storage("not a cluster log".into()));
+        };
+        let seq = self.state().next_seq;
+        let record = Record::OpResult {
+            op: op.to_owned(),
+            args: args.to_vec(),
+            result: result.clone(),
+        };
+        let answer = propose(Command::ScriptOp {
+            task: self.fence.task,
+            token: self.fence.token,
+            seq,
+            record,
+            write: write.map(Box::new),
+        })?;
+        let logged = match &answer {
+            Response::Appended | Response::Missing => result.clone(),
+            Response::Removed(old) => Ok(old.clone()),
+            _ => return Err(not_appended(answer)),
+        };
+        let mut state = self.state();
+        state.next_seq += 1;
+        state.ops.push(Logged {
+            op: op.to_owned(),
+            args: args.to_vec(),
+            result: logged,
+        });
+        state.cursor = state.ops.len();
+        Ok(answer)
+    }
+
     /// End the stream with `outcome`, under the fence.
     pub fn end(&self, outcome: Result<String, ScriptFailure>) -> Result<(), JournalError> {
+        let next_seq = self.state().next_seq;
+        if let Some(propose) = &self.propose {
+            let answer = propose(Command::Append {
+                task: self.fence.task,
+                token: self.fence.token,
+                seq: next_seq,
+                records: vec![Record::ScriptEnd { outcome }],
+            })?;
+            return match answer {
+                Response::Appended => Ok(()),
+                other => Err(not_appended(other)),
+            };
+        }
         let txn = self.db.begin_write().map_err(storage)?;
         check_in(&txn, &self.fence)?;
-        let next_seq = self.state().next_seq;
         self.journal.append_in(
             &txn,
             self.fence.task,

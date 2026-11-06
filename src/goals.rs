@@ -5,8 +5,9 @@
 //! is written in the same transaction as the stream's start record, so a goal
 //! exists completely or not at all. A goal's id is its stream id.
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -18,7 +19,8 @@ use crate::js::executor::JsExecutor;
 use crate::js::oplog::{LogStop, OpLog};
 use crate::lease::{self, Fence};
 use crate::model::{FakeModel, Model};
-use crate::store::Store;
+use crate::raft::Node;
+use crate::store::{Command, GoalEvent, Response, Store};
 
 const GOALS: TableDefinition<u64, (i64, u64)> = TableDefinition::new("goals");
 
@@ -47,7 +49,12 @@ pub struct GoalStatus {
     pub status: &'static str,
     pub output: Option<String>,
     pub error: Option<&'static str>,
+    /// The node the goal is assigned to; `None` on a single node or while unassigned.
+    pub node: Option<u64>,
 }
+
+/// How long a worker waits before it tries a cluster command again.
+const RETRY_PAUSE: Duration = Duration::from_millis(100);
 
 /// The status and error of a goal that has no durable result.
 fn flags(
@@ -87,6 +94,51 @@ struct Inner {
     token_secs: f64,
     /// What script goals run against; unset until `enable_scripts`.
     scripts: OnceLock<(Store, JsExecutor)>,
+    /// This node's id in a cluster; `None` on a single node.
+    me: Option<u64>,
+    /// The Raft node goal commands go through; unset until `connect`.
+    cluster: OnceLock<Arc<Node>>,
+    /// Tokens this node has generated, including any it generated again.
+    generated: AtomicU64,
+}
+
+/// Add the stream of goal `start` and row in `txn` under the next free id. The stream is written
+/// first, so a refusal leaves no row behind.
+pub(crate) fn create_in(
+    txn: &redb::WriteTransaction,
+    journal: &Journal,
+    priority: i64,
+    budget: u64,
+    start: &Record,
+) -> Result<u64, JournalError> {
+    let mut table = txn.open_table(GOALS).map_err(storage)?;
+    let id = table
+        .last()
+        .map_err(storage)?
+        .map_or(1, |(key, _)| key.value() + 1);
+    journal.append_in(txn, id, 0, start)?;
+    table.insert(id, (priority, budget)).map_err(storage)?;
+    Ok(id)
+}
+
+/// End goal `id` in `txn`, taking over its lease so a running worker is fenced out. Returns
+/// false, writing nothing, when the goal has ended, is corrupt or does not exist.
+pub(crate) fn cancel_in(
+    txn: &redb::WriteTransaction,
+    journal: &Journal,
+    id: u64,
+) -> Result<bool, JournalError> {
+    // The transaction holds the writer, so the read sees the latest committed state.
+    let seq = match journal.read(id) {
+        Ok(records) if records.last().is_some_and(|last| !last.ends_stream()) => {
+            records.len() as u64
+        }
+        Ok(_) | Err(JournalError::Corrupt { .. }) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    lease::claim_in(txn, id, None)?;
+    journal.append_in(txn, id, seq, &Record::Cancelled)?;
+    Ok(true)
 }
 
 /// Shared handle to the goals of one database.
@@ -98,6 +150,68 @@ impl Goals {
     /// stream fails verification is logged once and left out.
     /// Workers emit `rate` tokens per second.
     pub fn open(db: Arc<Database>, rate: NonZeroU32) -> Result<Self, JournalError> {
+        Self::build(db, rate, None)
+    }
+
+    /// Like `open` for node `me` of a cluster: only goals assigned to `me` are queued, and goal
+    /// commands go through Raft once `connect` has run. `store` tells this node's goals of the
+    /// goals assigned to it and cancelled.
+    pub fn open_in_cluster(
+        db: Arc<Database>,
+        rate: NonZeroU32,
+        me: u64,
+        store: &Store,
+    ) -> Result<Self, JournalError> {
+        let goals = Self::build(db, rate, Some(me))?;
+        let weak = Arc::downgrade(&goals.0);
+        store.on_goal_event(move |event| {
+            if let Some(inner) = weak.upgrade() {
+                Self(inner).on_event(&event);
+            }
+        });
+        Ok(goals)
+    }
+
+    /// The `Assign` commands that hand every live goal without a live owner to the live member
+    /// with the fewest goals, counting its own picks; ties go to the lowest id. A goal whose owner
+    /// is not in `live` is moved with its current token, so a replayed plan changes nothing. Ended
+    /// and corrupt goals are ignored.
+    pub fn plan_assignments(&self, live: &[u64]) -> Result<Vec<Command>, JournalError> {
+        let mut load: BTreeMap<u64, usize> = live.iter().map(|&m| (m, 0)).collect();
+        let mut orphans = Vec::new();
+        for task in self.0.journal.live_streams()? {
+            let owner = lease::owner(&self.0.db, task)?;
+            match owner.and_then(|node| load.get_mut(&node)) {
+                Some(n) => *n += 1,
+                None => orphans.push(task),
+            }
+        }
+        let mut plan = Vec::new();
+        for task in orphans {
+            let Some((&node, _)) = load.iter().min_by_key(|&(&id, &n)| (n, id)) else {
+                break;
+            };
+            load.insert(node, load[&node] + 1);
+            plan.push(Command::Assign {
+                task,
+                node,
+                expect_token: lease::token(&self.0.db, task)?,
+            });
+        }
+        Ok(plan)
+    }
+
+    /// How many tokens this node has generated so far, tokens it had to generate again included.
+    pub fn generated_tokens(&self) -> u64 {
+        self.0.generated.load(Ordering::Relaxed)
+    }
+
+    /// Send goal commands through `node`. Until then they answer `Unavailable`.
+    pub fn connect(&self, node: Arc<Node>) {
+        let _ = self.0.cluster.set(node);
+    }
+
+    fn build(db: Arc<Database>, rate: NonZeroU32, me: Option<u64>) -> Result<Self, JournalError> {
         let journal = Journal::new(db.clone())?;
         let txn = db.begin_write().map_err(storage)?;
         txn.open_table(GOALS).map_err(storage)?;
@@ -109,11 +223,16 @@ impl Goals {
             wake: Condvar::new(),
             token_secs: 1.0 / f64::from(rate.get()),
             scripts: OnceLock::new(),
+            me,
+            cluster: OnceLock::new(),
+            generated: AtomicU64::new(0),
         }));
         for goal in goals.all()? {
             match goals.0.journal.read(goal.id) {
                 Ok(records) if records.last().is_some_and(|last| !last.ends_stream()) => {
-                    goals.sched().queue.push(goal);
+                    if goals.mine(goal.id)? {
+                        goals.sched().queue.push(goal);
+                    }
                 }
                 Ok(_) => {}
                 Err(e @ JournalError::Corrupt { .. }) => eprintln!("error: goal {}: {e}", goal.id),
@@ -140,6 +259,48 @@ impl Goals {
 
     fn sched(&self) -> MutexGuard<'_, Sched> {
         self.0.sched.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether this node runs goal `id`: always on a single node, else when it is assigned here.
+    fn mine(&self, id: u64) -> Result<bool, JournalError> {
+        Ok(self.0.me.is_none() || lease::owner(&self.0.db, id)? == self.0.me)
+    }
+
+    /// Queue goal `id` unless it is queued or running. Never proposes: it runs on the apply thread.
+    fn on_event(&self, event: &GoalEvent) {
+        match *event {
+            GoalEvent::Assigned { task, node } if Some(node) == self.0.me => {
+                let goal = self
+                    .all()
+                    .ok()
+                    .and_then(|all| all.into_iter().find(|g| g.id == task));
+                let mut sched = self.sched();
+                if let Some(goal) = goal
+                    && !sched.running.contains_key(&task)
+                    && !sched.queue.iter().any(|g| g.id == task)
+                {
+                    sched.queue.push(goal);
+                    self.0.wake.notify_one();
+                }
+            }
+            GoalEvent::Cancelled { task } => self.sched().queue.retain(|g| g.id != task),
+            GoalEvent::Assigned { .. } => {}
+        }
+    }
+
+    /// Run `cmd` through Raft and wait for this node to apply it. A cluster that cannot answer
+    /// now is `Unavailable`, and so is a node that has not been connected.
+    fn propose(&self, cmd: Command) -> Result<Response, JournalError> {
+        let node = self
+            .0
+            .cluster
+            .get()
+            .ok_or_else(|| JournalError::Unavailable("node is not connected".into()))?;
+        match node.propose_blocking(cmd) {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(e)) => Err(JournalError::Storage(e)),
+            Err(e) => Err(JournalError::Unavailable(e.to_string())),
+        }
     }
 
     /// Run script goals against `store` on `js`. Call it once, before the
@@ -172,17 +333,21 @@ impl Goals {
     }
 
     fn insert_goal(&self, priority: i64, budget: u64, start: &Record) -> Result<u64, JournalError> {
+        if self.0.me.is_some() {
+            // The leader assigns it; nothing runs until then.
+            return match self.propose(Command::CreateGoal {
+                priority,
+                budget,
+                start: start.clone(),
+            })? {
+                Response::GoalCreated(id) => Ok(id),
+                other => Err(JournalError::Storage(format!(
+                    "unexpected answer: {other:?}"
+                ))),
+            };
+        }
         let txn = self.0.db.begin_write().map_err(storage)?;
-        let id = {
-            let mut table = txn.open_table(GOALS).map_err(storage)?;
-            let id = table
-                .last()
-                .map_err(storage)?
-                .map_or(1, |(key, _)| key.value() + 1);
-            table.insert(id, (priority, budget)).map_err(storage)?;
-            id
-        };
-        self.0.journal.append_in(&txn, id, 0, start)?;
+        let id = create_in(&txn, &self.0.journal, priority, budget, start)?;
         txn.commit().map_err(storage)?;
         self.sched().queue.push(Goal {
             id,
@@ -198,10 +363,16 @@ impl Goals {
     pub fn status(&self, id: u64) -> Result<Option<GoalStatus>, JournalError> {
         // Read the flags before the stream: the other order can report a goal
         // that finished in between as queued.
+        let node = if self.0.me.is_some() {
+            lease::owner(&self.0.db, id)?
+        } else {
+            None
+        };
         let (running, failed) = {
             let sched = self.sched();
             (
-                sched.running.contains_key(&id),
+                // Assigned elsewhere and not ended: running there.
+                sched.running.contains_key(&id) || node.is_some_and(|n| Some(n) != self.0.me),
                 sched.failures.contains_key(&id),
             )
         };
@@ -212,6 +383,7 @@ impl Goals {
                     status: "failed",
                     output: None,
                     error: Some("journal_corrupt"),
+                    node,
                 }));
             }
             Err(e) => return Err(e),
@@ -238,6 +410,7 @@ impl Goals {
             status,
             output,
             error,
+            node,
         }))
     }
 
@@ -246,25 +419,14 @@ impl Goals {
     /// and its next commit is refused. A goal that has already ended, or whose
     /// stream is corrupt, is left as it is. Returns the goal's status.
     pub fn cancel(&self, id: u64) -> Result<Option<GoalStatus>, JournalError> {
+        if self.0.me.is_some() {
+            self.propose(Command::CancelGoal { id })?;
+            return self.status(id);
+        }
         let txn = self.0.db.begin_write().map_err(storage)?;
-        // This transaction holds the writer, so the read sees the latest state.
-        let live = match self.0.journal.read(id) {
-            Ok(records) => records
-                .last()
-                .is_some_and(|last| !last.ends_stream())
-                .then_some(records.len() as u64),
-            Err(JournalError::Corrupt { .. }) => None,
-            Err(e) => return Err(e),
-        };
-        if let Some(seq) = live {
-            lease::claim_in(&txn, id)?;
-            self.0
-                .journal
-                .append_in(&txn, id, seq, &Record::Cancelled)?;
+        if cancel_in(&txn, &self.0.journal, id)? {
             txn.commit().map_err(storage)?;
             self.sched().queue.retain(|g| g.id != id);
-        } else {
-            drop(txn);
         }
         self.status(id)
     }
@@ -290,14 +452,24 @@ impl Goals {
             tokens.push(token);
             rng = next;
         }
+        self.0.generated.fetch_add(count, Ordering::Relaxed);
         let finished = done + count >= goal.budget;
         std::thread::sleep(Duration::from_secs_f64(count as f64 * self.0.token_secs));
-        let txn = self.0.db.begin_write().map_err(storage)?;
-        lease::check_in(&txn, fence)?;
         let record = Record::Tokens {
             tokens,
             rng_state: rng,
         };
+        if self.0.me.is_some() {
+            let mut records = vec![record];
+            if finished {
+                records.push(Record::InferenceEnd {
+                    reason: "budget".into(),
+                });
+            }
+            return self.append(goal.id, fence, state.next_seq, records);
+        }
+        let txn = self.0.db.begin_write().map_err(storage)?;
+        lease::check_in(&txn, fence)?;
         self.0
             .journal
             .append_in(&txn, goal.id, state.next_seq, &record)?;
@@ -311,6 +483,39 @@ impl Goals {
         }
         txn.commit().map_err(storage)?;
         Ok(finished)
+    }
+
+    /// Append `records` through Raft under `fence`; returns whether the goal had ended or now has.
+    fn append(
+        &self,
+        id: u64,
+        fence: &Fence,
+        seq: u64,
+        records: Vec<Record>,
+    ) -> Result<bool, JournalError> {
+        let ends = records.last().is_some_and(Record::ends_stream);
+        match self.propose(Command::Append {
+            task: id,
+            token: fence.token,
+            seq,
+            records,
+        })? {
+            Response::Appended => Ok(ends),
+            Response::Fenced {
+                task,
+                held,
+                current,
+            } => Err(JournalError::Fenced {
+                task,
+                held,
+                current,
+            }),
+            // This node's copy was behind; the caller reads again and retries.
+            Response::Refused(code) => Err(JournalError::Unavailable(code)),
+            other => Err(JournalError::Storage(format!(
+                "unexpected answer: {other:?}"
+            ))),
+        }
     }
 
     /// When every worker is busy and a queued goal outranks the lowest running
@@ -389,12 +594,12 @@ impl Goals {
         let Some((store, js)) = self.0.scripts.get() else {
             return Err(JournalError::Storage("scripts are not enabled".into()));
         };
-        let log = Arc::new(OpLog::new(
-            self.0.db.clone(),
-            self.0.journal.clone(),
-            fence,
-            records,
-        ));
+        let mut log = OpLog::new(self.0.db.clone(), self.0.journal.clone(), fence, records);
+        if self.0.me.is_some() {
+            let goals = self.clone();
+            log = log.in_cluster(Arc::new(move |cmd| goals.propose(cmd)));
+        }
+        let log = Arc::new(log);
         let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -408,6 +613,9 @@ impl Goals {
         let outcome = match (log.stopped(), result) {
             (Some(LogStop::Fenced), _) => return Ok(()),
             (Some(LogStop::Diverged), _) => Err(ScriptFailure::ReplayDiverged),
+            (Some(LogStop::Unavailable), _) => {
+                return Err(JournalError::Unavailable("op not committed".into()));
+            }
             (None, Err(ExecError::Internal(e))) => return Err(JournalError::Storage(e)),
             (None, Err(ExecError::Unavailable)) => {
                 return Err(JournalError::Storage(ExecError::Unavailable.to_string()));
@@ -425,7 +633,68 @@ impl Goals {
         log.end(outcome)
     }
 
+    /// Run `f` until the cluster can answer: wait out `Unavailable` and try again. Before each
+    /// retry this node waits until it has applied everything committed, so `f` does not redo a
+    /// write whose answer was lost. While there is no quorum, it keeps waiting.
+    fn retry<T>(&self, mut f: impl FnMut() -> Result<T, JournalError>) -> Result<T, JournalError> {
+        loop {
+            match f() {
+                Err(JournalError::Unavailable(_)) => {
+                    std::thread::sleep(RETRY_PAUSE);
+                    if let Some(node) = self.0.cluster.get() {
+                        while node.handle().block_on(node.read_barrier()).is_err() {
+                            std::thread::sleep(RETRY_PAUSE);
+                        }
+                    }
+                }
+                done => return done,
+            }
+        }
+    }
+
+    /// Run `goal` on node `me`: claim it through Raft, then step it until it ends. A cluster that
+    /// cannot answer, or a copy that lags, is waited out and retried from the committed state.
+    fn drive_cluster(&self, goal: &Goal, me: u64) -> Result<(), JournalError> {
+        let records = self.0.journal.read(goal.id)?;
+        if records.last().is_some_and(Record::ends_stream) {
+            return Ok(());
+        }
+        let claim = Command::Claim {
+            task: goal.id,
+            node: me,
+        };
+        let fence = match self.retry(|| self.propose(claim.clone()))? {
+            Response::Claimed { token } => Fence {
+                task: goal.id,
+                token,
+            },
+            Response::Refused(_) => return Ok(()),
+            other => {
+                return Err(JournalError::Storage(format!(
+                    "unexpected answer: {other:?}"
+                )));
+            }
+        };
+        if matches!(records.first(), Some(Record::ScriptStart { .. })) {
+            // Each try replays the committed log, which a failed commit may have extended.
+            return self.retry(|| {
+                let records = self.0.journal.read(goal.id)?;
+                match records.first() {
+                    Some(Record::ScriptStart { name, source }) => {
+                        self.run_script(goal, fence.clone(), name, source, &records)
+                    }
+                    _ => Ok(()),
+                }
+            });
+        }
+        while !self.retry(|| self.step(goal, &fence))? {}
+        Ok(())
+    }
+
     fn drive(&self, goal: &Goal) -> Result<(), JournalError> {
+        if let Some(me) = self.0.me {
+            return self.drive_cluster(goal, me);
+        }
         let fence = lease::claim(&self.0.db, goal.id)?;
         // A takeover between `take` and this claim was just overwritten.
         self.preempt();
@@ -447,11 +716,14 @@ impl Goals {
     pub fn run(&self, goal: Goal) {
         let requeue = match self.drive(&goal) {
             Err(e) if !matches!(e, JournalError::Fenced { .. }) => Err(e),
-            _ => self
-                .0
-                .journal
-                .read(goal.id)
-                .map(|records| records.last().is_some_and(|last| !last.ends_stream())),
+            _ => self.0.journal.read(goal.id).and_then(|records| {
+                // Queue it again only while it is live and still assigned here.
+                if records.last().is_some_and(|last| !last.ends_stream()) {
+                    self.mine(goal.id)
+                } else {
+                    Ok(false)
+                }
+            }),
         };
         let mut sched = self.sched();
         sched.running.remove(&goal.id);
@@ -488,20 +760,104 @@ mod tests {
         }
     }
 
+    fn assign_to(db: &Database, task: u64, node: u64) {
+        let txn = db.begin_write().unwrap();
+        lease::claim_in(&txn, task, Some(node)).unwrap();
+        txn.commit().unwrap();
+    }
+
+    fn picks(plan: Vec<Command>) -> Vec<(u64, u64)> {
+        plan.into_iter()
+            .map(|c| match c {
+                Command::Assign {
+                    task,
+                    node,
+                    expect_token: 0,
+                } => (task, node),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plan_moves_goals_of_a_lost_node_to_the_least_loaded_live_node() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        for seed in 0..4 {
+            goals.create(spec(5, seed)).unwrap();
+        }
+        for (task, node) in [(1, 1), (2, 2), (3, 1), (4, 2)] {
+            assign_to(&db, task, node);
+        }
+        assert!(goals.plan_assignments(&[1, 2, 3]).unwrap().is_empty());
+        let plan = goals.plan_assignments(&[2, 3]).unwrap();
+        let moves: Vec<_> = plan
+            .iter()
+            .map(|c| match c {
+                Command::Assign {
+                    task,
+                    node,
+                    expect_token,
+                } => (*task, *node, *expect_token),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(moves, vec![(1, 3, 1), (3, 3, 1)]);
+        // Once the plan is applied nothing is left to move.
+        assign_to(&db, 1, 3);
+        assign_to(&db, 3, 3);
+        assert!(goals.plan_assignments(&[2, 3]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn plan_spreads_unassigned_goals_one_per_member_lowest_id_first() {
+        let dir = TempDir::new();
+        let goals = goals_at(&dir.path().join("db"));
+        for seed in 0..3 {
+            goals.create(spec(5, seed)).unwrap();
+        }
+        let plan = picks(goals.plan_assignments(&[3, 1, 2]).unwrap());
+        assert_eq!(plan, vec![(1, 1), (2, 2), (3, 3)]);
+        assert_eq!(goals.plan_assignments(&[]).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn plan_respects_existing_load_and_ignores_ended_goals() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        for seed in 0..5 {
+            goals.create(spec(5, seed)).unwrap();
+        }
+        assign_to(&db, 1, 1);
+        assign_to(&db, 2, 1);
+        assign_to(&db, 3, 9); // node 9 is live with one goal
+        goals.cancel(5).unwrap();
+        // Goal 4 is the only live unassigned goal; node 2 carries less than node 1.
+        let plan = picks(goals.plan_assignments(&[1, 2, 9]).unwrap());
+        assert_eq!(plan, vec![(4, 2)]);
+    }
+
     fn goals_at(path: &Path) -> Goals {
         Goals::open(open(path).unwrap(), FAST).unwrap()
     }
 
     /// Run `f` on its own thread and fail the test, never hang it, if it takes
-    /// over 30 s. A stuck thread dies with the test process.
+    /// over 20 s. A stuck thread dies with the test process.
     fn within_deadline<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        within(20, f)
+    }
+
+    /// Like `within_deadline`, with a limit of `secs`.
+    fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
             let _ = tx.send(f());
         });
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        match rx.recv_timeout(Duration::from_secs(secs)) {
             Ok(value) => value,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("stuck for over 30 s"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("stuck for over {secs} s"),
             Err(_) => std::panic::resume_unwind(thread.join().unwrap_err()),
         }
     }
@@ -591,7 +947,8 @@ mod tests {
             GoalStatus {
                 status: "queued",
                 output: Some(String::new()),
-                error: None
+                error: None,
+                node: None
             }
         );
         assert_eq!(
@@ -612,6 +969,22 @@ mod tests {
         let id = goals.create(spec(5, 1)).unwrap();
         let _goal = goals.next_goal().unwrap();
         assert_eq!(status(&goals, id).status, "running");
+    }
+
+    #[test]
+    fn a_cluster_node_queues_after_a_restart_only_the_goals_assigned_to_it() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let id = Goals::open(db.clone(), FAST)
+            .unwrap()
+            .create(spec(5, 1))
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        lease::claim_in(&txn, id, Some(2)).unwrap();
+        txn.commit().unwrap();
+        let on = |node| Goals::open_in_cluster(db.clone(), FAST, node, &Store::new()).unwrap();
+        assert_eq!(on(1).next_goal(), None);
+        assert_eq!(on(2).next_goal().map(|g| g.id), Some(id));
     }
 
     #[test]
@@ -806,7 +1179,7 @@ mod tests {
     }
 
     fn wait_for(what: &str, cond: impl Fn() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while !cond() {
             assert!(std::time::Instant::now() < deadline, "never: {what}");
             std::thread::sleep(Duration::from_millis(5));
@@ -815,19 +1188,21 @@ mod tests {
 
     #[test]
     fn a_higher_goal_takes_the_worker_and_the_lower_one_resumes_after() {
-        let (goals, low, high) = low_then_high(0, 5);
-        run(&goals, low.clone());
-        let s = status(&goals, low.id);
-        assert_eq!(s.status, "paused");
-        assert!(token_count(&s.output.unwrap()) < 20);
-        let next = goals.next_goal().unwrap();
-        assert_eq!(next.id, high);
-        run(&goals, next);
-        assert_eq!(status(&goals, high).status, "done");
-        assert_ne!(status(&goals, low.id).status, "done");
-        drain(&goals);
-        assert_eq!(output(&goals, low.id), undisturbed(20, 1));
-        assert_eq!(output(&goals, high), undisturbed(20, 2));
+        within(10, || {
+            let (goals, low, high) = low_then_high(0, 5);
+            run(&goals, low.clone());
+            let s = status(&goals, low.id);
+            assert_eq!(s.status, "paused");
+            assert!(token_count(&s.output.unwrap()) < 20);
+            let next = goals.next_goal().unwrap();
+            assert_eq!(next.id, high);
+            run(&goals, next);
+            assert_eq!(status(&goals, high).status, "done");
+            assert_ne!(status(&goals, low.id).status, "done");
+            drain(&goals);
+            assert_eq!(output(&goals, low.id), undisturbed(20, 1));
+            assert_eq!(output(&goals, high), undisturbed(20, 2));
+        });
     }
 
     #[test]
@@ -874,6 +1249,7 @@ mod tests {
             status: "failed",
             output: None,
             error: Some("journal_corrupt"),
+            node: None,
         };
         assert_eq!(status(&goals, bad), failed);
         wait_for("good done", || status(&goals, good).status == "done");
@@ -894,24 +1270,26 @@ mod tests {
 
     #[test]
     fn with_one_worker_the_higher_goal_finishes_first_and_both_come_out_right() {
-        let (goals, _db, _dir) = slow_goals(80);
-        goals.start_workers(NonZeroUsize::new(1).unwrap());
-        let low = goals
-            .create(GoalSpec {
-                priority: 0,
-                budget: 400,
-                seed: 1,
-                prompt: "hello".into(),
-            })
-            .unwrap();
-        wait_for("low progress", || !output(&goals, low).is_empty());
-        let high = goals.create(spec_p(5, 2)).unwrap();
-        wait_for("high done", || status(&goals, high).status == "done");
-        assert_ne!(status(&goals, low).status, "done");
-        assert!(token_count(&output(&goals, low)) < 400);
-        wait_for("low done", || status(&goals, low).status == "done");
-        assert_eq!(output(&goals, low), undisturbed(400, 1));
-        assert_eq!(output(&goals, high), undisturbed(20, 2));
+        within(15, || {
+            let (goals, _db, _dir) = slow_goals(80);
+            goals.start_workers(NonZeroUsize::new(1).unwrap());
+            let low = goals
+                .create(GoalSpec {
+                    priority: 0,
+                    budget: 400,
+                    seed: 1,
+                    prompt: "hello".into(),
+                })
+                .unwrap();
+            wait_for("low progress", || !output(&goals, low).is_empty());
+            let high = goals.create(spec_p(5, 2)).unwrap();
+            wait_for("high done", || status(&goals, high).status == "done");
+            assert_ne!(status(&goals, low).status, "done");
+            assert!(token_count(&output(&goals, low)) < 400);
+            wait_for("low done", || status(&goals, low).status == "done");
+            assert_eq!(output(&goals, low), undisturbed(400, 1));
+            assert_eq!(output(&goals, high), undisturbed(20, 2));
+        });
     }
 
     fn ops(r: &Rig, id: u64) -> usize {
@@ -1033,7 +1411,8 @@ mod tests {
             GoalStatus {
                 status: "failed",
                 output: None,
-                error: Some("journal_corrupt")
+                error: Some("journal_corrupt"),
+                node: None
             }
         );
         drop((goals, db));
@@ -1058,7 +1437,8 @@ mod tests {
             GoalStatus {
                 status: "failed",
                 output: Some(String::new()),
-                error: Some("storage_failure")
+                error: Some("storage_failure"),
+                node: None
             }
         );
         assert_eq!(goals.next_goal(), None);
@@ -1161,6 +1541,7 @@ mod tests {
             status,
             output: output.map(str::to_owned),
             error,
+            node: None,
         }
     }
 

@@ -18,7 +18,7 @@ use deno_error::{JsErrorBox, JsErrorClass};
 use super::oplog::{LogStop, OpLog, Replay};
 use super::{DepthStop, ExecError, JobState};
 use crate::journal::{JournalError, OpError};
-use crate::store::{Store, StoreError, legacy};
+use crate::store::{Command, Response, Store, StoreError, legacy};
 
 /// Per-job context the ops read from `OpState`.
 #[derive(Clone)]
@@ -189,6 +189,7 @@ fn stop_error(stop: LogStop) -> JsErrorBox {
     JsErrorBox::generic(match stop {
         LogStop::Fenced => "fenced",
         LogStop::Diverged => "replay diverged",
+        LogStop::Unavailable => "unavailable",
     })
 }
 
@@ -221,6 +222,12 @@ fn log_failure(ctx: &ExecCtx, e: &JournalError) -> JsErrorBox {
             log.stop(LogStop::Fenced);
         }
         return stop_error(LogStop::Fenced);
+    }
+    if matches!(e, JournalError::Unavailable(_)) {
+        if let Some(log) = &ctx.log {
+            log.stop(LogStop::Unavailable);
+        }
+        return stop_error(LogStop::Unavailable);
     }
     ctx.log_error(format_args!("error: op log append failed: {e:?}"));
     ctx.note_host_fault();
@@ -410,6 +417,13 @@ fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, 
     };
     let echo = legacy::format_insert_echo(&entries);
     let logged = Ok(echo.clone());
+    if let Some(log) = ctx.log.as_ref().filter(|log| log.is_cluster()) {
+        let write = Command::Put { entries };
+        return match log.commit("op_rs3_insert", &args, &logged, Some(write)) {
+            Ok(_) => Ok(echo),
+            Err(e) => Err(log_failure(ctx, &e)),
+        };
+    }
     let mut failed = None;
     let written = ctx
         .store
@@ -433,6 +447,23 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
     let args = [key.0];
     if let Some(logged) = replayed(ctx, "op_rs3_delete", &args) {
         return logged;
+    }
+    if let Some(log) = ctx.log.as_ref().filter(|log| log.is_cluster()) {
+        let write = Command::Remove {
+            key: args[0].clone(),
+        };
+        // The logged result is a placeholder: a removal logs the value it removed, and a
+        // missing key logs this refusal.
+        let missing = to_js(StoreError::NotFound(args[0].clone()));
+        let refusal = Err(OpError {
+            class: missing.get_class().into_owned(),
+            message: missing.get_message().into_owned(),
+        });
+        return match log.commit("op_rs3_delete", &args, &refusal, Some(write)) {
+            Ok(Response::Removed(old)) => Ok(old),
+            Ok(_) => Err(missing),
+            Err(e) => Err(log_failure(ctx, &e)),
+        };
     }
     let mut failed = None;
     let removed = ctx.store.remove_with(&args[0], |txn, old| {

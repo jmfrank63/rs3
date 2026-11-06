@@ -27,12 +27,13 @@ code or the test. If that seems impossible, report a blocker.
 Before finishing a task that changes Rust code, run mutation testing on that task's change:
 
 ```sh
-git diff HEAD -- src > target/task.diff   # or the task's commit range
-cargo mutants --in-place --no-shuffle --in-diff target/task.diff
+bash scripts/quality.sh mutants HEAD                      # uncommitted changes; or the task's base commit
+bash scripts/quality.sh mutants HEAD --file src/goals.rs  # extra arguments go to cargo mutants
 ```
 
-Kill every surviving mutant with a behavioural test, or remove the code it shows to be unnecessary. An agent's
-foreground command is capped at 10 minutes, so split a long run with `--file`. The maintainer runs the full gate
+Use this command as written in a task's Verify line. Kill every surviving mutant with a behavioural test, or
+remove the code it shows to be unnecessary. An agent's foreground command is capped at 10 minutes, so split a
+long run with `--file`. The maintainer runs the full gate
 (`bash scripts/quality.sh full <base>`) at the end of each slice. `--in-place` edits source files while it runs,
 so never run anything else in this checkout at the same time.
 

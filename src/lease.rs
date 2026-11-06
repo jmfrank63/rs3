@@ -1,10 +1,12 @@
 //! Durable leases. A claim bumps a task's fencing token; a commit checks its
 //! token inside its own transaction, so a stale holder can never commit.
-use redb::{Database, ReadableTable, TableDefinition, WriteTransaction};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
 use crate::journal::{JournalError, storage};
 
 const LEASES: TableDefinition<u64, u64> = TableDefinition::new("leases");
+/// The node a task is assigned to; written only when a claim names an owner.
+const OWNERS: TableDefinition<u64, u64> = TableDefinition::new("lease_owner");
 
 /// Proof of a claim on `task`, valid until a later claim takes it over.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,27 +19,73 @@ pub struct Fence {
 /// claim always succeeds.
 pub fn claim(db: &Database, task: u64) -> Result<Fence, JournalError> {
     let txn = db.begin_write().map_err(storage)?;
-    let fence = claim_in(&txn, task)?;
+    let fence = claim_in(&txn, task, None)?;
     txn.commit().map_err(storage)?;
     Ok(fence)
 }
 
-/// Take over `task` inside `txn`, so the claim commits with the caller's writes.
-pub fn claim_in(txn: &WriteTransaction, task: u64) -> Result<Fence, JournalError> {
-    let mut leases = txn.open_table(LEASES).map_err(storage)?;
-    let token = leases.get(task).map_err(storage)?.map_or(0, |t| t.value()) + 1;
-    leases.insert(task, token).map_err(storage)?;
+/// Take over `task` inside `txn`, so the claim commits with the caller's writes. A given
+/// `owner` is recorded as the node the task belongs to.
+pub fn claim_in(
+    txn: &WriteTransaction,
+    task: u64,
+    owner: Option<u64>,
+) -> Result<Fence, JournalError> {
+    let token = token_in(txn, task)? + 1;
+    txn.open_table(LEASES)
+        .map_err(storage)?
+        .insert(task, token)
+        .map_err(storage)?;
+    if let Some(owner) = owner {
+        txn.open_table(OWNERS)
+            .map_err(storage)?
+            .insert(task, owner)
+            .map_err(storage)?;
+    }
     Ok(Fence { task, token })
+}
+
+/// The current token of `task` in `txn`; 0 when never claimed.
+pub fn token_in(txn: &WriteTransaction, task: u64) -> Result<u64, JournalError> {
+    let leases = txn.open_table(LEASES).map_err(storage)?;
+    let token = leases.get(task).map_err(storage)?.map_or(0, |t| t.value());
+    Ok(token)
+}
+
+/// The node `task` is assigned to in `txn`.
+pub fn owner_in(txn: &WriteTransaction, task: u64) -> Result<Option<u64>, JournalError> {
+    let owners = txn.open_table(OWNERS).map_err(storage)?;
+    let owner = owners.get(task).map_err(storage)?.map(|o| o.value());
+    Ok(owner)
+}
+
+/// The node `task` is assigned to, if any.
+pub fn owner(db: &Database, task: u64) -> Result<Option<u64>, JournalError> {
+    read(db, OWNERS, task)
+}
+
+/// The current token of `task`; 0 when never claimed.
+pub fn token(db: &Database, task: u64) -> Result<u64, JournalError> {
+    Ok(read(db, LEASES, task)?.unwrap_or(0))
+}
+
+fn read(
+    db: &Database,
+    table: TableDefinition<u64, u64>,
+    task: u64,
+) -> Result<Option<u64>, JournalError> {
+    let txn = db.begin_read().map_err(storage)?;
+    match txn.open_table(table) {
+        Ok(t) => Ok(t.get(task).map_err(storage)?.map(|v| v.value())),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+        Err(e) => Err(storage(e)),
+    }
 }
 
 /// Refuse with `Fenced` unless `fence` is the latest claim, judged inside
 /// `txn`, so the check and the writes that follow commit together.
 pub fn check_in(txn: &WriteTransaction, fence: &Fence) -> Result<(), JournalError> {
-    let leases = txn.open_table(LEASES).map_err(storage)?;
-    let current = leases
-        .get(fence.task)
-        .map_err(storage)?
-        .map_or(0, |t| t.value());
+    let current = token_in(txn, fence.task)?;
     if current != fence.token {
         return Err(JournalError::Fenced {
             task: fence.task,
@@ -176,6 +224,23 @@ mod tests {
                 current: 1
             }
         );
+    }
+
+    #[test]
+    fn an_owner_is_recorded_only_when_a_claim_names_one() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        assert_eq!(owner(&db, 1).unwrap(), None);
+        claim(&db, 1).unwrap();
+        assert_eq!(owner(&db, 1).unwrap(), None);
+        let txn = db.begin_write().unwrap();
+        assert_eq!(claim_in(&txn, 1, Some(4)).unwrap().token, 2);
+        assert_eq!(claim_in(&txn, 2, Some(5)).unwrap().token, 1);
+        txn.commit().unwrap();
+        assert_eq!(owner(&db, 1).unwrap(), Some(4));
+        assert_eq!(owner(&db, 2).unwrap(), Some(5));
+        claim(&db, 1).unwrap();
+        assert_eq!(owner(&db, 1).unwrap(), Some(4));
     }
 
     #[test]

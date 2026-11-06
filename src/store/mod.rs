@@ -8,13 +8,44 @@
 //! reaches the map after its commit has been flushed, so a reader never sees a
 //! value that a crash could still lose. A failed write leaves the map unchanged.
 //! Durable writes block on the disk, so async code must not call them directly.
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use redb::{Database, ReadableDatabase, ReadableTable, Table, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
+pub mod command;
 pub mod legacy;
 
+pub use command::{Command, Response};
+
 const KV: TableDefinition<&str, &str> = TableDefinition::new("kv");
+
+/// What a committed command changed, for `publish` to apply to the map.
+pub(crate) enum Effects {
+    Put(Vec<(String, String)>),
+    Removed(String, String),
+}
+
+impl Effects {
+    fn response(&self) -> Response {
+        match self {
+            Effects::Put(_) => Response::Put,
+            Effects::Removed(_, old) => Response::Removed(old.clone()),
+        }
+    }
+}
+
+/// A committed goal command, told to the goals of this node after the commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalEvent {
+    Assigned { task: u64, node: u64 },
+    Cancelled { task: u64 },
+}
+
+type GoalSink = Box<dyn Fn(GoalEvent) + Send + Sync>;
+
+fn not_kv() -> StoreError {
+    StoreError::InvalidInput("not a key/value command".to_owned())
+}
 
 /// Where writes go besides the map.
 #[derive(Clone, Default)]
@@ -53,6 +84,8 @@ pub struct Store {
     persistence: Persistence,
     /// Held across commit and map update, so the map applies writes in commit order.
     write_order: Arc<Mutex<()>>,
+    /// Who hears of committed goal commands; unset until `on_goal_event`.
+    goal_sink: Arc<OnceLock<GoalSink>>,
 }
 
 // Every method takes its own `pin()` guard and drops it before returning, so a
@@ -99,28 +132,147 @@ impl Store {
         }
     }
 
-    /// Run `write`, then `hook`, in one transaction and flush it. A hook error
-    /// drops the transaction, so neither change reaches the disk. A memory store
-    /// does nothing and runs no hook.
-    fn commit(
+    /// Carry out `cmd` in `txn`, touching the kv table only. Nothing reaches the
+    /// map until `publish` runs with the returned effects, after the commit.
+    pub(crate) fn apply_in(
         &self,
-        write: impl FnOnce(&mut Table<'_, &'static str, &'static str>) -> Result<(), redb::StorageError>,
-        hook: impl FnOnce(&redb::WriteTransaction) -> Result<(), StoreError>,
+        txn: &redb::WriteTransaction,
+        cmd: &Command,
+    ) -> Result<Effects, StoreError> {
+        let mut table = txn.open_table(KV).map_err(storage)?;
+        match cmd {
+            Command::Put { entries } => {
+                for (key, value) in entries {
+                    table
+                        .insert(key.as_str(), value.as_str())
+                        .map_err(storage)?;
+                }
+                Ok(Effects::Put(entries.clone()))
+            }
+            Command::Remove { key } => {
+                let old = table
+                    .remove(key.as_str())
+                    .map_err(storage)?
+                    .map(|old| old.value().to_owned());
+                old.map(|old| Effects::Removed(key.clone(), old))
+                    .ok_or_else(|| StoreError::NotFound(key.clone()))
+            }
+            _ => Err(not_kv()),
+        }
+    }
+
+    /// Tell `sink` of every goal command committed from now on. It runs on the apply thread, so
+    /// it must only record and wake, never propose. Only the first sink is kept.
+    pub fn on_goal_event(&self, sink: impl Fn(GoalEvent) + Send + Sync + 'static) {
+        let _ = self.goal_sink.set(Box::new(sink));
+    }
+
+    /// Tell the goal sink what committed command `cmd` answered with `response`.
+    pub(crate) fn publish_goal(&self, cmd: &Command, response: &Response) {
+        let event = match (cmd, response) {
+            (Command::Assign { task, node, .. }, Response::Assigned { .. }) => {
+                GoalEvent::Assigned {
+                    task: *task,
+                    node: *node,
+                }
+            }
+            (Command::CancelGoal { id }, Response::Cancelled) => GoalEvent::Cancelled { task: *id },
+            _ => return,
+        };
+        if let Some(sink) = self.goal_sink.get() {
+            sink(event);
+        }
+    }
+
+    /// Make committed `effects` visible to readers.
+    pub(crate) fn publish(&self, effects: &Effects) {
+        let map = self.map.pin();
+        match effects {
+            Effects::Put(entries) => {
+                for (key, value) in entries {
+                    map.insert(key.clone(), value.clone());
+                }
+            }
+            Effects::Removed(key, _) => {
+                map.remove(key);
+            }
+        }
+    }
+
+    /// Every pair the kv table holds as of `txn`.
+    pub(crate) fn dump(txn: &redb::ReadTransaction) -> Result<Vec<(String, String)>, StoreError> {
+        let table = txn.open_table(KV).map_err(storage)?;
+        let mut entries = vec![];
+        for entry in table.iter().map_err(storage)? {
+            let (key, value) = entry.map_err(storage)?;
+            entries.push((key.value().to_owned(), value.value().to_owned()));
+        }
+        Ok(entries)
+    }
+
+    /// Make the kv table in `txn` hold exactly `entries`.
+    pub(crate) fn replace_in(
+        txn: &redb::WriteTransaction,
+        entries: &[(String, String)],
     ) -> Result<(), StoreError> {
-        match &self.persistence {
-            Persistence::Memory => Ok(()),
+        txn.delete_table(KV).map_err(storage)?;
+        let mut table = txn.open_table(KV).map_err(storage)?;
+        for (key, value) in entries {
+            table
+                .insert(key.as_str(), value.as_str())
+                .map_err(storage)?;
+        }
+        Ok(())
+    }
+
+    /// Make the map hold exactly the committed `entries`.
+    pub(crate) fn publish_all(&self, entries: &[(String, String)]) {
+        let map = self.map.pin();
+        map.clear();
+        for (key, value) in entries {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+
+    /// Apply `cmd`, then publish it. A durable store runs `hook` in the same
+    /// transaction, so what it writes commits or rolls back with `cmd`. A memory
+    /// store only publishes and runs no hook. On an error nothing reaches the map.
+    fn run(
+        &self,
+        cmd: &Command,
+        hook: impl FnOnce(&redb::WriteTransaction, &Effects) -> Result<(), StoreError>,
+    ) -> Result<Effects, StoreError> {
+        let _order = self.lock_writes();
+        let effects = match &self.persistence {
+            Persistence::Memory => match cmd {
+                Command::Put { entries } => Effects::Put(entries.clone()),
+                Command::Remove { key } => self
+                    .map
+                    .pin()
+                    .get(key)
+                    .map(|old| Effects::Removed(key.clone(), old.clone()))
+                    .ok_or_else(|| StoreError::NotFound(key.clone()))?,
+                _ => return Err(not_kv()),
+            },
             Persistence::Durable(db) => {
                 let txn = db.begin_write().map_err(storage)?;
-                {
-                    let mut table = txn.open_table(KV).map_err(storage)?;
-                    write(&mut table).map_err(storage)?;
-                }
-                hook(&txn)?;
-                txn.commit().map_err(storage)
+                let effects = self.apply_in(&txn, cmd)?;
+                hook(&txn, &effects)?;
+                txn.commit().map_err(storage)?;
+                effects
             }
             #[cfg(test)]
-            Persistence::Failing => Err(StoreError::Storage("injected failure".to_owned())),
-        }
+            Persistence::Failing => {
+                return Err(StoreError::Storage("injected failure".to_owned()));
+            }
+        };
+        self.publish(&effects);
+        Ok(effects)
+    }
+
+    /// Carry out `cmd` and answer what it did.
+    pub fn apply(&self, cmd: &Command) -> Result<Response, StoreError> {
+        Ok(self.run(cmd, |_, _| Ok(()))?.response())
     }
 
     /// Serialize writers. A panic while this was held cannot have left the map
@@ -143,13 +295,9 @@ impl Store {
     /// Store `value` under `key`, returning the value it replaced, if any.
     #[cfg(test)]
     pub fn insert(&self, key: String, value: String) -> Option<String> {
-        let _order = self.lock_writes();
-        self.commit(
-            |table| table.insert(key.as_str(), value.as_str()).map(|_| ()),
-            |_| Ok(()),
-        )
-        .unwrap();
-        self.map.pin().insert(key, value).cloned()
+        let old = self.get(&key).ok();
+        self.insert_all([(key, value)]).unwrap();
+        old
     }
 
     /// Write every pair in one transaction and return the number written. On an
@@ -175,21 +323,8 @@ impl Store {
         hook: impl FnOnce(&redb::WriteTransaction) -> Result<(), StoreError>,
     ) -> Result<usize, StoreError> {
         let entries: Vec<(String, String)> = entries.into_iter().collect();
-        let _order = self.lock_writes();
-        self.commit(
-            |table| {
-                for (key, value) in &entries {
-                    table.insert(key.as_str(), value.as_str())?;
-                }
-                Ok(())
-            },
-            hook,
-        )?;
         let count = entries.len();
-        let map = self.map.pin();
-        for (key, value) in entries {
-            map.insert(key, value);
-        }
+        self.run(&Command::Put { entries }, |txn, _| hook(txn))?;
         Ok(count)
     }
 
@@ -206,14 +341,16 @@ impl Store {
         key: &str,
         hook: impl FnOnce(&redb::WriteTransaction, &str) -> Result<(), StoreError>,
     ) -> Result<String, StoreError> {
-        let not_found = || StoreError::NotFound(key.to_owned());
-        let _order = self.lock_writes();
-        let map = self.map.pin();
-        let Some(old) = map.get(key) else {
-            return Err(not_found());
+        let cmd = Command::Remove {
+            key: key.to_owned(),
         };
-        self.commit(|table| table.remove(key).map(|_| ()), |txn| hook(txn, old))?;
-        map.remove(key).cloned().ok_or_else(not_found)
+        match self.run(&cmd, |txn, effects| match effects {
+            Effects::Removed(_, old) => hook(txn, old),
+            Effects::Put(_) => Ok(()),
+        })? {
+            Effects::Removed(_, old) => Ok(old),
+            Effects::Put(_) => Ok(String::new()),
+        }
     }
 
     /// Owned snapshot of every entry, sorted by key.

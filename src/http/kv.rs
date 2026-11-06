@@ -1,9 +1,9 @@
 //! Store-backed routes: `POST /insert`, `GET /key/{key}`, `DELETE /key/{key}` and `GET /list`.
-use actix_web::{HttpResponse, Responder, delete, get, post, web};
+use actix_web::{HttpResponse, delete, get, post, web};
 
 use super::error::ApiError;
 use crate::state::AppState;
-use crate::store::{StoreError, legacy};
+use crate::store::{Command, Response, StoreError, legacy};
 
 /// Register the store routes. The shared `AppState` is registered by `http::configure`.
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -29,10 +29,7 @@ pub async fn insert(
         .map_err(|e| StoreError::MalformedJson(format!("body is not valid UTF-8: {e}")))?;
     let entries = legacy::parse_insert_body(text)?;
     let echo = legacy::format_insert_echo(&entries);
-    let store = state.store.clone();
-    web::block(move || store.insert_all(entries))
-        .await
-        .map_err(blocking_failed)??;
+    apply(&state, Command::Put { entries }).await?;
     Ok(HttpResponse::Ok().json(echo))
 }
 
@@ -42,6 +39,7 @@ pub async fn get_key(
     state: web::Data<AppState>,
     path: web::Path<String>,
 ) -> Result<HttpResponse, ApiError> {
+    read_barrier(&state).await?;
     Ok(HttpResponse::Ok().json(state.store.get(&path.into_inner())?))
 }
 
@@ -51,11 +49,33 @@ pub async fn delete_key(
     state: web::Data<AppState>,
     path: web::Path<String>,
 ) -> Result<HttpResponse, ApiError> {
-    let store = state.store.clone();
-    let value = web::block(move || store.remove(&path.into_inner()))
-        .await
-        .map_err(blocking_failed)??;
-    Ok(HttpResponse::Ok().json(value))
+    let cmd = Command::Remove {
+        key: path.into_inner(),
+    };
+    match apply(&state, cmd).await? {
+        Response::Removed(value) => Ok(HttpResponse::Ok().json(value)),
+        _ => Err(ApiError::Internal),
+    }
+}
+
+/// Carry out a write: through Raft when clustered, else straight on the store.
+async fn apply(state: &AppState, cmd: Command) -> Result<Response, ApiError> {
+    let Some(node) = &state.cluster else {
+        let store = state.store.clone();
+        let done = web::block(move || store.apply(&cmd)).await;
+        return Ok(done.map_err(blocking_failed)??);
+    };
+    node.propose(cmd)
+        .await?
+        .map_err(|key| StoreError::NotFound(key).into())
+}
+
+/// When clustered, wait until this node has applied every write committed before the read.
+pub(super) async fn read_barrier(state: &AppState) -> Result<(), ApiError> {
+    match &state.cluster {
+        Some(node) => Ok(node.read_barrier().await?),
+        None => Ok(()),
+    }
 }
 
 /// The blocking pool that runs a durable write is gone or the write panicked.
@@ -66,8 +86,9 @@ pub(super) fn blocking_failed(e: actix_web::error::BlockingError) -> ApiError {
 
 /// `GET /list` returns every stored pair, sorted by key, in the legacy list shape.
 #[get("/list")]
-pub async fn list(state: web::Data<AppState>) -> impl Responder {
-    HttpResponse::Ok().json(legacy::format_list(&state.store.list()))
+pub async fn list(state: web::Data<AppState>) -> Result<HttpResponse, ApiError> {
+    read_barrier(&state).await?;
+    Ok(HttpResponse::Ok().json(legacy::format_list(&state.store.list())))
 }
 
 #[cfg(test)]
@@ -611,5 +632,227 @@ mod tests {
             body,
             web::Bytes::from_static(br#""{\"b\":\"2\",\"a\":\"1\"}""#)
         );
+    }
+
+    mod cluster {
+        use std::time::Duration;
+
+        use crate::raft::testing::Cluster;
+        use actix_web::http::StatusCode;
+
+        struct Reply {
+            status: u16,
+            body: String,
+        }
+
+        async fn call(method: reqwest::Method, addr: &str, path: &str, body: &str) -> Reply {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap();
+            let resp = client
+                .request(method, format!("http://{addr}{path}"))
+                .body(body.to_owned())
+                .send()
+                .await
+                .unwrap();
+            Reply {
+                status: resp.status().as_u16(),
+                body: resp.text().await.unwrap(),
+            }
+        }
+
+        #[actix_web::test]
+        async fn a_write_through_a_follower_is_read_back_through_every_node() {
+            let cluster = Cluster::start(3, 3).await;
+            let follower = &cluster.addrs[cluster.follower().await];
+            let put = call(reqwest::Method::POST, follower, "/insert", r#"{"k":"v"}"#).await;
+            assert_eq!(put.status, 200, "{}", put.body);
+            for addr in &cluster.addrs {
+                let got = call(reqwest::Method::GET, addr, "/key/k", "").await;
+                assert_eq!((got.status, got.body.as_str()), (200, r#""v""#), "{addr}");
+                let list = call(reqwest::Method::GET, addr, "/list", "").await;
+                assert_eq!(list.body, r#""[{\"k\" : \"v\"}]""#, "{addr}");
+            }
+            cluster.stop().await;
+        }
+
+        #[actix_web::test]
+        async fn a_delete_through_a_follower_returns_the_old_value_and_removes_it_everywhere() {
+            let cluster = Cluster::start(3, 3).await;
+            let follower = &cluster.addrs[cluster.follower().await];
+            call(reqwest::Method::POST, follower, "/insert", r#"{"k":"v"}"#).await;
+            let del = call(reqwest::Method::DELETE, follower, "/key/k", "").await;
+            assert_eq!((del.status, del.body.as_str()), (200, r#""v""#));
+            for addr in &cluster.addrs {
+                let got = call(reqwest::Method::GET, addr, "/key/k", "").await;
+                assert_eq!(got.status, 404, "{addr}");
+            }
+            cluster.stop().await;
+        }
+
+        #[actix_web::test]
+        async fn deleting_a_missing_key_through_a_follower_answers_as_a_single_node_does() {
+            let cluster = Cluster::start(3, 3).await;
+            let follower = &cluster.addrs[cluster.follower().await];
+            let del = call(reqwest::Method::DELETE, follower, "/key/nope", "").await;
+            assert_eq!(del.status, 404);
+            assert_eq!(
+                del.body,
+                r#"{"error":"not_found","message":"key not found: nope"}"#
+            );
+            cluster.stop().await;
+        }
+
+        /// Insert `key` through `addr`, retrying until it answers 200 or 30 s pass.
+        async fn insert_until_ok(addr: &str, key: &str) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let got = call(
+                    reqwest::Method::POST,
+                    addr,
+                    "/insert",
+                    &format!(r#"{{"{key}":"v"}}"#),
+                )
+                .await;
+                if got.status == 200 {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "{addr}: {}", got.body);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+
+        #[actix_web::test]
+        async fn an_isolated_leader_refuses_writes_with_no_quorum_and_they_never_commit() {
+            let mut cluster = Cluster::start(3, 3).await;
+            let leader = cluster.leader().await;
+            let others: Vec<usize> = (0..3).filter(|i| *i != leader).collect();
+            for i in &others {
+                cluster.stop_node(*i).await;
+            }
+            let started = std::time::Instant::now();
+            let got = call(
+                reqwest::Method::POST,
+                &cluster.addrs[leader],
+                "/insert",
+                r#"{"lost":"v"}"#,
+            )
+            .await;
+            assert!(started.elapsed() < Duration::from_secs(6));
+            assert_eq!(got.status, 503, "{}", got.body);
+            assert_eq!(got.body, r#"{"error":"no_quorum","message":"no quorum"}"#);
+            for i in &others {
+                cluster.start_node(*i).await;
+            }
+            cluster.leader().await;
+            for addr in &cluster.addrs {
+                let got = call(reqwest::Method::GET, addr, "/key/lost", "").await;
+                assert_eq!(got.status, 404, "{addr}: {}", got.body);
+            }
+            cluster.stop().await;
+        }
+
+        #[actix_web::test]
+        async fn a_write_cut_off_before_commit_answers_503_outcome_unknown_and_commits_later() {
+            let cluster = Cluster::start(3, 3).await;
+            let follower = cluster.follower().await;
+            cluster
+                .cut
+                .0
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let got = call(
+                reqwest::Method::POST,
+                &cluster.addrs[follower],
+                "/insert",
+                r#"{"maybe":"v"}"#,
+            )
+            .await;
+            assert_eq!(got.status, 503, "{}", got.body);
+            assert_eq!(
+                got.body,
+                r#"{"error":"outcome_unknown","message":"outcome unknown"}"#
+            );
+            cluster
+                .cut
+                .0
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                let got = call(
+                    reqwest::Method::GET,
+                    &cluster.addrs[follower],
+                    "/key/maybe",
+                    "",
+                )
+                .await;
+                if got.status == 200 {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "{}", got.body);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            cluster.stop().await;
+        }
+
+        #[actix_web::test]
+        async fn writes_continue_through_a_survivor_after_the_leader_stops() {
+            let mut cluster = Cluster::start(3, 3).await;
+            let leader = cluster.leader().await;
+            cluster.stop_node(leader).await;
+            for i in (0..3).filter(|i| *i != leader) {
+                insert_until_ok(&cluster.addrs[i], &format!("from{i}")).await;
+            }
+            for i in (0..3).filter(|i| *i != leader) {
+                for j in (0..3).filter(|j| *j != leader) {
+                    let got = call(
+                        reqwest::Method::GET,
+                        &cluster.addrs[i],
+                        &format!("/key/from{j}"),
+                        "",
+                    )
+                    .await;
+                    assert_eq!((got.status, got.body.as_str()), (200, r#""v""#));
+                }
+            }
+            cluster.stop().await;
+        }
+
+        #[actix_web::test]
+        async fn a_write_right_after_a_write_through_a_follower_succeeds() {
+            let cluster = Cluster::start(3, 3).await;
+            let follower = &cluster.addrs[cluster.follower().await];
+            for body in [r#"{"a":"1"}"#, r#"{"b":"2"}"#] {
+                let put = call(reqwest::Method::POST, follower, "/insert", body).await;
+                assert_eq!(put.status, 200, "{}", put.body);
+            }
+            cluster.stop().await;
+        }
+
+        #[actix_web::test]
+        async fn a_node_without_a_leader_answers_503_no_quorum_to_reads_and_writes() {
+            let cluster = Cluster::start(3, 1).await;
+            let addr = &cluster.addrs[0];
+            for (method, path, body) in [
+                (reqwest::Method::POST, "/insert", r#"{"k":"v"}"#),
+                (reqwest::Method::DELETE, "/key/k", ""),
+                (reqwest::Method::GET, "/key/k", ""),
+                (reqwest::Method::GET, "/list", ""),
+            ] {
+                let started = std::time::Instant::now();
+                let got = call(method, addr, path, body).await;
+                assert!(started.elapsed() < Duration::from_secs(6), "{path}");
+                assert_eq!(
+                    got.status,
+                    StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                    "{path}"
+                );
+                assert_eq!(
+                    got.body, r#"{"error":"no_quorum","message":"no quorum"}"#,
+                    "{path}"
+                );
+            }
+            cluster.stop().await;
+        }
     }
 }

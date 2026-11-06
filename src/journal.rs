@@ -138,6 +138,9 @@ pub struct ThinkingState {
 pub enum JournalError {
     #[error("storage failure: {0}")]
     Storage(String),
+    /// The cluster could not take the command now; the caller may retry it.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     /// The caller's view of the stream is stale, or it skipped ahead.
     #[error("stream {stream}: expected to write seq {expected}, but the next seq is {actual}")]
     SeqConflict {
@@ -288,6 +291,29 @@ impl Journal {
         }
 
         check_head(stream, head.as_ref(), out.len() as u64, &prev)?;
+        Ok(out)
+    }
+
+    /// Whether `stream` exists and has not ended, judged from its head alone. An
+    /// undecodable head is not live.
+    pub fn live(&self, stream: u64) -> Result<bool, JournalError> {
+        let txn = self.db.begin_read().map_err(storage)?;
+        let heads = txn.open_table(HEADS).map_err(storage)?;
+        let head = heads.get(stream).map_err(storage)?;
+        Ok(head.is_some_and(|raw| Head::parse(stream, raw.value()).is_some_and(|h| !h.ended)))
+    }
+
+    /// The ids of every live stream, in order.
+    pub fn live_streams(&self) -> Result<Vec<u64>, JournalError> {
+        let txn = self.db.begin_read().map_err(storage)?;
+        let heads = txn.open_table(HEADS).map_err(storage)?;
+        let mut out = vec![];
+        for entry in heads.iter().map_err(storage)? {
+            let (key, raw) = entry.map_err(storage)?;
+            if Head::parse(key.value(), raw.value()).is_some_and(|h| !h.ended) {
+                out.push(key.value());
+            }
+        }
         Ok(out)
     }
 
@@ -568,6 +594,19 @@ mod tests {
                 actual: 1
             })
         );
+    }
+
+    #[test]
+    fn live_streams_are_those_started_and_not_ended() {
+        let (_dir, _db, journal) = journal();
+        journal.append(1, 0, &start()).unwrap();
+        journal.append(2, 0, &start()).unwrap();
+        journal.append(2, 1, &Record::Cancelled).unwrap();
+        journal.append(3, 0, &start()).unwrap();
+        assert_eq!(journal.live_streams().unwrap(), vec![1, 3]);
+        assert!(journal.live(1).unwrap());
+        assert!(!journal.live(2).unwrap());
+        assert!(!journal.live(9).unwrap());
     }
 
     #[test]

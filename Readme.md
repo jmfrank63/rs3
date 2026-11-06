@@ -80,6 +80,12 @@ are not read. Every other variable is ignored.
   but its directory must exist. A write is answered only after it is flushed to
   disk, and the data is loaded again at the next start. Without this setting,
   rs3 prints a warning and keeps its data in memory only, so a restart empties it.
+- **Cluster:** `CLUSTER.NODE_ID` (this node's id) and `CLUSTER.PEERS`
+  (`1=host:port,2=host:port,3=host:port`, every node including this one) turn on cluster mode.
+  Set both or neither. The id must appear in the list, ids must be unique, and the list needs an
+  odd number of nodes. Cluster mode requires `STORAGE.PATH`. With no cluster settings, rs3 runs as
+  a single node. `scripts/ci-smoke.sh` starts a 3-node cluster from the release binary, kills the
+  leader, and checks that a generation goal and a script goal still finish.
 - **A broken dotenv file stops startup.** A line that does not parse, a file
   that starts with a UTF-8 byte order mark (BOM) or an unreadable file gives a
   line that starts with `error: invalid configuration: .env: ` and exit 1.

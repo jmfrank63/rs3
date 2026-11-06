@@ -7,7 +7,7 @@ use actix_web::{HttpResponse, delete, get, post, web};
 use serde::Deserialize;
 
 use super::error::ApiError;
-use super::kv::blocking_failed;
+use super::kv::{blocking_failed, read_barrier};
 use crate::goals::{GoalSpec, GoalStatus, Goals};
 use crate::journal::JournalError;
 use crate::state::AppState;
@@ -82,13 +82,14 @@ async fn create(state: web::Data<AppState>, body: web::Bytes) -> Result<HttpResp
 }
 
 /// Run `act` on goal `path` off the async threads and answer 200
-/// `{status, output, error}`; an id that is not a goal answers 404 `not_found`.
+/// `{status, output, error}` (plus `node` in a cluster); an id that is not a goal answers 404 `not_found`.
 async fn goal_status(
     state: web::Data<AppState>,
     path: web::Path<String>,
     act: fn(&Goals, u64) -> Result<Option<GoalStatus>, JournalError>,
 ) -> Result<HttpResponse, ApiError> {
     let goals = goals(&state)?;
+    read_barrier(&state).await?;
     let raw = path.into_inner();
     let id: u64 = raw
         .parse()
@@ -97,14 +98,19 @@ async fn goal_status(
         .await
         .map_err(blocking_failed)??
         .ok_or(ApiError::GoalNotFound(raw))?;
-    Ok(HttpResponse::Ok().json(serde_json::json!({
+    let mut body = serde_json::json!({
         "status": status.status,
         "output": status.output,
         "error": status.error,
-    })))
+    });
+    if state.cluster.is_some() {
+        body["node"] = status.node.into();
+    }
+    Ok(HttpResponse::Ok().json(body))
 }
 
-/// `GET /goals/{id}` answers 200 `{status, output, error}`, or 404 `not_found`.
+/// `GET /goals/{id}` answers 200 `{status, output, error}` (plus `node`, the owner or null, in a
+/// cluster, after the read barrier), or 404 `not_found`.
 #[get("/goals/{id}")]
 async fn get_goal(
     state: web::Data<AppState>,
@@ -499,5 +505,121 @@ mod tests {
             wait_for(&f.state, id, "failed").await,
             json!({"status": "failed", "output": null, "error": "js_error"})
         );
+    }
+
+    #[actix_web::test]
+    async fn single_node_json_has_no_node_key() {
+        let f = fixture(1_000_000, None);
+        let id = create(&f.state, &goal_body(3)).await;
+        let goal = get(&f.state, id).await;
+        let mut keys: Vec<&String> = goal.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["error", "output", "status"]);
+    }
+
+    #[actix_web::test]
+    async fn a_cluster_node_that_cannot_reach_raft_answers_503_unavailable() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let store = Store::durable(db.clone()).unwrap();
+        let goals =
+            Goals::open_in_cluster(db, NonZeroU32::new(1_000_000).unwrap(), 1, &store).unwrap();
+        let base = test_state();
+        let state = AppState {
+            goals: Some(goals),
+            ..AppState::new(store, (*base.settings).clone(), base.js.clone())
+        };
+        let resp = call(&state, post(VALID)).await;
+        assert_json_error(resp, StatusCode::SERVICE_UNAVAILABLE, "unavailable").await;
+    }
+
+    mod cluster {
+        use std::time::{Duration, Instant};
+
+        use serde_json::{Value, json};
+
+        use crate::raft::testing::Cluster;
+
+        async fn call(method: reqwest::Method, addr: &str, path: &str, body: &str) -> (u16, Value) {
+            let resp = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap()
+                .request(method, format!("http://{addr}{path}"))
+                .body(body.to_owned())
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status().as_u16();
+            (status, resp.json().await.unwrap())
+        }
+
+        #[actix_web::test]
+        async fn a_goal_created_on_one_node_is_seen_on_every_node_with_its_owner() {
+            let cluster = Cluster::start(3, 3).await;
+            cluster.leader().await;
+            cluster.assign();
+            let body = r#"{"priority":0,"budget":2,"seed":1,"prompt":"p"}"#;
+            let (status, made) =
+                call(reqwest::Method::POST, &cluster.addrs[0], "/goals", body).await;
+            assert_eq!(status, 201);
+            let path = format!("/goals/{}", made["id"]);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            for addr in &cluster.addrs {
+                loop {
+                    let (status, goal) = call(reqwest::Method::GET, addr, &path, "").await;
+                    assert_eq!(status, 200, "{addr}");
+                    if goal["node"].is_u64() {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "{addr} never showed an owner");
+                    actix_web::rt::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+            cluster.stop().await;
+        }
+
+        #[actix_web::test]
+        async fn an_unassigned_goal_shows_a_null_node_and_cancel_ends_it_everywhere() {
+            let cluster = Cluster::start(3, 3).await;
+            cluster.leader().await;
+            let body = r#"{"priority":0,"budget":2,"seed":1,"prompt":"p"}"#;
+            let (_, made) = call(reqwest::Method::POST, &cluster.addrs[1], "/goals", body).await;
+            let path = format!("/goals/{}", made["id"]);
+            let (_, goal) = call(reqwest::Method::GET, &cluster.addrs[2], &path, "").await;
+            assert_eq!(goal["node"], Value::Null);
+            let (status, gone) = call(reqwest::Method::DELETE, &cluster.addrs[2], &path, "").await;
+            assert_eq!((status, &gone["status"]), (200, &json!("cancelled")));
+            let (_, seen) = call(reqwest::Method::GET, &cluster.addrs[0], &path, "").await;
+            assert_eq!(seen["status"], "cancelled");
+            cluster.stop().await;
+        }
+
+        #[actix_web::test]
+        async fn a_script_goal_is_created_in_a_cluster() {
+            let cluster = Cluster::start(3, 3).await;
+            cluster.leader().await;
+            let addr = &cluster.addrs[0];
+            call(reqwest::Method::POST, addr, "/insert", r#"{"job":"1"}"#).await;
+            let (status, created) = call(
+                reqwest::Method::POST,
+                addr,
+                "/goals",
+                r#"{"priority":0,"script":"job"}"#,
+            )
+            .await;
+            assert_eq!((status, &created["id"]), (201, &json!(1)));
+            let (status, _) = call(reqwest::Method::GET, addr, "/goals/1", "").await;
+            assert_eq!(status, 200);
+            cluster.stop().await;
+        }
+
+        #[actix_web::test]
+        async fn a_node_without_a_leader_answers_goal_reads_503() {
+            let cluster = Cluster::start(3, 1).await;
+            let (status, err) = call(reqwest::Method::GET, &cluster.addrs[0], "/goals/1", "").await;
+            assert_eq!((status, &err["error"]), (503, &json!("no_quorum")));
+            cluster.stop().await;
+        }
     }
 }

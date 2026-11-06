@@ -9,6 +9,24 @@ mod tests {
     use crate::common::{Server, TempDir, rs3};
 
     #[test]
+    fn a_node_that_never_prints_its_banner_fails_the_start_and_leaves_no_child() {
+        let dir = TempDir::new("silent");
+        let pidfile = dir.0.join("pid");
+        let mut silent = Command::new("sh");
+        silent
+            .arg("-c")
+            .arg(format!("echo $$ > {}; exec sleep 60", pidfile.display()));
+        let started = std::time::Instant::now();
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Server::spawn(silent, 0, std::time::Duration::from_secs(1));
+        }));
+        assert!(failed.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        assert!(!std::path::Path::new("/proc").join(pid.trim()).exists());
+    }
+
+    #[test]
     fn writes_and_deletes_survive_kill_9_with_storage_path() {
         let dir = TempDir::new("durable");
         let db = dir.0.join("rs3.db");

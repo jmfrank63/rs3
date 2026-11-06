@@ -54,6 +54,7 @@ LOOP_OUT="$(mktemp)"
 DIR="$(mktemp -d)"
 PID=""
 LOOP_PID=""
+CPIDS=()
 
 # stop_server: SIGTERM, then SIGKILL after 5 s, so a hung graceful shutdown cannot block the job.
 stop_server() {
@@ -73,6 +74,8 @@ cleanup() {
     wait "$LOOP_PID" 2>/dev/null || true
   fi
   stop_server
+  local p
+  for p in ${CPIDS[@]+"${CPIDS[@]}"}; do kill -9 "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done
   rm -rf "$LOG" "$LOOP_OUT" "$DIR"
 }
 trap cleanup EXIT
@@ -331,5 +334,113 @@ req GET /key/trail
 [[ "$BODY" == "\"$(python3 -I -c 'import sys; print("".join(f"{i}," for i in range(int(sys.argv[1]))),end="")' "$ITERS")\"" ]] \
   || fail "trail after the script finished: ${BODY}"
 echo "ci-smoke: ok   script goal wrote each of ${ITERS} entries exactly once through 3 kills"
+
+# ---- 3-node release cluster with a leader kill ----
+stop_server
+CITERS=5
+CBUDGET=2000
+CSCRIPT="const get=(k)=>Deno.core.ops.op_rs3_get(k);const insert=(o)=>Deno.core.ops.op_rs3_insert(JSON.stringify(o));for(let i=0;i<${CITERS};i++){const n=Number(get('count'));const t=get('trail');insert({count:String(n+1),trail:t+i+','});const e=Date.now()+1000;while(Date.now()<e){}}get('count')"
+CPORTS=($(python3 -I -c 'import socket; ss=[socket.socket() for _ in range(3)]
+for s in ss: s.bind(("127.0.0.1", 0))
+print(*[s.getsockname()[1] for s in ss])'))
+PEERS="1=127.0.0.1:${CPORTS[0]},2=127.0.0.1:${CPORTS[1]},3=127.0.0.1:${CPORTS[2]}"
+
+# cstart I: start cluster node I (0-based) in the background; its pid goes to CPIDS[I].
+cstart() {
+  env -i PATH="$PATH" SERVER.HOST=127.0.0.1 SERVER.PORT="${CPORTS[$1]}" CLUSTER.NODE_ID=$(($1 + 1)) \
+    CLUSTER.PEERS="$PEERS" STORAGE.PATH="$DIR/node$(($1 + 1)).db" MODEL.TOKENS_PER_SECOND=200 \
+    "$BIN" >>"$LOG" 2>&1 &
+  CPIDS[$1]=$!
+}
+
+# creq I METHOD PATH [BODY]: one request to cluster node I; sets CODE and BODY.
+creq() {
+  local out i=$1
+  shift
+  local -a data=()
+  if (( $# > 2 )); then data=(--data-binary "$3"); fi
+  out=$(curl -sS --max-time 30 -w $'\n%{http_code}' -X "$1" ${data[@]+"${data[@]}"} "http://127.0.0.1:${CPORTS[$i]}$2") \
+    || { CODE=000; BODY="transport error"; return 0; }
+  CODE="${out##*$'\n'}"
+  BODY="${out%$'\n'*}"
+}
+
+# cwhen I METHOD PATH [BODY]: creq until the cluster answers (not 503), under a 60 s deadline.
+cwhen() {
+  local dl=$((SECONDS + 60)) i=$1
+  while :; do
+    creq "$@"
+    [[ "$CODE" != 503 && "$CODE" != 000 ]] && return 0
+    (( SECONDS < dl )) || fail "node $((i + 1)) $2 $3 unavailable: ${CODE} ${BODY}"
+    sleep 0.2
+  done
+}
+
+# cleader [EXCLUDE]: print the index of the node that leads (read_index answers 200), 60 s deadline.
+cleader() {
+  local dl=$((SECONDS + 60)) i
+  while (( SECONDS < dl )); do
+    for i in 0 1 2; do
+      [[ "$i" != "${1:-}" ]] || continue
+      creq "$i" POST /raft/read_index
+      if [[ "$CODE" == 200 ]]; then echo "$i"; return 0; fi
+    done
+    sleep 0.2
+  done
+  fail "no cluster leader within 60 s"
+}
+
+# cwait_done I ID: poll goal ID through node I to done under a 60 s deadline. Prints its JSON.
+cwait_done() {
+  local dl=$((SECONDS + 60)) st
+  while (( SECONDS < dl )); do
+    cwhen "$1" GET "/goals/$2"
+    [[ "$CODE" == 200 ]] || fail "GET /goals/$2 -> ${CODE} ${BODY}"
+    st=$(jf "$BODY" status)
+    [[ "$st" != "failed" ]] || fail "cluster goal $2 failed: ${BODY}"
+    if [[ "$st" == "done" ]]; then printf '%s' "$BODY"; return 0; fi
+    sleep 0.2
+  done
+  fail "cluster goal $2 not done after 60s: ${BODY}"
+}
+
+for i in 0 1 2; do cstart "$i"; done
+cwhen 0 POST /insert "$(python3 -I -c 'import json,sys; print(json.dumps({"count":"0","trail":"","job":sys.argv[1]}))' "$CSCRIPT")"
+[[ "$CODE" == 200 ]] || fail "cluster POST /insert -> ${CODE} ${BODY}"
+LEADER=$(cleader)
+echo "ci-smoke: ok   3-node cluster up, leader is node $((LEADER + 1))"
+cwhen 0 POST /goals "{\"priority\":0,\"budget\":${CBUDGET},\"seed\":11,\"prompt\":\"p\"}"
+[[ "$CODE" == 201 ]] || fail "cluster POST /goals generation -> ${CODE} ${BODY}"
+CG=$(jf "$BODY" id)
+cwhen 1 POST /goals '{"priority":0,"script":"job"}'
+[[ "$CODE" == 201 ]] || fail "cluster POST /goals script -> ${CODE} ${BODY}"
+CS=$(jf "$BODY" id)
+
+# Wait until the script has written once and the generation goal has output, then kill the leader.
+dl=$((SECONDS + 60))
+while :; do
+  cwhen 0 GET /key/count; CNT="$BODY"
+  cwhen 0 GET "/goals/$CG"; GOUT=$(jf "$BODY" output)
+  [[ "$CNT" != '"0"' && -n "$GOUT" ]] && break
+  (( SECONDS < dl )) || fail "cluster goals did not start (count ${CNT})"
+  sleep 0.2
+done
+kill -9 "${CPIDS[$LEADER]}"
+wait "${CPIDS[$LEADER]}" 2>/dev/null || true
+CPIDS[$LEADER]=""
+LIVE=$(( (LEADER + 1) % 3 ))
+NEWLEADER=$(cleader "$LEADER")
+echo "ci-smoke: ok   killed leader node $((LEADER + 1)) (kill -9); new leader is node $((NEWLEADER + 1))"
+
+CD1=$(cwait_done "$LIVE" "$CG"); CDS=$(cwait_done "$LIVE" "$CS")
+[[ "$(jf "$CD1" output)" == "$REF11" ]] || fail "cluster generation output differs from the single-node reference: ${CD1}"
+[[ "$(jf "$CDS" output)" == "$CITERS" ]] || fail "cluster script goal output: ${CDS}"
+TRAIL5="$(python3 -I -c 'import sys; print("".join(f"{i}," for i in range(int(sys.argv[1]))),end="")' "$CITERS")"
+for i in 0 1 2; do
+  [[ "$i" != "$LEADER" ]] || continue
+  cwhen "$i" GET /key/count; [[ "$BODY" == "\"${CITERS}\"" ]] || fail "node $((i + 1)) count -> ${CODE} ${BODY}"
+  cwhen "$i" GET /key/trail; [[ "$BODY" == "\"${TRAIL5}\"" ]] || fail "node $((i + 1)) trail -> ${CODE} ${BODY}"
+done
+echo "ci-smoke: ok   cluster generation goal equals the reference; script wrote each of ${CITERS} entries exactly once after the leader kill"
 
 echo "ci-smoke: OK (${BIN}, port ${PORT})"

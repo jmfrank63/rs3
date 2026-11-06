@@ -7,12 +7,17 @@
 //! `js_depth_limit` (422, the message names the limit and the PATCH key chain),
 //! `js_timeout` (504, the message names the execution limit in milliseconds)
 //! `goals_unavailable` (503, fixed message: the server has no database for goals)
+//! `unavailable` (503, fixed message: the cluster could not commit or confirm the request)
+//! `no_quorum` (503, fixed message `no quorum`: no leader or majority answered within the deadline)
+//! `outcome_unknown` (503, fixed message `outcome unknown`: a write was handed on and not answered, so it may
+//! still commit; check before retrying)
 //! and `internal` (500, fixed message `internal error`; details go to stderr).
 //! An unknown goal answers `not_found` (404, `goal not found: {id}`).
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 
 use crate::journal::JournalError;
 use crate::js::ExecError;
+use crate::raft::ClusterError;
 use crate::store::StoreError;
 
 /// Errors a handler can return; each maps to one status code and machine code.
@@ -40,6 +45,15 @@ pub enum ApiError {
     /// No goal has this id (as given in the path).
     #[error("goal not found: {0}")]
     GoalNotFound(String),
+    /// The cluster has no leader or no quorum to answer.
+    #[error("unavailable")]
+    Unavailable,
+    /// No leader or quorum answered within the request deadline.
+    #[error("no quorum")]
+    NoQuorum,
+    /// A write was handed to the cluster and not answered: it may commit later, so check before retrying.
+    #[error("outcome unknown")]
+    OutcomeUnknown,
     /// A host fault. The body message is always the fixed `internal error`.
     #[error("internal error")]
     Internal,
@@ -59,12 +73,28 @@ impl From<StoreError> for ApiError {
     }
 }
 
+impl From<ClusterError> for ApiError {
+    /// The detail goes to stderr; the client only learns the cluster is unavailable.
+    fn from(e: ClusterError) -> Self {
+        eprintln!("error: cluster unavailable: {e}");
+        match e {
+            ClusterError::NoQuorum => ApiError::NoQuorum,
+            ClusterError::OutcomeUnknown => ApiError::OutcomeUnknown,
+            _ => ApiError::Unavailable,
+        }
+    }
+}
+
 impl From<JournalError> for ApiError {
-    /// A journal failure is a host fault: it is logged to stderr and becomes
-    /// 500 `internal`, so host details never reach the client.
+    /// A journal failure is logged to stderr. A cluster that cannot answer becomes 503
+    /// `unavailable`; anything else is a host fault and becomes 500 `internal`, so host
+    /// details never reach the client.
     fn from(e: JournalError) -> Self {
         eprintln!("error: journal failure: {e}");
-        ApiError::Internal
+        match e {
+            JournalError::Unavailable(_) => ApiError::Unavailable,
+            _ => ApiError::Internal,
+        }
     }
 }
 
@@ -108,13 +138,15 @@ impl ApiError {
             ApiError::Store(StoreError::NotFound(_)) => "not_found",
             ApiError::Store(StoreError::MalformedJson(_)) => "malformed_json",
             ApiError::Store(StoreError::InvalidInput(_)) => "invalid_input",
-            ApiError::Store(StoreError::Storage(_)) => "internal",
+            ApiError::Store(StoreError::Storage(_)) | ApiError::Internal => "internal",
             ApiError::JsError(_) => "js_error",
             ApiError::JsDepthLimit(_) => "js_depth_limit",
             ApiError::JsTimeout(_) => "js_timeout",
             ApiError::GoalsUnavailable => "goals_unavailable",
+            ApiError::Unavailable => "unavailable",
+            ApiError::NoQuorum => "no_quorum",
+            ApiError::OutcomeUnknown => "outcome_unknown",
             ApiError::GoalNotFound(_) => "not_found",
-            ApiError::Internal => "internal",
         }
     }
 }
@@ -129,7 +161,10 @@ impl ResponseError for ApiError {
             ApiError::JsError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::JsDepthLimit(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::JsTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
-            ApiError::GoalsUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::GoalsUnavailable
+            | ApiError::Unavailable
+            | ApiError::NoQuorum
+            | ApiError::OutcomeUnknown => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::GoalNotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }

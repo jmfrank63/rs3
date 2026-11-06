@@ -18,12 +18,14 @@ use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 
 /// The only configuration keys read from the dotenv file and the environment.
-const CONFIG_KEYS: [&str; 5] = [
+const CONFIG_KEYS: [&str; 7] = [
     "server.host",
     "server.port",
     "storage.path",
     "scheduler.workers",
     "model.tokens_per_second",
+    "cluster.node_id",
+    "cluster.peers",
 ];
 
 /// Address the HTTP server binds to.
@@ -68,16 +70,89 @@ impl Default for ModelSettings {
     }
 }
 
+/// Static cluster membership: this node's id and every member's id and address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterSettings {
+    pub node_id: u64,
+    pub peers: Vec<(u64, String)>,
+}
+
+/// The cluster keys as written, before they are checked against each other.
+#[derive(Debug, Default, Deserialize)]
+struct RawCluster {
+    node_id: Option<u64>,
+    peers: Option<String>,
+}
+
+impl RawCluster {
+    fn parse(self) -> Result<Option<ClusterSettings>, ConfigError> {
+        let (node_id, peers) = match (self.node_id, self.peers) {
+            (None, None) => return Ok(None),
+            (Some(id), Some(peers)) => (id, peers),
+            _ => {
+                return Err(invalid(
+                    "CLUSTER.NODE_ID and CLUSTER.PEERS must be set together",
+                ));
+            }
+        };
+        let peers = parse_peers(&peers)?;
+        if !peers.iter().any(|(id, _)| *id == node_id) {
+            return Err(invalid(format!(
+                "CLUSTER.NODE_ID {node_id} is not in CLUSTER.PEERS"
+            )));
+        }
+        if peers.len() % 2 == 0 {
+            return Err(invalid("CLUSTER.PEERS must list an odd number of peers"));
+        }
+        Ok(Some(ClusterSettings { node_id, peers }))
+    }
+}
+
+fn invalid(message: impl Into<String>) -> ConfigError {
+    ConfigError::Message(message.into())
+}
+
+/// Parse `1=host:port,2=host:port,...`; ids must be unique.
+fn parse_peers(text: &str) -> Result<Vec<(u64, String)>, ConfigError> {
+    let mut peers: Vec<(u64, String)> = Vec::new();
+    for pair in text.split(',') {
+        let bad = || invalid(format!("CLUSTER.PEERS entry {pair:?} is not id=host:port"));
+        let (id, addr) = pair.split_once('=').ok_or_else(bad)?;
+        let id: u64 = id.trim().parse().map_err(|_| bad())?;
+        let addr = addr.trim();
+        if addr.is_empty() {
+            return Err(bad());
+        }
+        if peers.iter().any(|(seen, _)| *seen == id) {
+            return Err(invalid(format!("CLUSTER.PEERS repeats id {id}")));
+        }
+        peers.push((id, addr.to_owned()));
+    }
+    Ok(peers)
+}
+
 /// Top-level application settings.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub server: ServerSettings,
-    #[serde(default)]
     pub storage: StorageSettings,
-    #[serde(default)]
     pub scheduler: SchedulerSettings,
-    #[serde(default)]
     pub model: ModelSettings,
+    /// `None` runs a single node exactly as before.
+    pub cluster: Option<ClusterSettings>,
+}
+
+#[derive(Deserialize)]
+struct RawSettings {
+    server: ServerSettings,
+    #[serde(default)]
+    storage: StorageSettings,
+    #[serde(default)]
+    scheduler: SchedulerSettings,
+    #[serde(default)]
+    model: ModelSettings,
+    #[serde(default)]
+    cluster: RawCluster,
 }
 
 /// Merge dotenv pairs and environment pairs into one configuration map.
@@ -164,7 +239,21 @@ impl Settings {
     }
 
     fn from_env_source(env: Environment) -> Result<Self, ConfigError> {
-        Config::builder().add_source(env).build()?.try_deserialize()
+        let raw: RawSettings = Config::builder()
+            .add_source(env)
+            .build()?
+            .try_deserialize()?;
+        let cluster = raw.cluster.parse()?;
+        if cluster.is_some() && raw.storage.path.is_none() {
+            return Err(invalid("a cluster needs STORAGE.PATH"));
+        }
+        Ok(Self {
+            server: raw.server,
+            storage: raw.storage,
+            scheduler: raw.scheduler,
+            model: raw.model,
+            cluster,
+        })
     }
 }
 
@@ -186,6 +275,95 @@ mod tests {
             .collect()
     }
 
+    fn clustered(extra: &[(&str, &str)]) -> Result<Settings, ConfigError> {
+        let mut pairs = vec![("SERVER.HOST", "h"), ("SERVER.PORT", "1")];
+        pairs.extend_from_slice(extra);
+        Settings::from_map(vars(&pairs))
+    }
+
+    #[test]
+    fn three_peer_cluster_parses() {
+        let s = clustered(&[
+            ("STORAGE.PATH", "/d"),
+            ("CLUSTER.NODE_ID", "2"),
+            ("CLUSTER.PEERS", "1=a:1, 2=b:2,3=c:3"),
+        ])
+        .unwrap();
+        let c = s.cluster.unwrap();
+        assert_eq!(c.node_id, 2);
+        assert_eq!(
+            c.peers,
+            vec![(1, "a:1".into()), (2, "b:2".into()), (3, "c:3".into())]
+        );
+    }
+
+    #[test]
+    fn invalid_cluster_settings_are_refused_with_the_problem_named() {
+        let cases: [(&[(&str, &str)], &str); 8] = [
+            (
+                &[("STORAGE.PATH", "/d"), ("CLUSTER.NODE_ID", "1")],
+                "together",
+            ),
+            (
+                &[("STORAGE.PATH", "/d"), ("CLUSTER.PEERS", "1=a:1")],
+                "together",
+            ),
+            (
+                &[
+                    ("STORAGE.PATH", "/d"),
+                    ("CLUSTER.NODE_ID", "1"),
+                    ("CLUSTER.PEERS", "1=a:1,x"),
+                ],
+                "not id=host:port",
+            ),
+            (
+                &[
+                    ("STORAGE.PATH", "/d"),
+                    ("CLUSTER.NODE_ID", "1"),
+                    ("CLUSTER.PEERS", "1=a:1,1=b:2,2=c:3"),
+                ],
+                "repeats id 1",
+            ),
+            (
+                &[
+                    ("STORAGE.PATH", "/d"),
+                    ("CLUSTER.NODE_ID", "1"),
+                    ("CLUSTER.PEERS", ""),
+                ],
+                "not id=host:port",
+            ),
+            (
+                &[
+                    ("STORAGE.PATH", "/d"),
+                    ("CLUSTER.NODE_ID", "9"),
+                    ("CLUSTER.PEERS", "1=a:1"),
+                ],
+                "not in CLUSTER.PEERS",
+            ),
+            (
+                &[
+                    ("STORAGE.PATH", "/d"),
+                    ("CLUSTER.NODE_ID", "1"),
+                    ("CLUSTER.PEERS", "1=a:1,2=b:2"),
+                ],
+                "odd number",
+            ),
+            (
+                &[("CLUSTER.NODE_ID", "1"), ("CLUSTER.PEERS", "1=a:1")],
+                "STORAGE.PATH",
+            ),
+        ];
+        for (extra, problem) in cases {
+            let e = clustered(extra).unwrap_err().to_string();
+            assert!(e.contains(problem), "{extra:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn no_cluster_keys_means_no_cluster() {
+        assert_eq!(clustered(&[]).unwrap().cluster, None);
+    }
+
     #[test]
     fn dotted_keys_parse() {
         let s = Settings::from_map(vars(&[
@@ -203,6 +381,7 @@ mod tests {
                 storage: StorageSettings::default(),
                 scheduler: SchedulerSettings::default(),
                 model: ModelSettings::default(),
+                cluster: None,
             }
         );
         assert_eq!(s.scheduler.workers.get(), 2);

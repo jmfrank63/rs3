@@ -7,6 +7,7 @@ use error::ApiError;
 pub mod error;
 pub mod goals;
 pub mod kv;
+pub mod raft;
 
 /// Build the app configuration for one shared `AppState`.
 ///

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::config::Settings;
 use crate::goals::Goals;
 use crate::js::executor::JsExecutor;
+use crate::raft::Node;
 use crate::store::Store;
 
 /// Shared state for every worker: one store, the settings loaded at startup
@@ -20,6 +21,8 @@ pub struct AppState {
     pub js: JsExecutor,
     /// Generation goals. `None` when the server has no database.
     pub goals: Option<Goals>,
+    /// The Raft node. `None` when the server runs alone.
+    pub cluster: Option<Arc<Node>>,
 }
 
 impl AppState {
@@ -30,6 +33,7 @@ impl AppState {
             settings: Arc::new(settings),
             js,
             goals: None,
+            cluster: None,
         }
     }
 }
