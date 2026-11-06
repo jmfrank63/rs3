@@ -29,7 +29,10 @@ pub async fn insert(
         .map_err(|e| StoreError::MalformedJson(format!("body is not valid UTF-8: {e}")))?;
     let entries = legacy::parse_insert_body(text)?;
     let echo = legacy::format_insert_echo(&entries);
-    state.store.insert_all(entries);
+    let store = state.store.clone();
+    web::block(move || store.insert_all(entries))
+        .await
+        .map_err(blocking_failed)??;
     Ok(HttpResponse::Ok().json(echo))
 }
 
@@ -48,7 +51,17 @@ pub async fn delete_key(
     state: web::Data<AppState>,
     path: web::Path<String>,
 ) -> Result<HttpResponse, ApiError> {
-    Ok(HttpResponse::Ok().json(state.store.remove(&path.into_inner())?))
+    let store = state.store.clone();
+    let value = web::block(move || store.remove(&path.into_inner()))
+        .await
+        .map_err(blocking_failed)??;
+    Ok(HttpResponse::Ok().json(value))
+}
+
+/// The blocking pool that runs a durable write is gone or the write panicked.
+pub(super) fn blocking_failed(e: actix_web::error::BlockingError) -> ApiError {
+    eprintln!("error: store write did not finish: {e}");
+    ApiError::Internal
 }
 
 /// `GET /list` returns every stored pair, sorted by key, in the legacy list shape.
@@ -68,6 +81,30 @@ mod tests {
             .insert_header(("Content-Type", "application/json"))
             .set_payload(payload)
             .uri("/insert")
+    }
+
+    #[actix_web::test]
+    async fn failed_store_writes_answer_500_without_host_details() {
+        let test = test_state();
+        let state = crate::state::AppState::new(
+            crate::store::Store::failing(&[("k", "v")]),
+            (*test.settings).clone(),
+            test.js.clone(),
+        );
+        let app =
+            atest::init_service(App::new().configure(crate::http::configure(state.clone()))).await;
+        for req in [
+            insert_request(r#"{"a":"b"}"#).to_request(),
+            atest::TestRequest::delete().uri("/key/k").to_request(),
+        ] {
+            let resp = atest::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(
+                atest::read_body(resp).await,
+                web::Bytes::from_static(br#"{"error":"internal","message":"internal error"}"#)
+            );
+        }
+        assert_eq!(state.store.len(), 1);
     }
 
     #[actix_web::test]

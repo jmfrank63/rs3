@@ -8,16 +8,20 @@
 //! and touches nothing, without throwing: a thrown op error while the isolate
 //! is terminating would cancel the termination. Writes made before any stop
 //! stay (no transactions).
+use std::hash::{BuildHasher, Hasher};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use deno_core::{FromV8, OpState, op2, v8};
-use deno_error::JsErrorBox;
+use deno_error::{JsErrorBox, JsErrorClass};
 
+use super::oplog::{LogStop, OpLog, Replay};
 use super::{DepthStop, ExecError, JobState};
+use crate::journal::{JournalError, OpError};
 use crate::store::{Store, StoreError, legacy};
 
 /// Per-job context the ops read from `OpState`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ExecCtx {
     /// The store of the caller that submitted the job.
     pub store: Store,
@@ -32,6 +36,10 @@ pub struct ExecCtx {
     /// level of one job, so the executor sees a stop even if a script caught
     /// the error `op_rs3_patch` threw.
     pub(crate) job: Arc<JobState>,
+    /// The op log of a logged job, shared by every level, so one ordered log
+    /// and one cursor span the whole PATCH chain. `None` runs ops live and
+    /// unlogged.
+    pub(crate) log: Option<Arc<OpLog>>,
     /// Test hook: make runtime creation fail at this depth.
     #[cfg(test)]
     pub(crate) fail_runtime_at_depth: Option<u32>,
@@ -55,6 +63,7 @@ impl ExecCtx {
             chain: vec![root.to_owned()],
             max_patch_depth,
             job,
+            log: None,
             #[cfg(test)]
             fail_runtime_at_depth: None,
             #[cfg(test)]
@@ -76,6 +85,7 @@ impl ExecCtx {
             chain,
             max_patch_depth: self.max_patch_depth,
             job: Arc::clone(&self.job),
+            log: self.log.clone(),
             #[cfg(test)]
             fail_runtime_at_depth: self.fail_runtime_at_depth,
             #[cfg(test)]
@@ -140,7 +150,19 @@ fn to_js(e: StoreError) -> JsErrorBox {
         StoreError::NotFound(_) => JsErrorBox::generic(e.to_string()),
         StoreError::MalformedJson(_) => JsErrorBox::type_error(e.to_string()),
         StoreError::InvalidInput(_) => JsErrorBox::type_error(e.to_string()),
+        StoreError::Storage(_) => internal_error(),
     }
+}
+
+/// The error thrown into a script when a store write fails. A storage failure
+/// is a host fault: it is logged and stops the whole job, so the script cannot
+/// catch it and carry on as if the write had happened.
+fn write_error(ctx: &ExecCtx, e: StoreError) -> JsErrorBox {
+    if let StoreError::Storage(detail) = &e {
+        ctx.log_error(format_args!("error: store write failed: {detail:?}"));
+        ctx.note_host_fault();
+    }
+    to_js(e)
 }
 
 /// The error thrown into a script for a host fault. It carries no host details.
@@ -159,6 +181,105 @@ fn depth_error(stop: &DepthStop) -> JsErrorBox {
         }
         .to_string(),
     )
+}
+
+/// The error thrown into a script once its log is stopped. The stop itself is
+/// reported to whoever runs the job through the log, not through this message.
+fn stop_error(stop: LogStop) -> JsErrorBox {
+    JsErrorBox::generic(match stop {
+        LogStop::Fenced => "fenced",
+        LogStop::Diverged => "replay diverged",
+    })
+}
+
+/// What the log says about the op about to run: `None` to run it live, or the
+/// logged answer to give without touching the store. A mismatch stops the log
+/// and answers the stop.
+fn replayed(ctx: &ExecCtx, op: &str, args: &[String]) -> Option<Result<String, JsErrorBox>> {
+    let log = ctx.log.as_ref()?;
+    match log.replay(op, args) {
+        Replay::Live => None,
+        Replay::Logged(Ok(value)) => Some(Ok(value)),
+        Replay::Logged(Err(e)) => Some(Err(JsErrorBox::new(e.class, e.message))),
+        Replay::Diverged => {
+            // Debug-format the op so a script cannot forge log lines.
+            ctx.log_error(format_args!(
+                "error: replay diverged in stream {}: op {op:?}",
+                log.stream()
+            ));
+            Some(Err(stop_error(LogStop::Diverged)))
+        }
+    }
+}
+
+/// The error for a failed log append. A lost fence stops the job quietly, by
+/// design. Any other failure is a host fault: logged once, and the job answers
+/// internal.
+fn log_failure(ctx: &ExecCtx, e: &JournalError) -> JsErrorBox {
+    if matches!(e, JournalError::Fenced { .. }) {
+        if let Some(log) = &ctx.log {
+            log.stop(LogStop::Fenced);
+        }
+        return stop_error(LogStop::Fenced);
+    }
+    ctx.log_error(format_args!("error: op log append failed: {e:?}"));
+    ctx.note_host_fault();
+    internal_error()
+}
+
+/// Log a live op that wrote nothing, then answer it. Without a log, just
+/// answer. A refused write and a failed read are results too and are logged.
+fn answer(
+    ctx: &ExecCtx,
+    op: &str,
+    args: &[String],
+    result: Result<String, JsErrorBox>,
+) -> Result<String, JsErrorBox> {
+    let Some(log) = &ctx.log else {
+        return result;
+    };
+    let logged = result.as_ref().map(String::clone).map_err(|e| OpError {
+        class: e.get_class().into_owned(),
+        message: e.get_message().into_owned(),
+    });
+    match log.log_op(op, args, &logged) {
+        Ok(()) => result,
+        Err(e) => Err(log_failure(ctx, &e)),
+    }
+}
+
+/// The hook of a logged store write: appends the op's result inside the
+/// store's own transaction, so both commit or neither does. A failed append is
+/// left in `failed` for `finish_write`.
+fn log_in_write(
+    ctx: &ExecCtx,
+    txn: &redb::WriteTransaction,
+    op: &str,
+    args: &[String],
+    result: &Result<String, OpError>,
+    failed: &mut Option<JournalError>,
+) -> Result<(), StoreError> {
+    let Some(log) = &ctx.log else {
+        return Ok(());
+    };
+    log.append(txn, op, args, result).map_err(|e| {
+        *failed = Some(e);
+        StoreError::Storage("op log append failed".to_owned())
+    })
+}
+
+/// The answer to a store write that ran live: a failed append is a log
+/// failure, any other error a store error.
+fn finish_write(
+    ctx: &ExecCtx,
+    written: Result<String, StoreError>,
+    failed: Option<JournalError>,
+) -> Result<String, JsErrorBox> {
+    match (written, failed) {
+        (Ok(value), _) => Ok(value),
+        (Err(_), Some(e)) => Err(log_failure(ctx, &e)),
+        (Err(e), None) => Err(write_error(ctx, e)),
+    }
 }
 
 /// The job context, or what an op must answer once the job is stopped.
@@ -182,6 +303,8 @@ fn live_ctx(state: &OpState) -> Result<Option<&ExecCtx>, JsErrorBox> {
         Err(internal_error())
     } else if let Some(stop) = ctx.job.depth_stop() {
         Err(depth_error(stop))
+    } else if let Some(stop) = ctx.log.as_ref().and_then(|log| log.stopped()) {
+        Err(stop_error(stop))
     } else {
         Ok(Some(ctx))
     }
@@ -197,7 +320,49 @@ fn op_rs3_list(state: &mut OpState) -> Result<String, JsErrorBox> {
     let Some(ctx) = live_ctx(state)? else {
         return Ok(String::new());
     };
-    Ok(legacy::format_list(&ctx.store.list()))
+    if let Some(logged) = replayed(ctx, "op_rs3_list", &[]) {
+        return logged;
+    }
+    answer(
+        ctx,
+        "op_rs3_list",
+        &[],
+        Ok(legacy::format_list(&ctx.store.list())),
+    )
+}
+
+/// Returns the current time in milliseconds since the Unix epoch, as a decimal
+/// string. A logged job replays the time it first saw.
+#[op2]
+#[string]
+fn op_rs3_now(state: &mut OpState) -> Result<String, JsErrorBox> {
+    let Some(ctx) = live_ctx(state)? else {
+        return Ok(String::new());
+    };
+    if let Some(logged) = replayed(ctx, "op_rs3_now", &[]) {
+        return logged;
+    }
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    answer(ctx, "op_rs3_now", &[], Ok(millis.to_string()))
+}
+
+/// Returns a random `u64` as a decimal string. A logged job replays the number
+/// it first saw.
+#[op2]
+#[string]
+fn op_rs3_random(state: &mut OpState) -> Result<String, JsErrorBox> {
+    let Some(ctx) = live_ctx(state)? else {
+        return Ok(String::new());
+    };
+    if let Some(logged) = replayed(ctx, "op_rs3_random", &[]) {
+        return logged;
+    }
+    let n = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    answer(ctx, "op_rs3_random", &[], Ok(n.to_string()))
 }
 
 /// Returns the value stored under `key`. Throws `Error: key not found: <key>`
@@ -210,7 +375,16 @@ fn op_rs3_get(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, JsEr
     let Some(ctx) = live_ctx(state)? else {
         return Ok(String::new());
     };
-    ctx.store.get(&key.0).map_err(to_js)
+    let args = [key.0];
+    if let Some(logged) = replayed(ctx, "op_rs3_get", &args) {
+        return logged;
+    }
+    answer(
+        ctx,
+        "op_rs3_get",
+        &args,
+        ctx.store.get(&args[0]).map_err(to_js),
+    )
 }
 
 /// Stores every pair of a JSON object of strings and returns the compact echo
@@ -225,11 +399,25 @@ fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, 
     let Some(ctx) = live_ctx(state)? else {
         return Ok(String::new());
     };
+    let args = [body.0];
+    if let Some(logged) = replayed(ctx, "op_rs3_insert", &args) {
+        return logged;
+    }
     // Validate the whole body before the first write.
-    let entries = legacy::parse_insert_body(&body.0).map_err(to_js)?;
+    let entries = match legacy::parse_insert_body(&args[0]) {
+        Ok(entries) => entries,
+        Err(e) => return answer(ctx, "op_rs3_insert", &args, Err(to_js(e))),
+    };
     let echo = legacy::format_insert_echo(&entries);
-    ctx.store.insert_all(entries);
-    Ok(echo)
+    let logged = Ok(echo.clone());
+    let mut failed = None;
+    let written = ctx
+        .store
+        .insert_all_with(entries, |txn| {
+            log_in_write(ctx, txn, "op_rs3_insert", &args, &logged, &mut failed)
+        })
+        .map(|_| echo);
+    finish_write(ctx, written, failed)
 }
 
 /// Removes `key` and returns the value it held. Throws
@@ -242,7 +430,26 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
     let Some(ctx) = live_ctx(state)? else {
         return Ok(String::new());
     };
-    ctx.store.remove(&key.0).map_err(to_js)
+    let args = [key.0];
+    if let Some(logged) = replayed(ctx, "op_rs3_delete", &args) {
+        return logged;
+    }
+    let mut failed = None;
+    let removed = ctx.store.remove_with(&args[0], |txn, old| {
+        log_in_write(
+            ctx,
+            txn,
+            "op_rs3_delete",
+            &args,
+            &Ok(old.to_owned()),
+            &mut failed,
+        )
+    });
+    match removed {
+        // A refused write is a result too, and is logged.
+        Err(e @ StoreError::NotFound(_)) => answer(ctx, "op_rs3_delete", &args, Err(to_js(e))),
+        removed => finish_write(ctx, removed, failed),
+    }
 }
 
 /// Runs the script stored under `key` in a fresh nested runtime on the same
@@ -310,7 +517,19 @@ fn op_rs3_patch(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, Js
         }
         return Err(depth_error(stop));
     }
-    let source = ctx.store.get(&key).map_err(to_js)?;
+    // The source read is the one logged op of a PATCH; the nested script's own
+    // ops follow it in the shared log, and its return value is not logged.
+    let args = [key];
+    let source = match replayed(&ctx, "op_rs3_patch", &args) {
+        Some(logged) => logged,
+        None => answer(
+            &ctx,
+            "op_rs3_patch",
+            &args,
+            ctx.store.get(&args[0]).map_err(to_js),
+        ),
+    }?;
+    let [key] = args;
     let result = super::runtime::run_script(ctx.nested(&key), &key, source);
     // Record a host fault before anything else, timeout included: a host fault
     // beats a timeout (D-04), and it must be logged even when the job timed
@@ -415,7 +634,15 @@ fn flush_retrying(w: &mut impl std::io::Write) -> std::io::Result<()> {
 
 deno_core::extension!(
     rs3_ext,
-    ops = [op_rs3_list, op_rs3_get, op_rs3_insert, op_rs3_delete, op_rs3_patch],
+    ops = [
+        op_rs3_list,
+        op_rs3_get,
+        op_rs3_insert,
+        op_rs3_delete,
+        op_rs3_patch,
+        op_rs3_now,
+        op_rs3_random
+    ],
     options = { ctx: ExecCtx },
     // op_panic is a deno_core built-in that panics inside an op, which aborts
     // the whole process. Disabled ops throw a catchable "op is disabled".
@@ -682,6 +909,21 @@ mod tests {
         assert_eq!(job.error_log_count(), 2);
     }
 
+    #[test]
+    fn failed_store_writes_stop_the_job_even_when_caught() {
+        for op in [
+            r#"Deno.core.ops.op_rs3_insert('{"b":"2"}')"#,
+            "Deno.core.ops.op_rs3_delete('a')",
+        ] {
+            let store = Store::failing(&[("a", "1")]);
+            let src = format!("try {{ {op} }} catch (e) {{}}; 'carried on'");
+            let r = run_js(&store, &src);
+            assert!(is_internal(&r), "{op}: {r:?}");
+            assert_eq!(store.get("a"), Ok("1".to_owned()));
+            assert_eq!(store.len(), 1);
+        }
+    }
+
     fn failing_at(store: &Store, depth: u32) -> ExecCtx {
         let mut ctx = ctx_for(store);
         ctx.fail_runtime_at_depth = Some(depth);
@@ -756,8 +998,10 @@ mod tests {
                       g(() => Deno.core.ops.op_rs3_get('k')),
                       g(() => Deno.core.ops.op_rs3_insert('{"w":"1"}')),
                       g(() => Deno.core.ops.op_rs3_delete('k')),
-                      g(() => Deno.core.ops.op_rs3_patch('inner'))].join('|')"#;
-        let refused = ["Error: internal error"; 5].join("|");
+                      g(() => Deno.core.ops.op_rs3_patch('inner')),
+                      g(() => Deno.core.ops.op_rs3_now()),
+                      g(() => Deno.core.ops.op_rs3_random())].join('|')"#;
+        let refused = ["Error: internal error"; 7].join("|");
         assert_eq!(run_ctx(ctx, src), Ok(refused));
         assert_eq!(store.get("k"), Ok("v".to_owned()));
         assert!(store.get("w").is_err());
@@ -885,8 +1129,10 @@ mod tests {
                       g(() => Deno.core.ops.op_rs3_get('k')),
                       g(() => Deno.core.ops.op_rs3_insert('{"w":"1"}')),
                       g(() => Deno.core.ops.op_rs3_delete('k')),
-                      g(() => Deno.core.ops.op_rs3_patch('inner'))].join('|')"#;
-        let refused = ["Error: PATCH nesting depth limit (4) exceeded: a -> b"; 5].join("|");
+                      g(() => Deno.core.ops.op_rs3_patch('inner')),
+                      g(() => Deno.core.ops.op_rs3_now()),
+                      g(() => Deno.core.ops.op_rs3_random())].join('|')"#;
+        let refused = ["Error: PATCH nesting depth limit (4) exceeded: a -> b"; 7].join("|");
         assert_eq!(run_ctx(ctx, src), Ok(refused));
         assert_eq!(store.get("k"), Ok("v".to_owned()));
         assert!(store.get("w").is_err());

@@ -7,25 +7,29 @@
 use std::sync::Arc;
 
 use crate::config::Settings;
+use crate::goals::Goals;
 use crate::js::executor::JsExecutor;
 use crate::store::Store;
 
 /// Shared state for every worker: one store, the settings loaded at startup
 /// and the handle to the JS thread pool.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AppState {
     pub store: Store,
     pub settings: Arc<Settings>,
     pub js: JsExecutor,
+    /// Generation goals. `None` when the server has no database.
+    pub goals: Option<Goals>,
 }
 
 impl AppState {
-    /// Pair a fresh, empty store with the given settings and JS pool handle.
-    pub fn new(settings: Settings, js: JsExecutor) -> Self {
+    /// Bundle the store with the given settings and JS pool handle.
+    pub fn new(store: Store, settings: Settings, js: JsExecutor) -> Self {
         Self {
-            store: Store::new(),
+            store,
             settings: Arc::new(settings),
             js,
+            goals: None,
         }
     }
 }
@@ -41,6 +45,7 @@ pub(crate) fn test_state() -> AppState {
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect();
     AppState::new(
+        Store::new(),
         Settings::from_map(map).expect("valid test settings"),
         crate::js::test_executor(),
     )

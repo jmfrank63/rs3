@@ -1,7 +1,8 @@
 # rs3
 
 rs3 is a small Rust key/value store. An actix-web HTTP server keeps string
-key/value pairs in an in-memory map, and `PATCH /key/{key}` runs the stored
+key/value pairs in memory, or also in a database file when `STORAGE.PATH` is
+set, and `PATCH /key/{key}` runs the stored
 value as JavaScript in an embedded V8 (deno_core), whose ops call back into the
 store. It started as a 2021 Birkbeck MSc Computer Science project and now
 builds on Rust 1.99.1 / edition 2024.
@@ -63,7 +64,10 @@ Alternatively, copy `env.example` (`SERVER.HOST=localhost`,
 
 ## Configuration
 
-rs3 reads exactly two settings, `SERVER.HOST` and `SERVER.PORT`. The names are
+rs3 reads five settings: `SERVER.HOST`, `SERVER.PORT`, `STORAGE.PATH`, `SCHEDULER.WORKERS`
+(default 2, how many goals run at once) and `MODEL.TOKENS_PER_SECOND` (default 1000, the speed
+of the built-in deterministic model that generation goals use). Both new settings must be
+positive integers. The names are
 case-insensitive (`SERVER.HOST`, `server.host` and `Server.Port` all work), but
 the dot is required: underscore names such as `SERVER_HOST` and `SERVER_PORT`
 are not read. Every other variable is ignored.
@@ -71,7 +75,11 @@ are not read. Every other variable is ignored.
 - **Sources:** the process environment, and a dotenv file (`.env`) in the
   working directory or the nearest parent directory that has one. The
   environment wins over the file. A missing file is ignored.
-- **No defaults:** both settings are required.
+- **Defaults:** both `SERVER` settings are required; the other settings have defaults.
+- **Storage:** `STORAGE.PATH` is the database file. It is created when missing,
+  but its directory must exist. A write is answered only after it is flushed to
+  disk, and the data is loaded again at the next start. Without this setting,
+  rs3 prints a warning and keeps its data in memory only, so a restart empties it.
 - **A broken dotenv file stops startup.** A line that does not parse, a file
   that starts with a UTF-8 byte order mark (BOM) or an unreadable file gives a
   line that starts with `error: invalid configuration: .env: ` and exit 1.
@@ -92,6 +100,7 @@ the port used):
 | `SERVER.PORT=70000` | ``error: invalid configuration: invalid type: 64-bit unsigned integer `70000`, expected an unsigned 16 bit integer for key `server.port` `` |
 | `SERVER.PORT=` (empty) | ``error: invalid configuration: invalid type: string "", expected an integer for key `server.port` in the environment`` |
 | `SERVER.HOST=` (empty) | `error: cannot bind :5000: failed to lookup address information: Name or service not known` |
+| `STORAGE.PATH` in a missing directory, or held open by another process | `error: cannot open storage: <path>: <cause>` |
 | port already in use | `error: cannot bind 127.0.0.1:5000: Address already in use (os error 98)` |
 | port 80 as an unprivileged user | `error: cannot bind 127.0.0.1:80: Permission denied (os error 13)` |
 
@@ -183,6 +192,56 @@ Two answers come from actix-web itself, not from rs3:
 
 What a PATCH script can do, and the limits that produce 422 `js_depth_limit`
 and 504 `js_timeout`, are described in the JavaScript ops and Limits sections.
+
+## Goals
+
+A goal is a job that rs3 runs in the background and that survives a crash. It needs
+`STORAGE.PATH`; without it every goals route answers 503
+`{"error":"goals_unavailable","message":"goals need a database; set STORAGE.PATH"}`.
+Up to `SCHEDULER.WORKERS` goals run at once, the highest `priority` first.
+
+**`POST /goals`** answers 201 `{"id":1}` once the goal is durable. There are two kinds of body:
+
+```sh
+# generation: the built-in deterministic model writes `budget` numbers from `seed` and `prompt`
+curl -X POST localhost:5000/goals -d '{"priority":0,"budget":50,"seed":7,"prompt":"hello"}'
+# script: runs the script stored under key `job` (its text is pinned at creation)
+curl -X POST localhost:5000/goals -d '{"priority":0,"script":"job"}'
+```
+
+`budget` must be at least 1 (otherwise 422 `{"error":"invalid_input","message":"invalid input: budget must be at least 1"}`).
+A script key that does not exist answers 404 `not_found`; any other body shape answers 422 `invalid_input`.
+A script goal runs the script like `PATCH /key/{key}` does, so it uses the same ops.
+
+**`GET /goals/{id}`** answers 200 `{"status":...,"output":...,"error":...}`. An unknown or
+non-numeric id answers 404 `{"error":"not_found","message":"goal not found: 99"}`.
+
+```
+{"status":"done","output":"4075222287 1663024617 3986190089 ...","error":null}   # generation, shortened
+{"status":"done","output":"{\"count\":\"1\"}","error":null}                      # script: its result
+{"status":"failed","output":null,"error":"js_error"}                             # script that threw
+```
+
+`status` is one of `queued`, `running`, `paused`, `done`, `failed` or `cancelled`. `output` is what is
+committed so far, so a running generation goal shows a growing prefix. `paused` means a worker
+was taken away from the goal and it waits to resume. When `status` is `failed`, `error` is
+`journal_corrupt` (the goal's log failed its checksum), `replay_diverged` (the script did not repeat what the
+log recorded), `js_error`, `js_timeout` or `storage_failure` (a worker hit a storage error; the goal resumes on the
+next start).
+
+**`DELETE /goals/{id}`** cancels the goal durably and answers 200 with the same JSON as GET. It is idempotent:
+a second DELETE, or a DELETE of a goal that already ended, answers the same and keeps the status. The output committed
+before the cancel stays readable:
+
+```
+{"status":"cancelled","output":"3582316009 2537275175 ...","error":null}
+```
+
+**Guarantee.** After `kill -9` and a restart, every goal resumes: generation goals produce the same
+output as an uninterrupted run, and each write a script goal makes to the store is applied once.
+`scripts/ci-smoke.sh` tests this on the release binary. Power loss is not covered by these tests.
+A script must be repeatable from its log: host clocks such as `Intl.DateTimeFormat` with no date are not,
+and a script that uses them fails visibly with `replay_diverged` instead of giving a different result.
 
 ## JavaScript ops
 
@@ -503,7 +562,9 @@ bash scripts/ci-smoke.sh
 ```
 
 `scripts/ci-smoke.sh` needs the release build first: it starts
-`target/release/rs3` on a free loopback port and drives it with curl.
+`target/release/rs3` on a free loopback port and drives it with curl. It also runs
+generation and script goals through three `kill -9` restarts and checks that their
+output is identical and every write is applied once.
 
 Also run the guard self-test locally; CI does not run it:
 

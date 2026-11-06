@@ -1,11 +1,35 @@
-//! In-memory key/value store.
+//! Key/value store, in memory or backed by a database file.
 //!
 //! `Store` is a cheap-to-clone handle over one shared concurrent map. Every
 //! method is synchronous and returns owned values, so no map guard ever escapes
 //! a call. This crate module is free of HTTP, JS and global state.
-use std::sync::Arc;
+//!
+//! A durable store writes through to disk. Reads only use the map, and a write
+//! reaches the map after its commit has been flushed, so a reader never sees a
+//! value that a crash could still lose. A failed write leaves the map unchanged.
+//! Durable writes block on the disk, so async code must not call them directly.
+use std::sync::{Arc, Mutex, PoisonError};
+
+use redb::{Database, ReadableDatabase, ReadableTable, Table, TableDefinition};
 
 pub mod legacy;
+
+const KV: TableDefinition<&str, &str> = TableDefinition::new("kv");
+
+/// Where writes go besides the map.
+#[derive(Clone, Default)]
+enum Persistence {
+    #[default]
+    Memory,
+    Durable(Arc<Database>),
+    /// Every write fails, as with a full or broken disk.
+    #[cfg(test)]
+    Failing,
+}
+
+fn storage<E: Into<redb::Error>>(e: E) -> StoreError {
+    StoreError::Storage(e.into().to_string())
+}
 
 /// Errors returned by store operations.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -16,20 +40,95 @@ pub enum StoreError {
     MalformedJson(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    /// The write did not reach the disk, or a failed commit left its outcome
+    /// unknown until the next start. The map was not changed.
+    #[error("storage failure: {0}")]
+    Storage(String),
 }
 
 /// Shared handle to the key/value map. Clones share the same map.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default)]
 pub struct Store {
     map: Arc<papaya::HashMap<String, String>>,
+    persistence: Persistence,
+    /// Held across commit and map update, so the map applies writes in commit order.
+    write_order: Arc<Mutex<()>>,
 }
 
 // Every method takes its own `pin()` guard and drops it before returning, so a
 // guard never escapes and a re-entrant caller (a future JS op) cannot deadlock.
 impl Store {
-    /// An empty store.
+    /// An empty store that keeps its data in memory only.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A store backed by `db`, loaded with everything `db` already holds.
+    pub fn durable(db: Arc<Database>) -> Result<Self, StoreError> {
+        let txn = db.begin_write().map_err(storage)?;
+        txn.open_table(KV).map_err(storage)?;
+        txn.commit().map_err(storage)?;
+
+        let store = Self {
+            persistence: Persistence::Durable(db.clone()),
+            ..Self::default()
+        };
+        let txn = db.begin_read().map_err(storage)?;
+        let table = txn.open_table(KV).map_err(storage)?;
+        {
+            let map = store.map.pin();
+            for entry in table.iter().map_err(storage)? {
+                let (key, value) = entry.map_err(storage)?;
+                map.insert(key.value().to_owned(), value.value().to_owned());
+            }
+        }
+        Ok(store)
+    }
+
+    /// A store holding `entries` whose every write fails, for testing how
+    /// callers handle that.
+    #[cfg(test)]
+    pub(crate) fn failing(entries: &[(&str, &str)]) -> Self {
+        let store = Self::new();
+        for (key, value) in entries {
+            store.insert((*key).to_owned(), (*value).to_owned());
+        }
+        Self {
+            persistence: Persistence::Failing,
+            ..store
+        }
+    }
+
+    /// Run `write`, then `hook`, in one transaction and flush it. A hook error
+    /// drops the transaction, so neither change reaches the disk. A memory store
+    /// does nothing and runs no hook.
+    fn commit(
+        &self,
+        write: impl FnOnce(&mut Table<'_, &'static str, &'static str>) -> Result<(), redb::StorageError>,
+        hook: impl FnOnce(&redb::WriteTransaction) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        match &self.persistence {
+            Persistence::Memory => Ok(()),
+            Persistence::Durable(db) => {
+                let txn = db.begin_write().map_err(storage)?;
+                {
+                    let mut table = txn.open_table(KV).map_err(storage)?;
+                    write(&mut table).map_err(storage)?;
+                }
+                hook(&txn)?;
+                txn.commit().map_err(storage)
+            }
+            #[cfg(test)]
+            Persistence::Failing => Err(StoreError::Storage("injected failure".to_owned())),
+        }
+    }
+
+    /// Serialize writers. A panic while this was held cannot have left the map
+    /// ahead of the disk, so a poisoned lock is safe to reuse.
+    fn lock_writes(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write_order
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The value stored under `key`, or `NotFound`.
@@ -42,33 +141,79 @@ impl Store {
     }
 
     /// Store `value` under `key`, returning the value it replaced, if any.
+    #[cfg(test)]
     pub fn insert(&self, key: String, value: String) -> Option<String> {
+        let _order = self.lock_writes();
+        self.commit(
+            |table| table.insert(key.as_str(), value.as_str()).map(|_| ()),
+            |_| Ok(()),
+        )
+        .unwrap();
         self.map.pin().insert(key, value).cloned()
     }
 
-    /// Write every pair under one map guard and return the number written.
+    /// Write every pair in one transaction and return the number written. On an
+    /// error nothing reaches the map.
     ///
-    /// This cannot fail: callers validate the whole batch before calling it
-    /// (the HTTP handler does so through `legacy::parse_insert_body`), so an
-    /// invalid body writes nothing. It is not atomic for concurrent readers: a
+    /// Callers validate the whole batch before calling this (the HTTP handler
+    /// does so through `legacy::parse_insert_body`), so an invalid body writes
+    /// nothing. The batch is atomic on disk but not for concurrent readers: a
     /// simultaneous `list()` or `get()` may observe a partially written batch.
-    pub fn insert_all<I: IntoIterator<Item = (String, String)>>(&self, entries: I) -> usize {
+    pub fn insert_all<I: IntoIterator<Item = (String, String)>>(
+        &self,
+        entries: I,
+    ) -> Result<usize, StoreError> {
+        self.insert_all_with(entries, |_| Ok(()))
+    }
+
+    /// Like `insert_all`, and `hook` runs inside the commit transaction, so what
+    /// it writes commits or rolls back together with the entries. A hook error
+    /// writes nothing. A memory store runs no hook.
+    pub fn insert_all_with<I: IntoIterator<Item = (String, String)>>(
+        &self,
+        entries: I,
+        hook: impl FnOnce(&redb::WriteTransaction) -> Result<(), StoreError>,
+    ) -> Result<usize, StoreError> {
+        let entries: Vec<(String, String)> = entries.into_iter().collect();
+        let _order = self.lock_writes();
+        self.commit(
+            |table| {
+                for (key, value) in &entries {
+                    table.insert(key.as_str(), value.as_str())?;
+                }
+                Ok(())
+            },
+            hook,
+        )?;
+        let count = entries.len();
         let map = self.map.pin();
-        let mut count = 0;
         for (key, value) in entries {
             map.insert(key, value);
-            count += 1;
         }
-        count
+        Ok(count)
     }
 
     /// Remove `key` and return the value it held, or `NotFound`.
     pub fn remove(&self, key: &str) -> Result<String, StoreError> {
-        self.map
-            .pin()
-            .remove(key)
-            .cloned()
-            .ok_or_else(|| StoreError::NotFound(key.to_owned()))
+        self.remove_with(key, |_, _| Ok(()))
+    }
+
+    /// Like `remove`, and `hook` runs inside the commit transaction with the
+    /// value being removed. A hook error removes nothing, and a missing key runs
+    /// no hook. A memory store runs no hook.
+    pub fn remove_with(
+        &self,
+        key: &str,
+        hook: impl FnOnce(&redb::WriteTransaction, &str) -> Result<(), StoreError>,
+    ) -> Result<String, StoreError> {
+        let not_found = || StoreError::NotFound(key.to_owned());
+        let _order = self.lock_writes();
+        let map = self.map.pin();
+        let Some(old) = map.get(key) else {
+            return Err(not_found());
+        };
+        self.commit(|table| table.remove(key).map(|_| ()), |txn| hook(txn, old))?;
+        map.remove(key).cloned().ok_or_else(not_found)
     }
 
     /// Owned snapshot of every entry, sorted by key.
@@ -132,7 +277,7 @@ mod tests {
     fn insert_all_writes_all_and_counts() {
         let store = Store::new();
         let n = store.insert_all([kv("a", "1"), kv("b", "2")]);
-        assert_eq!(n, 2);
+        assert_eq!(n, Ok(2));
         assert_eq!(store.get("a"), Ok("1".to_owned()));
         assert_eq!(store.get("b"), Ok("2".to_owned()));
         assert_eq!(store.len(), 2);
@@ -225,5 +370,175 @@ mod tests {
             .count();
         assert_eq!(not_found, 7);
         assert!(store.is_empty());
+    }
+
+    fn durable_at(path: &std::path::Path) -> Store {
+        Store::durable(crate::storage::open(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn durable_writes_survive_reopening() {
+        let dir = crate::storage::TempDir::new();
+        let path = dir.path().join("db");
+        {
+            let store = durable_at(&path);
+            assert_eq!(
+                store.insert_all([kv("a", "1"), kv("b", "2"), kv("c", "3")]),
+                Ok(3)
+            );
+            assert_eq!(store.insert_all([kv("a", "changed")]), Ok(1));
+            assert_eq!(store.remove("b"), Ok("2".to_owned()));
+        }
+        assert_eq!(
+            durable_at(&path).list(),
+            vec![kv("a", "changed"), kv("c", "3")]
+        );
+    }
+
+    #[test]
+    fn durable_remove_of_a_missing_key_is_not_found() {
+        let dir = crate::storage::TempDir::new();
+        let store = durable_at(&dir.path().join("db"));
+        assert_eq!(
+            store.remove("nope"),
+            Err(StoreError::NotFound("nope".into()))
+        );
+    }
+
+    #[test]
+    fn memory_and_disk_agree_after_concurrent_writes() {
+        let dir = crate::storage::TempDir::new();
+        let path = dir.path().join("db");
+        let store = durable_at(&path);
+        std::thread::scope(|scope| {
+            for writer in 0..4 {
+                let store = store.clone();
+                scope.spawn(move || {
+                    for i in 0..10 {
+                        store
+                            .insert_all([kv("shared", &format!("{writer}-{i}"))])
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        let in_memory = store.list();
+        drop(store);
+        assert_eq!(durable_at(&path).list(), in_memory);
+    }
+
+    fn note(text: &str) -> crate::journal::Record {
+        crate::journal::Record::ScriptStart {
+            name: text.to_owned(),
+            source: String::new(),
+        }
+    }
+
+    fn op(name: &str) -> crate::journal::Record {
+        crate::journal::Record::OpResult {
+            op: name.to_owned(),
+            args: vec![],
+            result: Ok(String::new()),
+        }
+    }
+
+    fn hook_failure() -> StoreError {
+        StoreError::Storage("hook failed".to_owned())
+    }
+
+    fn with_journal(path: &std::path::Path) -> (Store, crate::journal::Journal) {
+        let db = crate::storage::open(path).unwrap();
+        (
+            Store::durable(db.clone()).unwrap(),
+            crate::journal::Journal::new(db).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_hook_record_commits_with_the_writes() {
+        let dir = crate::storage::TempDir::new();
+        let path = dir.path().join("db");
+        {
+            let (store, journal) = with_journal(&path);
+            store
+                .insert_all_with([kv("a", "1")], |txn| {
+                    journal
+                        .append_in(txn, 7, 0, &note("put"))
+                        .map_err(|e| StoreError::Storage(e.to_string()))
+                })
+                .unwrap();
+            store.insert_all([kv("b", "2")]).unwrap();
+            let got = store
+                .remove_with("b", |txn, old| {
+                    assert_eq!(old, "2");
+                    journal
+                        .append_in(txn, 7, 1, &op("del"))
+                        .map_err(|e| StoreError::Storage(e.to_string()))
+                })
+                .unwrap();
+            assert_eq!(got, "2");
+        }
+        let (store, journal) = with_journal(&path);
+        assert_eq!(store.list(), vec![kv("a", "1")]);
+        assert_eq!(journal.read(7).unwrap(), vec![note("put"), op("del")]);
+    }
+
+    #[test]
+    fn a_failing_hook_leaves_insert_unchanged() {
+        let dir = crate::storage::TempDir::new();
+        let path = dir.path().join("db");
+        {
+            let (store, journal) = with_journal(&path);
+            store.insert_all([kv("a", "1")]).unwrap();
+            let result = store.insert_all_with([kv("a", "2"), kv("b", "3")], |txn| {
+                journal.append_in(txn, 7, 0, &note("x")).unwrap();
+                Err(hook_failure())
+            });
+            assert_eq!(result, Err(hook_failure()));
+            assert_eq!(store.list(), vec![kv("a", "1")]);
+            assert_eq!(journal.read(7), Ok(vec![]));
+        }
+        let (store, journal) = with_journal(&path);
+        assert_eq!(store.list(), vec![kv("a", "1")]);
+        assert_eq!(journal.read(7), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_failing_hook_leaves_remove_unchanged() {
+        let dir = crate::storage::TempDir::new();
+        let path = dir.path().join("db");
+        {
+            let (store, journal) = with_journal(&path);
+            store.insert_all([kv("a", "1")]).unwrap();
+            let result = store.remove_with("a", |txn, _| {
+                journal.append_in(txn, 7, 0, &note("x")).unwrap();
+                Err(hook_failure())
+            });
+            assert_eq!(result, Err(hook_failure()));
+            assert_eq!(store.get("a"), Ok("1".to_owned()));
+            assert_eq!(journal.read(7), Ok(vec![]));
+        }
+        let (store, journal) = with_journal(&path);
+        assert_eq!(store.get("a"), Ok("1".to_owned()));
+        assert_eq!(journal.read(7), Ok(vec![]));
+    }
+
+    #[test]
+    fn removing_a_missing_key_does_not_run_the_hook() {
+        let dir = crate::storage::TempDir::new();
+        let (store, _) = with_journal(&dir.path().join("db"));
+        let result = store.remove_with("nope", |_, _| panic!("hook must not run"));
+        assert_eq!(result, Err(StoreError::NotFound("nope".into())));
+    }
+
+    #[test]
+    fn failed_writes_leave_the_map_unchanged() {
+        let store = Store::failing(&[("a", "1")]);
+        assert!(matches!(
+            store.insert_all([kv("a", "2"), kv("b", "3")]),
+            Err(StoreError::Storage(_))
+        ));
+        assert!(matches!(store.remove("a"), Err(StoreError::Storage(_))));
+        assert_eq!(store.list(), vec![kv("a", "1")]);
     }
 }

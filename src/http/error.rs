@@ -6,17 +6,22 @@
 //! `js_error` (422, the message is only the JS exception message),
 //! `js_depth_limit` (422, the message names the limit and the PATCH key chain),
 //! `js_timeout` (504, the message names the execution limit in milliseconds)
+//! `goals_unavailable` (503, fixed message: the server has no database for goals)
 //! and `internal` (500, fixed message `internal error`; details go to stderr).
+//! An unknown goal answers `not_found` (404, `goal not found: {id}`).
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 
+use crate::journal::JournalError;
 use crate::js::ExecError;
 use crate::store::StoreError;
 
 /// Errors a handler can return; each maps to one status code and machine code.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
+    /// A client-visible store error. Storage failures never get here: `From`
+    /// logs them and answers `Internal`.
     #[error(transparent)]
-    Store(#[from] StoreError),
+    Store(StoreError),
     /// A stored script threw, failed to parse or left an op error uncaught.
     /// Carries only the JS exception message; the stack went to stderr.
     #[error("{0}")]
@@ -29,9 +34,38 @@ pub enum ApiError {
     /// the message naming the limit.
     #[error("{0}")]
     JsTimeout(String),
+    /// The server runs without a database, so it has no goals.
+    #[error("goals need a database; set STORAGE.PATH")]
+    GoalsUnavailable,
+    /// No goal has this id (as given in the path).
+    #[error("goal not found: {0}")]
+    GoalNotFound(String),
     /// A host fault. The body message is always the fixed `internal error`.
     #[error("internal error")]
     Internal,
+}
+
+impl From<StoreError> for ApiError {
+    /// A storage failure is a host fault: it is logged to stderr and becomes 500
+    /// `internal`, so host details never reach the client.
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::Storage(detail) => {
+                eprintln!("error: store failure: {detail}");
+                ApiError::Internal
+            }
+            other => ApiError::Store(other),
+        }
+    }
+}
+
+impl From<JournalError> for ApiError {
+    /// A journal failure is a host fault: it is logged to stderr and becomes
+    /// 500 `internal`, so host details never reach the client.
+    fn from(e: JournalError) -> Self {
+        eprintln!("error: journal failure: {e}");
+        ApiError::Internal
+    }
 }
 
 impl From<ExecError> for ApiError {
@@ -74,9 +108,12 @@ impl ApiError {
             ApiError::Store(StoreError::NotFound(_)) => "not_found",
             ApiError::Store(StoreError::MalformedJson(_)) => "malformed_json",
             ApiError::Store(StoreError::InvalidInput(_)) => "invalid_input",
+            ApiError::Store(StoreError::Storage(_)) => "internal",
             ApiError::JsError(_) => "js_error",
             ApiError::JsDepthLimit(_) => "js_depth_limit",
             ApiError::JsTimeout(_) => "js_timeout",
+            ApiError::GoalsUnavailable => "goals_unavailable",
+            ApiError::GoalNotFound(_) => "not_found",
             ApiError::Internal => "internal",
         }
     }
@@ -88,9 +125,12 @@ impl ResponseError for ApiError {
             ApiError::Store(StoreError::NotFound(_)) => StatusCode::NOT_FOUND,
             ApiError::Store(StoreError::MalformedJson(_)) => StatusCode::BAD_REQUEST,
             ApiError::Store(StoreError::InvalidInput(_)) => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiError::Store(StoreError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::JsError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::JsDepthLimit(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::JsTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
+            ApiError::GoalsUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::GoalNotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

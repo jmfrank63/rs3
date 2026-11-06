@@ -8,6 +8,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use deno_core::{JsRuntime, v8};
 
 pub mod executor;
+pub mod oplog;
 pub mod ops;
 pub mod runtime;
 
@@ -78,6 +79,9 @@ pub struct JobState {
     /// Test hook: counts the error lines the JS layer wrote for this job.
     #[cfg(test)]
     error_logs: AtomicU32,
+    /// Test hook: the error lines the JS layer wrote for this job.
+    #[cfg(test)]
+    error_lines: Mutex<Vec<String>>,
 }
 
 impl JobState {
@@ -175,7 +179,22 @@ impl JobState {
     pub(crate) fn log_error(&self, line: std::fmt::Arguments<'_>) {
         eprintln!("{line}");
         #[cfg(test)]
-        self.error_logs.fetch_add(1, Ordering::SeqCst);
+        {
+            self.error_logs.fetch_add(1, Ordering::SeqCst);
+            self.error_lines
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(line.to_string());
+        }
+    }
+
+    /// The error lines the JS layer wrote for this job, in order.
+    #[cfg(test)]
+    pub(crate) fn error_lines(&self) -> Vec<String> {
+        self.error_lines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// How many error lines the JS layer wrote for this job.

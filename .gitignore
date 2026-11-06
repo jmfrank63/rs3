@@ -13,3 +13,36 @@ web_scrape_s3_api/apirequests.txt
 
 # Local agent tooling (GSD Core install)
 /.claude/
+
+# Quality and GSD tooling output
+/mutants.out*/
+/.gsd/
+
+# ── GSD baseline (auto-generated) ──
+.gsd
+.gsd-id
+.mcp.json
+.bg-shell/
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace
+.env.*
+!.env.example
+node_modules/
+.next/
+dist/
+build/
+__pycache__/
+*.pyc
+.venv/
+venv/
+target/
+vendor/
+*.log
+coverage/
+.cache/
+tmp/
