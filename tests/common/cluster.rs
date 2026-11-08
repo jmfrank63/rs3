@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use crate::common::{Server, TempDir};
 
+const WAIT: Duration = Duration::from_secs(60);
+
 /// Clusters run one at a time: several 5-node clusters at once starve each other.
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -15,7 +17,8 @@ pub struct Cluster {
     nodes: Vec<Option<Server>>,
     ports: Vec<u16>,
     peers: String,
-    dir: TempDir,
+    /// The directory of every node's database and fragment files.
+    pub dir: TempDir,
     env: Vec<(String, String)>,
     /// Nodes paused with SIGSTOP; `leader` skips them.
     stopped: Vec<usize>,
@@ -71,6 +74,10 @@ impl Cluster {
         let mut env = vec![
             ("CLUSTER.NODE_ID", id.as_str()),
             ("CLUSTER.PEERS", self.peers.as_str()),
+            // Small, so a test reaches a snapshot and a log purge with few writes.
+            ("CLUSTER.SNAPSHOT_EVERY", "50"),
+            // Short, so a test sees a shrink without a long wait.
+            ("CLUSTER.SHRINK_AFTER", "5"),
         ];
         env.extend(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         Server::start_on(self.ports[i], &self.dir.0, Some(&db), &env)
@@ -170,6 +177,37 @@ impl Cluster {
     }
 }
 
+/// The last lines of every node log of this test process, for a failing test's message.
+fn node_log_tails() -> String {
+    let suffix = format!("-{}", std::process::id());
+    let mut logs: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|dir| {
+            let name = dir.file_name().to_string_lossy().into_owned();
+            name.starts_with("rs3-it-") && name.ends_with(&suffix)
+        })
+        .flat_map(|dir| {
+            std::fs::read_dir(dir.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+        })
+        .map(|file| file.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
+        .collect();
+    logs.sort();
+    let mut out = String::new();
+    for log in logs {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let tail = &lines[lines.len().saturating_sub(40)..];
+        out.push_str(&format!("\n--- {} ---\n{}", log.display(), tail.join("\n")));
+    }
+    out
+}
+
 /// Poll `f` every 50 ms until it returns `Some`; fail after `deadline`.
 pub fn wait_until<T>(what: &str, deadline: Duration, mut f: impl FnMut() -> Option<T>) -> T {
     let end = Instant::now() + deadline;
@@ -177,7 +215,35 @@ pub fn wait_until<T>(what: &str, deadline: Duration, mut f: impl FnMut() -> Opti
         if let Some(found) = f() {
             return found;
         }
-        assert!(Instant::now() < end, "timed out waiting for {what}");
+        assert!(
+            Instant::now() < end,
+            "timed out waiting for {what}{}",
+            node_log_tails()
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+pub fn goal_body(seed: u64) -> String {
+    format!(r#"{{"priority":0,"budget":900,"seed":{seed},"prompt":"p"}}"#)
+}
+
+pub fn output(goal: &serde_json::Value) -> String {
+    goal["output"].as_str().unwrap().to_owned()
+}
+
+/// The output of a goal run to the end on a single-node server.
+pub fn single_node_output(seed: u64) -> String {
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = TempDir::new(&format!("cluster-reference-{call}"));
+    let server = Server::start(&dir.0, Some(&dir.0.join("rs3.db")), &[]);
+    let created: serde_json::Value =
+        serde_json::from_str(&server.request("POST", "/goals", &goal_body(seed))).unwrap();
+    let path = format!("/goals/{}", created["id"]);
+    wait_until("the reference goal", WAIT, || {
+        let goal: serde_json::Value =
+            serde_json::from_str(&server.request("GET", &path, "")).unwrap();
+        (goal["status"] == "done").then(|| output(&goal))
+    })
 }

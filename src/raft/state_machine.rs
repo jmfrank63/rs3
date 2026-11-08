@@ -1,7 +1,7 @@
 //! The replicated state machine: the kv store plus the last applied log id and
 //! membership, committed together so a restart resumes exactly where it stopped.
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use openraft::storage::{RaftStateMachine, Snapshot, SnapshotMeta};
 use openraft::{
@@ -9,15 +9,26 @@ use openraft::{
     StoredMembership,
 };
 use redb::{Database, ReadableDatabase, TableDefinition};
+use serde::{Deserialize, Serialize};
 
 use super::{Reply, TypeConfig, blocking};
-use crate::journal::Journal;
+use crate::journal::{self, Journal};
 use crate::store::{Response, Store, StoreError, command};
+use crate::{goals, lease};
 
 type Entry = openraft::Entry<TypeConfig>;
 type Membership = StoredMembership<u64, openraft::BasicNode>;
 
 const SM: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_sm");
+
+/// Every table the state machine owns, as a snapshot carries it.
+#[derive(Serialize, Deserialize)]
+struct Image {
+    kv: Vec<(String, String)>,
+    goals: Vec<goals::Row>,
+    journal: journal::Image,
+    leases: lease::Image,
+}
 
 /// Applies committed entries to `store` and records how far it got.
 #[derive(Clone)]
@@ -25,7 +36,13 @@ pub struct RedbStateMachine {
     db: Arc<Database>,
     store: Store,
     journal: Journal,
+    /// The last snapshot built, which is what followers behind the purged log are sent.
+    /// Serving it costs a copy; building one reads and serialises every table.
+    built: Arc<Mutex<Built>>,
 }
+
+type Meta = SnapshotMeta<u64, openraft::BasicNode>;
+type Built = Option<(Meta, Vec<u8>)>;
 
 impl RedbStateMachine {
     /// A state machine over `store`, which must be durable on `db`.
@@ -34,7 +51,12 @@ impl RedbStateMachine {
         txn.open_table(SM)?;
         txn.commit()?;
         let journal = Journal::new(db.clone())?;
-        Ok(Self { db, store, journal })
+        Ok(Self {
+            db,
+            store,
+            journal,
+            built: Arc::default(),
+        })
     }
 }
 
@@ -153,15 +175,21 @@ impl RaftStateMachine<TypeConfig> for RedbStateMachine {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<u64>> {
         let (db, store, meta) = (self.db.clone(), self.store.clone(), meta.clone());
+        let (built, bytes) = (self.built.clone(), snapshot.get_ref().clone());
         blocking(ErrorSubject::StateMachine, ErrorVerb::Write, move || {
-            let entries: Vec<(String, String)> = serde_json::from_slice(snapshot.get_ref())?;
+            let image: Image = serde_json::from_slice(snapshot.get_ref())?;
             let txn = db.begin_write()?;
-            Store::replace_in(&txn, &entries)?;
+            Store::replace_in(&txn, &image.kv)?;
+            goals::replace_in(&txn, &image.goals)?;
+            image.journal.replace_in(&txn)?;
+            image.leases.replace_in(&txn)?;
             if let Some(applied) = &meta.last_log_id {
                 write_sm(&txn, applied, Some(&meta.last_membership))?;
             }
             txn.commit()?;
-            store.publish_all(&entries);
+            // What was installed is newer than anything built before it.
+            *built.lock().unwrap_or_else(PoisonError::into_inner) = Some((meta, bytes));
+            store.publish_all(&image.kv);
             Ok(())
         })
         .await
@@ -171,25 +199,53 @@ impl RaftStateMachine<TypeConfig> for RedbStateMachine {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<u64>> {
-        let snapshot = self.build_snapshot().await?;
+        // Runs inside the apply loop, so it serves the last built snapshot rather than
+        // building one; only a node that has built none since it started builds here.
+        let built = self
+            .built
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let snapshot = match built {
+            Some((meta, data)) => Snapshot {
+                meta,
+                snapshot: Box::new(Cursor::new(data)),
+            },
+            None => self.build_snapshot().await?,
+        };
         Ok(snapshot.meta.last_log_id.is_some().then_some(snapshot))
     }
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for RedbStateMachine {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<u64>> {
-        let db = self.db.clone();
+        let (db, built) = (self.db.clone(), self.built.clone());
         blocking(ErrorSubject::StateMachine, ErrorVerb::Read, move || {
             let txn = db.begin_read()?;
             let (last_log_id, last_membership) = read_sm(&txn)?;
             let snapshot_id = last_log_id.map_or_else(|| "empty".to_owned(), |id| id.to_string());
-            let data = serde_json::to_vec(&Store::dump(&txn)?)?;
+            let data = serde_json::to_vec(&Image {
+                kv: Store::dump(&txn)?,
+                goals: goals::dump_in(&txn)?,
+                journal: journal::Image::dump_in(&txn)?,
+                leases: lease::Image::dump_in(&txn)?,
+            })?;
+            let meta = SnapshotMeta {
+                last_log_id,
+                last_membership,
+                snapshot_id,
+            };
+            let mut built = built.lock().unwrap_or_else(PoisonError::into_inner);
+            let index = |m: &Meta| m.last_log_id.map(|id| id.index);
+            if built
+                .as_ref()
+                .is_none_or(|(old, _)| index(old) <= index(&meta))
+            {
+                *built = Some((meta.clone(), data.clone()));
+            }
+            drop(built);
             Ok(Snapshot {
-                meta: SnapshotMeta {
-                    last_log_id,
-                    last_membership,
-                    snapshot_id,
-                },
+                meta,
                 snapshot: Box::new(Cursor::new(data)),
             })
         })

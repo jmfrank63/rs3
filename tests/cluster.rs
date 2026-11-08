@@ -10,7 +10,7 @@ mod common;
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::cluster::{Cluster, wait_until};
+    use crate::cluster::{Cluster, goal_body, output, single_node_output, wait_until};
     use crate::common::{Server, TempDir, free_port, rs3};
 
     #[test]
@@ -195,30 +195,6 @@ mod tests {
 
     const RATE: &[(&str, &str)] = &[("MODEL.TOKENS_PER_SECOND", "300")];
     const WAIT: Duration = Duration::from_secs(60);
-
-    fn goal_body(seed: u64) -> String {
-        format!(r#"{{"priority":0,"budget":900,"seed":{seed},"prompt":"p"}}"#)
-    }
-
-    fn output(goal: &serde_json::Value) -> String {
-        goal["output"].as_str().unwrap().to_owned()
-    }
-
-    /// The output of a goal run to the end on a single-node server.
-    fn single_node_output(seed: u64) -> String {
-        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = TempDir::new(&format!("cluster-reference-{call}"));
-        let server = Server::start(&dir.0, Some(&dir.0.join("rs3.db")), &[]);
-        let created: serde_json::Value =
-            serde_json::from_str(&server.request("POST", "/goals", &goal_body(seed))).unwrap();
-        let path = format!("/goals/{}", created["id"]);
-        wait_until("the reference goal", WAIT, || {
-            let goal: serde_json::Value =
-                serde_json::from_str(&server.request("GET", &path, "")).unwrap();
-            (goal["status"] == "done").then(|| output(&goal))
-        })
-    }
 
     #[test]
     fn goals_created_through_different_nodes_run_on_several_nodes_and_match_a_single_node() {
@@ -512,14 +488,6 @@ mod tests {
             assert_ne!(done["node"].as_u64(), on(leader), "{done}");
             assert_ne!(done["node"].as_u64(), on(other), "{done}");
         }
-        cluster.restart(leader);
-        cluster.restart(other);
-        let (seed, id) = ids[0];
-        let caught_up = wait_until("a restarted node to serve goal 0", WAIT, || {
-            let goal = cluster.goal(leader, id);
-            (goal["status"] == "done").then_some(goal)
-        });
-        assert_eq!(output(&caught_up), single_node_output(seed));
     }
 
     #[test]

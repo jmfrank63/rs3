@@ -19,6 +19,7 @@ use crate::store::{Command, Response, Store};
 pub mod assign;
 pub mod log;
 pub mod network;
+pub mod seal;
 pub mod state_machine;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -35,12 +36,19 @@ openraft::declare_raft_types!(
         SnapshotData = Cursor<Vec<u8>>,
 );
 
+/// Entries kept in the log behind each snapshot.
+const KEEP_LOG: u64 = 10;
+/// Snapshot bytes per request. They travel as a JSON array, up to four characters a byte, so
+/// this stays well inside the 2 MiB body limit of the snapshot route.
+const SNAPSHOT_CHUNK: u64 = 256 * 1024;
+
 /// openraft's defaults already give a 50 ms heartbeat and 150-300 ms elections (a test pins
-/// them); snapshots are never taken, so the log is never purged.
-pub fn config() -> Result<Config, BoxError> {
+/// them); a snapshot every `snapshot_every` entries lets the log be purged.
+pub fn config(snapshot_every: u64) -> Result<Config, BoxError> {
     Config {
-        snapshot_policy: SnapshotPolicy::Never,
-        max_in_snapshot_log_to_keep: 1 << 40,
+        snapshot_policy: SnapshotPolicy::LogsSinceLast(snapshot_every),
+        max_in_snapshot_log_to_keep: KEEP_LOG,
+        snapshot_max_chunk_size: SNAPSHOT_CHUNK,
         ..Config::default()
     }
     .validate()
@@ -92,7 +100,7 @@ pub struct Written {
 
 /// How long a request keeps looking for a leader and a quorum before it answers `NoQuorum`,
 /// or `OutcomeUnknown` once its write was handed on and not answered.
-const REQUEST_DEADLINE: Duration = Duration::from_secs(3);
+pub(crate) const REQUEST_DEADLINE: Duration = Duration::from_secs(3);
 /// The pause before a request retries after finding no leader.
 const RETRY_PAUSE: Duration = Duration::from_millis(40);
 
@@ -143,13 +151,21 @@ impl Node {
         members: &BTreeMap<u64, String>,
         db: Arc<redb::Database>,
         store: Store,
+        snapshot_every: u64,
     ) -> Result<Self, BoxError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .thread_name("rs3-raft")
             .enable_all()
             .build()?;
         let network = network::Network::new()?;
-        let started = runtime.spawn(Self::boot(id, members.clone(), db, store, network.clone()));
+        let started = runtime.spawn(Self::boot(
+            id,
+            members.clone(),
+            db,
+            store,
+            network.clone(),
+            snapshot_every,
+        ));
         match started.await {
             Ok(Ok(raft)) => Ok(Self {
                 raft,
@@ -175,8 +191,9 @@ impl Node {
         db: Arc<redb::Database>,
         store: Store,
         network: network::Network,
+        snapshot_every: u64,
     ) -> Result<Raft<TypeConfig>, BoxError> {
-        let config = Arc::new(config()?);
+        let config = Arc::new(config(snapshot_every)?);
         let (log, sm) = (RedbLog::new(db.clone())?, RedbStateMachine::new(db, store)?);
         let members: BTreeMap<u64, BasicNode> = members
             .iter()
@@ -294,6 +311,10 @@ impl Node {
             let (status, why) = (reply.status(), reply.text().await.unwrap_or_default());
             if why == ClusterError::NoQuorum.to_string() {
                 return Err(ClusterError::NoQuorum);
+            }
+            // The node we took for the leader has stopped leading; ask again once a leader is known.
+            if why == ClusterError::NotLeader(None).to_string() {
+                return Err(ClusterError::NotLeader(None));
             }
             return Err(unavailable(format!("{path} refused with {status}: {why}")));
         }
@@ -429,7 +450,7 @@ mod tests {
 
     async fn start(path: &Path) -> Node {
         let (store, log, sm) = storage(path);
-        let config = Arc::new(config().unwrap());
+        let config = Arc::new(config(super::testing::SNAPSHOT_EVERY).unwrap());
         let raft = Raft::new(1, config, NoNetwork, log.clone(), sm.clone())
             .await
             .unwrap();
@@ -476,8 +497,8 @@ mod tests {
     }
 
     #[test]
-    fn the_config_uses_fast_elections_and_never_snapshots_or_purges() {
-        let c = config().unwrap();
+    fn the_config_uses_fast_elections_and_snapshots_and_purges_the_log() {
+        let c = config(7).unwrap();
         assert_eq!(
             (
                 c.heartbeat_interval,
@@ -486,8 +507,49 @@ mod tests {
             ),
             (50, 150, 300)
         );
-        assert!(matches!(c.snapshot_policy, SnapshotPolicy::Never));
-        assert!(c.max_in_snapshot_log_to_keep >= 1 << 40);
+        assert!(matches!(
+            c.snapshot_policy,
+            SnapshotPolicy::LogsSinceLast(7)
+        ));
+        assert_eq!(c.max_in_snapshot_log_to_keep, super::KEEP_LOG);
+    }
+
+    #[actix_web::test]
+    async fn a_follower_behind_the_purged_log_catches_up_from_a_snapshot() {
+        let mut cluster = super::testing::Cluster::start(3, 3).await;
+        let follower = cluster.follower().await;
+        cluster.stop_node(follower).await;
+        let leader = cluster.leader().await;
+        let writes = 3 * super::testing::SNAPSHOT_EVERY;
+        for i in 0..writes {
+            let cmd = put(&format!("k{i}"), &format!("{i}{}", "x".repeat(10_000)));
+            assert_eq!(
+                cluster.nodes[leader].propose(cmd).await.unwrap(),
+                Ok(Response::Put)
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while cluster.nodes[leader]
+            .raft()
+            .metrics()
+            .borrow()
+            .purged
+            .is_none()
+        {
+            assert!(std::time::Instant::now() < deadline, "log never purged");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        cluster.start_node(follower).await;
+        while cluster.stores[follower].list().len() < writes as usize {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "follower never caught up"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let expected = cluster.stores[leader].list();
+        assert_eq!(cluster.stores[follower].list(), expected);
+        cluster.stop().await;
     }
 
     fn kv(k: &str, v: &str) -> (String, String) {
@@ -571,6 +633,109 @@ mod tests {
         assert_eq!(current.meta, snapshot.meta);
         drop((store, to));
         assert_eq!(storage(&path_b).0.list(), vec![kv("b", "2")]);
+    }
+
+    #[tokio::test]
+    async fn the_current_snapshot_is_the_last_one_built_not_a_new_build() {
+        let dir = crate::storage::TempDir::new();
+        let node = written_node(&dir.path().join("a")).await;
+        let mut sm = node.sm.clone();
+        let built = sm.build_snapshot().await.unwrap();
+        assert_eq!(write(&node, put("later", "3")).await, Ok(Response::Put));
+        let current = sm.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta, built.meta);
+        assert_eq!(current.snapshot.get_ref(), built.snapshot.get_ref());
+        // A newer build replaces it.
+        let newer = sm.build_snapshot().await.unwrap();
+        assert!(newer.meta.last_log_id > built.meta.last_log_id);
+        assert_eq!(
+            sm.get_current_snapshot().await.unwrap().unwrap().meta,
+            newer.meta
+        );
+    }
+
+    #[tokio::test]
+    async fn an_installed_snapshot_becomes_the_current_one() {
+        let dir = crate::storage::TempDir::new();
+        let node = written_node(&dir.path().join("a")).await;
+        node.raft.shutdown().await.unwrap();
+        let snapshot = node.sm.clone().build_snapshot().await.unwrap();
+        let (_, _, mut to) = storage(&dir.path().join("b"));
+        to.build_snapshot().await.unwrap();
+        to.install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+        let current = to.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta, snapshot.meta);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_carries_goals_journals_seals_and_leases() {
+        let dir = crate::storage::TempDir::new();
+        let path_a = dir.path().join("a");
+        let node = written_node(&path_a).await;
+        let create = || Command::CreateGoal {
+            priority: 3,
+            budget: 4,
+            start: goal_start(),
+        };
+        assert_eq!(write(&node, create()).await, Ok(Response::GoalCreated(1)));
+        assert_eq!(write(&node, create()).await, Ok(Response::GoalCreated(2)));
+        assert_eq!(
+            write(&node, Command::CancelGoal { id: 2 }).await,
+            Ok(Response::Cancelled)
+        );
+        let seal = Command::Seal {
+            stream: 2,
+            members: vec![1, 2, 3],
+            data: 2,
+            parity: 1,
+            len: 9,
+            checksums: vec![[7; 32]; 3],
+        };
+        assert_eq!(write(&node, seal).await, Ok(Response::Sealed));
+        let assign = Command::Assign {
+            task: 1,
+            node: 1,
+            expect_token: 0,
+        };
+        assert_eq!(
+            write(&node, assign).await,
+            Ok(Response::Assigned { token: 1 })
+        );
+        node.raft.shutdown().await.unwrap();
+        let snapshot = node.sm.clone().build_snapshot().await.unwrap();
+        drop(node);
+
+        let path_b = dir.path().join("b");
+        let (_, _, mut to) = storage(&path_b);
+        to.install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+        drop(to);
+
+        let read = |path: &Path| {
+            let db = crate::storage::open(path).unwrap();
+            let journal = crate::journal::Journal::new(db.clone()).unwrap();
+            let goals = crate::goals::Goals::open(db.clone(), std::num::NonZeroU32::MIN).unwrap();
+            (
+                journal.read(1).unwrap(),
+                journal.read(2).unwrap(),
+                journal.live_streams().unwrap(),
+                journal.seals().unwrap(),
+                crate::lease::owner(&db, 1).unwrap(),
+                crate::lease::token(&db, 1).unwrap(),
+                goals.status(1).unwrap(),
+                goals.status(2).unwrap(),
+                goals.next_goal().map(|g| (g.id, g.priority, g.budget)),
+            )
+        };
+        let restored = read(&path_b);
+        assert_eq!(restored, read(&path_a));
+        assert_eq!(restored.3.len(), 1);
+        assert_eq!(restored.4, Some(1));
+        assert!(restored.6.is_some());
+        assert_eq!(restored.8, Some((1, 3, 4)));
     }
 
     fn goal_start() -> crate::journal::Record {
@@ -1469,6 +1634,293 @@ mod tests {
                 assert!(std::time::Instant::now() < deadline, "never finished");
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
+        }
+        cluster.stop().await;
+    }
+    /// Wait up to 20 s until `ready` holds for the seal of `id` on node `i`.
+    async fn seal_when(
+        cluster: &super::testing::Cluster,
+        i: usize,
+        id: u64,
+        ready: impl Fn(&crate::journal::SealRecord, bool) -> bool,
+    ) -> crate::journal::SealRecord {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let journal = cluster.goals[i].journal();
+            let seal = journal.seal(id).unwrap();
+            let rows = !crate::journal::rows_in(&journal.begin_read().unwrap(), id)
+                .unwrap()
+                .is_empty();
+            if let Some(seal) = seal.filter(|s| ready(s, rows)) {
+                return seal;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "node {i} never sealed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn fully_confirmed(seal: &crate::journal::SealRecord, rows: bool) -> bool {
+        seal.confirmed.len() == seal.members.len() && !rows
+    }
+
+    #[actix_web::test]
+    async fn a_finished_goal_is_sealed_into_one_checksummed_fragment_per_node() {
+        let cluster = super::testing::Cluster::start(5, 5).await;
+        cluster.work();
+        cluster.assign();
+        cluster.leader().await;
+        let goals = cluster.goals[0].clone();
+        let id = off(move || goals.create(spec(20)).unwrap()).await;
+        wait_everywhere(&cluster, id, |s| s.status == "done").await;
+        let mut fragments = vec![];
+        let mut len = 0;
+        for i in 0..5 {
+            let seal = seal_when(&cluster, i, id, fully_confirmed).await;
+            assert_eq!((seal.data, seal.parity), (3, 2));
+            assert_eq!(seal.members, [1, 2, 3, 4, 5]);
+            len = seal.len;
+            let bytes = std::fs::read(cluster.fragments(i).join(id.to_string())).unwrap();
+            assert!(bytes.len() <= len / 3 + 16, "{} of {len}", bytes.len());
+            fragments.push(crate::seal::Fragment {
+                index: i,
+                checksum: seal.checksums[i],
+                bytes,
+            });
+        }
+        let rows = crate::seal::decode(id, len as u64, 3, 2, &fragments[2..]).unwrap();
+        let journal = cluster.goals[0].journal();
+        let records = journal.read_rows(id, &rows).unwrap();
+        assert!(records.last().unwrap().ends_stream());
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
+    async fn three_nodes_seal_a_finished_goal_as_two_data_and_one_parity_fragment() {
+        let cluster = super::testing::Cluster::start(3, 3).await;
+        cluster.work();
+        cluster.assign();
+        cluster.leader().await;
+        let goals = cluster.goals[0].clone();
+        let id = off(move || goals.create(spec(10)).unwrap()).await;
+        for i in 0..3 {
+            let seal = seal_when(&cluster, i, id, fully_confirmed).await;
+            assert_eq!((seal.data, seal.parity), (2, 1));
+        }
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
+    async fn a_node_lost_while_sealing_keeps_the_full_copies_until_it_returns() {
+        let mut cluster = super::testing::Cluster::start(5, 5).await;
+        cluster.work();
+        cluster.assign();
+        let lost = cluster.follower().await;
+        let goals = cluster.goals[cluster.leader().await].clone();
+        cluster.stop_node(lost).await;
+        let id = off(move || goals.create(spec(20)).unwrap()).await;
+        let live: Vec<usize> = (0..5).filter(|&i| i != lost).collect();
+        for &i in &live {
+            let seal = seal_when(&cluster, i, id, |s, _| s.confirmed.len() == 4).await;
+            assert!(!seal.confirmed.contains(&(lost as u64 + 1)));
+            let rows = seal_when(&cluster, i, id, |_, rows| rows).await;
+            assert_eq!(rows.confirmed.len(), 4);
+        }
+        cluster.start_node(lost).await;
+        for i in 0..5 {
+            seal_when(&cluster, i, id, fully_confirmed).await;
+        }
+        cluster.stop().await;
+    }
+    #[actix_web::test]
+    async fn a_node_whose_copy_was_damaged_gets_its_fragment_from_its_peers() {
+        let cluster = super::testing::Cluster::start(3, 3).await;
+        cluster.work();
+        let id = create_and_assign(&cluster, 10, 1).await;
+        wait_everywhere(&cluster, id, |s| s.status == "done").await;
+        let damaged = cluster.follower().await;
+        let txn = cluster.dbs[damaged].begin_write().unwrap();
+        {
+            use redb::ReadableTable;
+            let mut records = txn.open_table(crate::journal::RECORDS).unwrap();
+            let mut row = records.get((id, 0)).unwrap().unwrap().value().to_vec();
+            row.push(0);
+            records.insert((id, 0), row.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+        cluster.assign();
+        let others = (0..3).filter(|&i| i != damaged);
+        for i in others {
+            seal_when(&cluster, i, id, |s, _| s.confirmed.len() >= 2).await;
+        }
+        seal_when(&cluster, damaged, id, |s, _| s.confirmed.len() == 3).await;
+        assert!(cluster.fragments(damaged).join(id.to_string()).exists());
+        cluster.stop().await;
+    }
+
+    /// GET `path` on `addr`: the status and JSON body. Fails, never hangs, after 10 s.
+    async fn http_get(addr: &str, path: &str) -> (u16, serde_json::Value) {
+        let get = async {
+            let reply = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+            (
+                reply.status().as_u16(),
+                reply.json().await.unwrap_or_default(),
+            )
+        };
+        tokio::time::timeout(Duration::from_secs(10), get)
+            .await
+            .expect("no answer")
+    }
+
+    /// A finished goal sealed on all five nodes, and what each node answered before the seal.
+    async fn sealed_goal(cluster: &super::testing::Cluster) -> (u64, serde_json::Value) {
+        cluster.work();
+        cluster.assign();
+        cluster.leader().await;
+        let goals = cluster.goals[0].clone();
+        let id = off(move || goals.create(spec(20)).unwrap()).await;
+        wait_everywhere(cluster, id, |s| s.status == "done").await;
+        let (_, before) = http_get(&cluster.addrs[0], &format!("/goals/{id}")).await;
+        for i in 0..5 {
+            seal_when(cluster, i, id, fully_confirmed).await;
+        }
+        (id, before)
+    }
+
+    #[actix_web::test]
+    async fn a_sealed_goal_reads_the_same_through_every_node_and_each_holds_one_fragment() {
+        let cluster = super::testing::Cluster::start(5, 5).await;
+        let (id, before) = sealed_goal(&cluster).await;
+        assert_eq!(before["output"], single_node_output(20));
+        for (i, addr) in cluster.addrs.iter().enumerate() {
+            let (code, after) = http_get(addr, &format!("/goals/{id}")).await;
+            assert_eq!((code, &after), (200, &before), "node {i}");
+            let (_, holds) = http_get(addr, &format!("/goals/{id}/storage")).await;
+            assert_eq!(holds["holds"], "fragment");
+            assert_eq!(
+                (&holds["index"], &holds["data"], &holds["parity"]),
+                (
+                    &serde_json::json!(i),
+                    &serde_json::json!(3),
+                    &serde_json::json!(2)
+                )
+            );
+            assert!(holds["len"].as_u64().unwrap() > 0);
+        }
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
+    async fn a_node_that_lost_its_fragment_still_reads_from_its_peers() {
+        let cluster = super::testing::Cluster::start(5, 5).await;
+        let (id, before) = sealed_goal(&cluster).await;
+        std::fs::remove_file(cluster.fragments(2).join(id.to_string())).unwrap();
+        let (code, after) = http_get(&cluster.addrs[2], &format!("/goals/{id}")).await;
+        assert_eq!((code, after), (200, before));
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
+    async fn a_sealed_read_without_enough_fragments_answers_503_and_no_partial_output() {
+        let cluster = super::testing::Cluster::start(5, 5).await;
+        let (id, _) = sealed_goal(&cluster).await;
+        for i in 0..3 {
+            std::fs::remove_file(cluster.fragments(i).join(id.to_string())).unwrap();
+        }
+        let started = std::time::Instant::now();
+        let (code, body) = http_get(&cluster.addrs[0], &format!("/goals/{id}")).await;
+        assert_eq!(code, 503, "{body}");
+        assert_eq!(body["error"], "fragments_unavailable");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
+    async fn a_flipped_fragment_is_skipped_and_the_read_succeeds_from_the_others() {
+        let cluster = super::testing::Cluster::start(5, 5).await;
+        let (id, before) = sealed_goal(&cluster).await;
+        for i in 1..3 {
+            let path = cluster.fragments(i).join(id.to_string());
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[0] ^= 1;
+            std::fs::write(path, bytes).unwrap();
+        }
+        let (code, after) = http_get(&cluster.addrs[0], &format!("/goals/{id}")).await;
+        assert_eq!((code, after), (200, before));
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
+    async fn a_corrupt_or_missing_fragment_is_rewritten_from_the_peers() {
+        let cluster = super::testing::Cluster::start(5, 5).await;
+        let (id, _) = sealed_goal(&cluster).await;
+        let path = |i| cluster.fragments(i).join(id.to_string());
+        let original: Vec<_> = (1..3).map(|i| std::fs::read(path(i)).unwrap()).collect();
+        let (_, holds) = http_get(&cluster.addrs[1], &format!("/goals/{id}/storage")).await;
+        let mut flipped = original[0].clone();
+        flipped[0] ^= 1;
+        std::fs::write(path(1), flipped).unwrap();
+        std::fs::remove_file(path(2)).unwrap();
+        let repaired = async {
+            while (1..3).any(|i| std::fs::read(path(i)).ok().as_ref() != Some(&original[i - 1])) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), repaired)
+            .await
+            .expect("fragments were not repaired");
+        for i in 1..3 {
+            let (_, now) = http_get(&cluster.addrs[i], &format!("/goals/{id}/storage")).await;
+            if i == 1 {
+                assert_eq!(now, holds);
+            }
+            assert_eq!(now["holds"], "fragment");
+            assert_eq!(now["index"], i);
+        }
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
+    async fn a_sealed_read_does_not_wait_for_a_slow_peer_once_enough_fragments_arrived() {
+        let cluster = super::testing::Cluster::start(5, 5).await;
+        let (id, before) = sealed_goal(&cluster).await;
+        let leader = cluster.leader().await;
+        let slow = (leader + 1) % 5;
+        std::fs::remove_file(cluster.fragments(leader).join(id.to_string())).unwrap();
+        cluster
+            .slow
+            .node
+            .store(slow as u64 + 1, std::sync::atomic::Ordering::SeqCst);
+        cluster
+            .slow
+            .millis
+            .store(1800, std::sync::atomic::Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        let (code, after) = http_get(&cluster.addrs[leader], &format!("/goals/{id}")).await;
+        assert_eq!((code, after), (200, before));
+        assert!(
+            started.elapsed() < Duration::from_millis(1200),
+            "{:?}",
+            started.elapsed()
+        );
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
+    async fn the_fragment_route_serves_a_stored_fragment_and_nothing_else() {
+        let cluster = super::testing::Cluster::start(5, 5).await;
+        let (id, _) = sealed_goal(&cluster).await;
+        let served = reqwest::get(format!("http://{}/raft/fragment/{id}", cluster.addrs[1]))
+            .await
+            .unwrap();
+        assert_eq!(served.status(), 200);
+        let file = std::fs::read(cluster.fragments(1).join(id.to_string())).unwrap();
+        assert_eq!(served.bytes().await.unwrap().to_vec(), file);
+        for path in [format!("{}", id + 1000), "x".into(), "..%2Fdb2".into()] {
+            let url = format!("http://{}/raft/fragment/{path}", cluster.addrs[1]);
+            assert_eq!(reqwest::get(url).await.unwrap().status(), 404, "{path}");
         }
         cluster.stop().await;
     }

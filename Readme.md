@@ -86,6 +86,11 @@ are not read. Every other variable is ignored.
   odd number of nodes. Cluster mode requires `STORAGE.PATH`. With no cluster settings, rs3 runs as
   a single node. `scripts/ci-smoke.sh` starts a 3-node cluster from the release binary, kills the
   leader, and checks that a generation goal and a script goal still finish.
+  `CLUSTER.SHRINK_AFTER` (seconds, default 600, must be positive) is how long two of five nodes may
+  stay silent before the leader drops them from the voters, so the survivors seal as RS(2,1).
+  Shrinking is suspicion-based, because no timeout tells a slow node from a dead one, and it is
+  permanent in this version: a shrunk cluster has three members and tolerates one failure. Keep the
+  value well above any outage you want to ride out.
 - **A broken dotenv file stops startup.** A line that does not parse, a file
   that starts with a UTF-8 byte order mark (BOM) or an unreadable file gives a
   line that starts with `error: invalid configuration: .env: ` and exit 1.

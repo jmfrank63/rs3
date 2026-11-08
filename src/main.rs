@@ -49,10 +49,16 @@ async fn start_cluster(
         cluster.peers.len()
     );
     let members = cluster.peers.iter().cloned().collect();
-    rs3::raft::Node::start(cluster.node_id, &members, db, store.clone())
-        .await
-        .map(|node| Some(Arc::new(node)))
-        .map_err(|e| format!("cannot start cluster node: {e}"))
+    rs3::raft::Node::start(
+        cluster.node_id,
+        &members,
+        db,
+        store.clone(),
+        cluster.snapshot_every,
+    )
+    .await
+    .map(|node| Some(Arc::new(node)))
+    .map_err(|e| format!("cannot start cluster node: {e}"))
 }
 
 /// Start everything and serve until shutdown. The error is the startup or
@@ -69,10 +75,21 @@ async fn run() -> Result<(), String> {
         goals.enable_scripts(store.clone(), js.clone());
     }
     let cluster = start_cluster(&settings, cluster_db, &store).await?;
+    let fragments = settings
+        .storage
+        .path
+        .as_deref()
+        .map(rs3::raft::seal::fragment_dir)
+        .unwrap_or_default();
     if let (Some(goals), Some(node), Some(config)) = (&goals, &cluster, &settings.cluster) {
-        goals.connect(node.clone());
-        let members = config.peers.iter().map(|(id, _)| *id).collect();
-        rs3::raft::assign::spawn(node.clone(), goals.clone(), config.node_id, members);
+        goals.connect(node.clone(), fragments.clone());
+        rs3::raft::assign::spawn(
+            node.clone(),
+            goals.clone(),
+            config.node_id,
+            Some(fragments.clone()),
+            config.shrink_after,
+        );
     }
     if let Some(goals) = &goals {
         goals.start_workers(settings.scheduler.workers);
@@ -85,7 +102,7 @@ async fn run() -> Result<(), String> {
         cluster: cluster.clone(),
         ..rs3::state::AppState::new(store, settings, js)
     });
-    let raft = cluster.map(|node| rs3::http::raft::configure(web::Data::from(node)));
+    let raft = cluster.map(|node| rs3::http::raft::configure(web::Data::from(node), fragments));
     let server = HttpServer::new(move || {
         let app = App::new().configure(cfg.clone());
         match &raft {

@@ -7,19 +7,22 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
-use crate::journal::{Journal, JournalError, Record, ScriptFailure, storage};
+use crate::journal::{
+    Journal, JournalError, Record, ScriptFailure, dump_table, rows_in, seal_in, storage,
+};
 use crate::js::ExecError;
 use crate::js::executor::JsExecutor;
 use crate::js::oplog::{LogStop, OpLog};
 use crate::lease::{self, Fence};
 use crate::model::{FakeModel, Model};
-use crate::raft::Node;
+use crate::raft::{Node, seal as sealing};
 use crate::store::{Command, GoalEvent, Response, Store};
 
 const GOALS: TableDefinition<u64, (i64, u64)> = TableDefinition::new("goals");
@@ -98,8 +101,28 @@ struct Inner {
     me: Option<u64>,
     /// The Raft node goal commands go through; unset until `connect`.
     cluster: OnceLock<Arc<Node>>,
+    /// Where this node keeps its fragment files; set with `cluster`.
+    fragments: OnceLock<PathBuf>,
     /// Tokens this node has generated, including any it generated again.
     generated: AtomicU64,
+}
+
+/// A goal row: id, then priority and budget.
+pub(crate) type Row = (u64, (i64, u64));
+
+/// Every goal row as of `txn`.
+pub(crate) fn dump_in(txn: &redb::ReadTransaction) -> Result<Vec<Row>, JournalError> {
+    dump_table(txn, GOALS, |k, v| (k, v))
+}
+
+/// Make the goals table in `txn` hold exactly `rows`.
+pub(crate) fn replace_in(txn: &redb::WriteTransaction, rows: &[Row]) -> Result<(), JournalError> {
+    txn.delete_table(GOALS).map_err(storage)?;
+    let mut table = txn.open_table(GOALS).map_err(storage)?;
+    for (id, row) in rows {
+        table.insert(*id, *row).map_err(storage)?;
+    }
+    Ok(())
 }
 
 /// Add the stream of goal `start` and row in `txn` under the next free id. The stream is written
@@ -139,6 +162,22 @@ pub(crate) fn cancel_in(
     lease::claim_in(txn, id, None)?;
     journal.append_in(txn, id, seq, &Record::Cancelled)?;
     Ok(true)
+}
+
+/// What a node holds of one stream.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Holds {
+    /// The stream's records, not dropped yet or never sealed.
+    Full,
+    /// Only fragment `index` of a stream of `len` bytes, split into `data` plus `parity`.
+    Fragment {
+        index: usize,
+        len: usize,
+        data: usize,
+        parity: usize,
+    },
+    /// Sealed, its records dropped, and no valid fragment of its own.
+    None,
 }
 
 /// Shared handle to the goals of one database.
@@ -206,9 +245,62 @@ impl Goals {
         self.0.generated.load(Ordering::Relaxed)
     }
 
-    /// Send goal commands through `node`. Until then they answer `Unavailable`.
-    pub fn connect(&self, node: Arc<Node>) {
+    /// Send goal commands through `node`, whose fragment files are in `fragments`. Until then
+    /// they answer `Unavailable`.
+    pub fn connect(&self, node: Arc<Node>, fragments: PathBuf) {
+        let _ = self.0.fragments.set(fragments);
         let _ = self.0.cluster.set(node);
+    }
+
+    /// The records of stream `id`. A sealed stream whose stored records were dropped is rebuilt
+    /// from fragments, this node's and its peers', so the answer is the same either way.
+    fn records(&self, id: u64) -> Result<Vec<Record>, JournalError> {
+        let journal = &self.0.journal;
+        let txn = journal.begin_read()?;
+        let (seal, rows) = (seal_in(&txn, id)?, rows_in(&txn, id)?);
+        let Some(seal) = seal.filter(|_| rows.is_empty()) else {
+            return journal.read(id);
+        };
+        let unavailable =
+            |reason: String| JournalError::FragmentsUnavailable { stream: id, reason };
+        let (Some(node), Some(dir), Some(me)) =
+            (self.0.cluster.get(), self.0.fragments.get(), self.0.me)
+        else {
+            return Err(unavailable("node is not connected".into()));
+        };
+        let found = node
+            .handle()
+            .block_on(sealing::gather(node, dir, me, id, &seal));
+        let rows = crate::seal::decode(id, seal.len as u64, seal.data, seal.parity, &found)
+            .map_err(|e| unavailable(e.to_string()))?;
+        journal.read_rows(id, &rows)
+    }
+
+    /// What this node holds of stream `id`, or `None` when there is no such stream.
+    pub fn holds(&self, id: u64) -> Result<Option<Holds>, JournalError> {
+        if !self.0.journal.exists(id)? {
+            return Ok(None);
+        }
+        let txn = self.0.journal.begin_read()?;
+        let (seal, rows) = (seal_in(&txn, id)?, rows_in(&txn, id)?);
+        let (Some(seal), true) = (seal, rows.is_empty()) else {
+            return Ok(Some(Holds::Full));
+        };
+        let held = self
+            .0
+            .me
+            .and_then(|me| seal.members.iter().position(|m| *m == me))
+            .zip(self.0.fragments.get())
+            .filter(|(index, dir)| sealing::local(dir, id, &seal, *index).is_some());
+        Ok(Some(match held {
+            Some((index, _)) => Holds::Fragment {
+                index,
+                len: seal.len,
+                data: seal.data,
+                parity: seal.parity,
+            },
+            None => Holds::None,
+        }))
     }
 
     fn build(db: Arc<Database>, rate: NonZeroU32, me: Option<u64>) -> Result<Self, JournalError> {
@@ -225,13 +317,21 @@ impl Goals {
             scripts: OnceLock::new(),
             me,
             cluster: OnceLock::new(),
+            fragments: OnceLock::new(),
             generated: AtomicU64::new(0),
         }));
-        for goal in goals.all()? {
-            match goals.0.journal.read(goal.id) {
+        goals.resync()?;
+        Ok(goals)
+    }
+
+    /// Make the queue hold exactly the live goals that run here and are not already running.
+    fn resync(&self) -> Result<(), JournalError> {
+        let mut queue = Vec::new();
+        for goal in self.all()? {
+            match self.0.journal.read(goal.id) {
                 Ok(records) if records.last().is_some_and(|last| !last.ends_stream()) => {
-                    if goals.mine(goal.id)? {
-                        goals.sched().queue.push(goal);
+                    if self.mine(goal.id)? {
+                        queue.push(goal);
                     }
                 }
                 Ok(_) => {}
@@ -239,7 +339,11 @@ impl Goals {
                 Err(e) => return Err(e),
             }
         }
-        Ok(goals)
+        let mut sched = self.sched();
+        queue.retain(|g| !sched.running.contains_key(&g.id));
+        sched.queue = queue;
+        self.0.wake.notify_all();
+        Ok(())
     }
 
     fn all(&self) -> Result<Vec<Goal>, JournalError> {
@@ -284,6 +388,11 @@ impl Goals {
                 }
             }
             GoalEvent::Cancelled { task } => self.sched().queue.retain(|g| g.id != task),
+            GoalEvent::Installed => {
+                if let Err(e) = self.resync() {
+                    eprintln!("error: goal queue after snapshot install: {e}");
+                }
+            }
             GoalEvent::Assigned { .. } => {}
         }
     }
@@ -376,7 +485,7 @@ impl Goals {
                 sched.failures.contains_key(&id),
             )
         };
-        let records = match self.0.journal.read(id) {
+        let records = match self.records(id) {
             Ok(records) => records,
             Err(JournalError::Corrupt { .. }) => {
                 return Ok(Some(GoalStatus {
@@ -547,6 +656,11 @@ impl Goals {
         let goal = sched.queue.remove(next);
         sched.running.insert(goal.id, goal.priority);
         Some(goal)
+    }
+
+    /// The journal the goals write to.
+    pub fn journal(&self) -> &Journal {
+        &self.0.journal
     }
 
     /// Take the next queued goal and mark it running. Pair it with `run`.
@@ -985,6 +1099,27 @@ mod tests {
         let on = |node| Goals::open_in_cluster(db.clone(), FAST, node, &Store::new()).unwrap();
         assert_eq!(on(1).next_goal(), None);
         assert_eq!(on(2).next_goal().map(|g| g.id), Some(id));
+    }
+
+    #[test]
+    fn an_installed_snapshot_queues_goals_assigned_here_and_drops_ended_ones() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let other = Goals::open(db.clone(), FAST).unwrap();
+        let ended = other.create(spec(5, 1)).unwrap();
+        let txn = db.begin_write().unwrap();
+        lease::claim_in(&txn, ended, Some(1)).unwrap();
+        txn.commit().unwrap();
+        let store = Store::new();
+        let goals = Goals::open_in_cluster(db.clone(), FAST, 1, &store).unwrap();
+        drain(&other);
+        let fresh = other.create(spec(5, 2)).unwrap();
+        let txn = db.begin_write().unwrap();
+        lease::claim_in(&txn, fresh, Some(1)).unwrap();
+        txn.commit().unwrap();
+        store.publish_all(&[]);
+        assert_eq!(goals.next_goal().map(|g| g.id), Some(fresh));
+        assert_eq!(goals.next_goal(), None);
     }
 
     #[test]

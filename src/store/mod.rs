@@ -37,8 +37,15 @@ impl Effects {
 /// A committed goal command, told to the goals of this node after the commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalEvent {
-    Assigned { task: u64, node: u64 },
-    Cancelled { task: u64 },
+    Assigned {
+        task: u64,
+        node: u64,
+    },
+    Cancelled {
+        task: u64,
+    },
+    /// A snapshot replaced every goal.
+    Installed,
 }
 
 type GoalSink = Box<dyn Fn(GoalEvent) + Send + Sync>;
@@ -231,6 +238,9 @@ impl Store {
         map.clear();
         for (key, value) in entries {
             map.insert(key.clone(), value.clone());
+        }
+        if let Some(sink) = self.goal_sink.get() {
+            sink(GoalEvent::Installed);
         }
     }
 

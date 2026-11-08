@@ -4,6 +4,7 @@
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use deno_core::{JsRuntime, v8};
 
@@ -72,6 +73,8 @@ pub struct JobState {
     isolates: Mutex<Vec<(u64, v8::IsolateHandle)>>,
     /// The next registration id.
     next_id: AtomicU64,
+    /// Time the job spent blocked on the cluster, which its timeout does not count.
+    waits: Mutex<Waits>,
     /// Set when a nested runtime hit a host fault.
     host_fault: AtomicBool,
     /// The first depth stop of the job; later stops never replace it.
@@ -84,7 +87,41 @@ pub struct JobState {
     error_lines: Mutex<Vec<String>>,
 }
 
+/// Time a job spent blocked on the cluster.
+#[derive(Debug, Default)]
+struct Waits {
+    done: Duration,
+    /// When the wait in progress began.
+    since: Option<Instant>,
+}
+
 impl JobState {
+    /// Run `f`, a wait for the cluster: its time does not count towards the job's timeout.
+    pub(crate) fn waiting<T>(&self, f: impl FnOnce() -> T) -> T {
+        self.waits().since = Some(Instant::now());
+        let result = f();
+        let mut waits = self.waits();
+        if let Some(since) = waits.since.take() {
+            waits.done += since.elapsed();
+        }
+        result
+    }
+
+    /// Total time the job has spent in `waiting`, a wait in progress included.
+    pub(crate) fn waited(&self) -> Duration {
+        let waits = self.waits();
+        waits.done + waits.since.map_or(Duration::ZERO, |since| since.elapsed())
+    }
+
+    /// How long until `deadline`, moved later by the time the job has waited, by at most `credit`.
+    pub(crate) fn remaining(&self, deadline: Instant, credit: Duration) -> Duration {
+        (deadline + self.waited().min(credit)).saturating_duration_since(Instant::now())
+    }
+
+    fn waits(&self) -> MutexGuard<'_, Waits> {
+        self.waits.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Record that a nested runtime hit a host fault during this job.
     pub(crate) fn note_host_fault(&self) {
         self.host_fault.store(true, Ordering::SeqCst);
@@ -315,6 +352,22 @@ pub(crate) fn run_js(store: &Store, source: &str) -> Result<String, ExecError> {
 #[cfg(test)]
 mod tests {
     use super::JobState;
+
+    #[test]
+    fn a_wait_counts_while_it_is_in_progress_and_after_it_ends() {
+        use std::time::Duration;
+        let job = JobState::default();
+        assert_eq!(job.waited(), Duration::ZERO);
+        let during = job.waiting(|| {
+            std::thread::sleep(Duration::from_millis(50));
+            job.waited()
+        });
+        assert!(during >= Duration::from_millis(50), "{during:?}");
+        let after = job.waited();
+        assert!(after >= during, "{after:?} < {during:?}");
+        job.waiting(|| std::thread::sleep(Duration::from_millis(50)));
+        assert!(job.waited() >= after + Duration::from_millis(50));
+    }
 
     #[test]
     fn job_state_phase_changes_exactly_once() {

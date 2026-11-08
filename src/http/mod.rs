@@ -463,8 +463,11 @@ pub(crate) mod tests {
             let (code, body) = send(&app, patch_req("m").to_request()).await;
             (code, body, start.elapsed())
         };
+        let both = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(looping, queued)
+        });
         let ((loop_code, loop_body, loop_at), (m_code, m_body, m_at)) =
-            tokio::join!(looping, queued);
+            both.await.expect("the requests never answered");
         assert_eq!(loop_code, StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(loop_body, timeout_body(500));
         // Queue wait is not counted against the queued PATCH's own timeout.

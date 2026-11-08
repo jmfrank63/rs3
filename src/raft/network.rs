@@ -43,6 +43,19 @@ impl Network {
     }
 }
 
+/// The bytes of fragment file `stream` held by the peer at `addr`, or `None` when it is down,
+/// slow or has none.
+pub async fn fetch_fragment(client: &reqwest::Client, addr: &str, stream: u64) -> Option<Vec<u8>> {
+    let reply = client
+        .get(format!("http://{addr}/raft/fragment/{stream}"))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    Some(reply.bytes().await.ok()?.to_vec())
+}
+
 /// A connection to one peer.
 pub struct Peer {
     client: reqwest::Client,

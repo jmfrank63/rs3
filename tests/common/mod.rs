@@ -42,8 +42,15 @@ impl Server {
 
     pub fn start_on(port: u16, dir: &Path, db: Option<&Path>, env: &[(&str, &str)]) -> Self {
         let mut command = rs3(port, dir, db);
-        // Not a pipe nobody reads: a burst of refused requests would fill it and block the node.
-        command.envs(env.iter().copied()).stderr(Stdio::null());
+        // A file, not a pipe nobody reads: a burst of refused requests would fill a pipe and
+        // block the node, and the file shows why a test timed out.
+        let log = dir.join(format!("rs3-{port}.log"));
+        let stderr = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .unwrap();
+        command.envs(env.iter().copied()).stderr(stderr);
         Self::spawn(command, port, Duration::from_secs(30))
     }
 

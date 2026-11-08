@@ -618,6 +618,78 @@ mod tests {
     }
 
     #[test]
+    fn time_spent_waiting_for_the_cluster_does_not_count_towards_the_timeout() {
+        let rig = rig();
+        let exec = dedicated_executor(JsSettings {
+            workers: 1,
+            queue_capacity: 4,
+            timeout_ms: 300,
+            ..JsSettings::default()
+        });
+        let (log, _) = rig.log();
+        // Every commit takes 100 ms: six of them are twice the job's whole budget.
+        let log = Arc::new(Arc::into_inner(log).unwrap().in_cluster(Arc::new(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(crate::store::Response::Appended)
+        })));
+        let src =
+            "for (let i = 0; i < 6; i++) Deno.core.ops.op_rs3_insert('{\"k\":\"v\"}'); 'done'";
+        let r = block_on(exec.execute_logged(
+            rig.store.clone(),
+            "test".to_owned(),
+            src.to_owned(),
+            log,
+        ));
+        assert_eq!(r, ok("done"));
+    }
+
+    /// Run `source` as a logged job on a 300 ms executor, failing if no answer comes within 10 s.
+    fn run_bounded(rig: &Rig, log: Arc<OpLog>, source: &str) -> Result<String, ExecError> {
+        let exec = dedicated_executor(JsSettings {
+            workers: 1,
+            queue_capacity: 4,
+            timeout_ms: 300,
+            ..JsSettings::default()
+        });
+        let (store, source) = (rig.store.clone(), source.to_owned());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(block_on(exec.execute_logged(
+                store,
+                "test".to_owned(),
+                source,
+                log,
+            )));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the job never answered")
+    }
+
+    #[test]
+    fn a_single_node_script_looping_on_a_logged_op_still_times_out() {
+        let rig = rig();
+        let (log, _) = rig.log();
+        let r = run_bounded(&rig, log, "while (true) Deno.core.ops.op_rs3_now()");
+        assert_eq!(r, Err(ExecError::Timeout { limit_ms: 300 }));
+    }
+
+    #[test]
+    fn a_cluster_script_that_only_waits_for_commits_still_times_out() {
+        let rig = rig();
+        let (log, _) = rig.log();
+        let log = Arc::new(Arc::into_inner(log).unwrap().in_cluster(Arc::new(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(crate::store::Response::Appended)
+        })));
+        let r = run_bounded(
+            &rig,
+            log,
+            "while (true) Deno.core.ops.op_rs3_insert('{\"k\":\"v\"}')",
+        );
+        assert_eq!(r, Err(ExecError::Timeout { limit_ms: 300 }));
+    }
+
+    #[test]
     fn a_timed_out_logged_job_logs_nothing_after_the_timeout() {
         let rig = rig();
         rig.store.insert("loop".into(), "while(true){}".into());

@@ -2,11 +2,42 @@
 //! token inside its own transaction, so a stale holder can never commit.
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
-use crate::journal::{JournalError, storage};
+use serde::{Deserialize, Serialize};
+
+use crate::journal::{JournalError, dump_table, storage};
 
 const LEASES: TableDefinition<u64, u64> = TableDefinition::new("leases");
 /// The node a task is assigned to; written only when a claim names an owner.
 const OWNERS: TableDefinition<u64, u64> = TableDefinition::new("lease_owner");
+
+/// A copy of the tokens and owners tables.
+#[derive(Serialize, Deserialize, Default)]
+pub(crate) struct Image {
+    leases: Vec<(u64, u64)>,
+    owners: Vec<(u64, u64)>,
+}
+
+impl Image {
+    /// Every token and owner as of `txn`.
+    pub(crate) fn dump_in(txn: &redb::ReadTransaction) -> Result<Self, JournalError> {
+        Ok(Self {
+            leases: dump_table(txn, LEASES, |k, v| (k, v))?,
+            owners: dump_table(txn, OWNERS, |k, v| (k, v))?,
+        })
+    }
+
+    /// Make the lease tables in `txn` hold exactly this image.
+    pub(crate) fn replace_in(&self, txn: &WriteTransaction) -> Result<(), JournalError> {
+        for (def, rows) in [(LEASES, &self.leases), (OWNERS, &self.owners)] {
+            txn.delete_table(def).map_err(storage)?;
+            let mut table = txn.open_table(def).map_err(storage)?;
+            for (key, value) in rows {
+                table.insert(*key, *value).map_err(storage)?;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Proof of a claim on `task`, valid until a later claim takes it over.
 #[derive(Debug, Clone, PartialEq, Eq)]

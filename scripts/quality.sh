@@ -13,6 +13,8 @@ shift $(($# < 2 ? $# : 2))
 lcov=target/lcov.info
 diff=target/mutation.diff
 
+# A mutant left behind by an interrupted cargo mutants run must never pass a gate.
+if grep -rln 'changed by cargo-mutants' src tests; then echo "quality: mutated source left in place" >&2; exit 1; fi
 if [[ $mode != mutants ]]; then
   bash scripts/ci-guards.sh
   cargo fmt --check

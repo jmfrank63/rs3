@@ -31,7 +31,8 @@ bash scripts/quality.sh mutants HEAD                      # uncommitted changes;
 bash scripts/quality.sh mutants HEAD --file src/goals.rs  # extra arguments go to cargo mutants
 ```
 
-Use this command as written in a task's Verify line. Kill every surviving mutant with a behavioural test, or
+Use this command as written in a task's Verify line. A Verify line is plain commands joined by `&&`: no
+loops, pipes, redirects, semicolons or parentheses, which GSD refuses to run. Kill every surviving mutant with a behavioural test, or
 remove the code it shows to be unnecessary. An agent's foreground command is capped at 10 minutes, so split a
 long run with `--file`. The maintainer runs the full gate
 (`bash scripts/quality.sh full <base>`) at the end of each slice. `--in-place` edits source files while it runs,

@@ -8,6 +8,7 @@
 //! `js_timeout` (504, the message names the execution limit in milliseconds)
 //! `goals_unavailable` (503, fixed message: the server has no database for goals)
 //! `unavailable` (503, fixed message: the cluster could not commit or confirm the request)
+//! `fragments_unavailable` (503, fixed message: a sealed goal's stream could not be rebuilt from enough fragments)
 //! `no_quorum` (503, fixed message `no quorum`: no leader or majority answered within the deadline)
 //! `outcome_unknown` (503, fixed message `outcome unknown`: a write was handed on and not answered, so it may
 //! still commit; check before retrying)
@@ -48,6 +49,9 @@ pub enum ApiError {
     /// The cluster has no leader or no quorum to answer.
     #[error("unavailable")]
     Unavailable,
+    /// A sealed stream could not be rebuilt: too few valid fragments were reachable.
+    #[error("fragments unavailable")]
+    FragmentsUnavailable,
     /// No leader or quorum answered within the request deadline.
     #[error("no quorum")]
     NoQuorum,
@@ -93,6 +97,7 @@ impl From<JournalError> for ApiError {
         eprintln!("error: journal failure: {e}");
         match e {
             JournalError::Unavailable(_) => ApiError::Unavailable,
+            JournalError::FragmentsUnavailable { .. } => ApiError::FragmentsUnavailable,
             _ => ApiError::Internal,
         }
     }
@@ -144,6 +149,7 @@ impl ApiError {
             ApiError::JsTimeout(_) => "js_timeout",
             ApiError::GoalsUnavailable => "goals_unavailable",
             ApiError::Unavailable => "unavailable",
+            ApiError::FragmentsUnavailable => "fragments_unavailable",
             ApiError::NoQuorum => "no_quorum",
             ApiError::OutcomeUnknown => "outcome_unknown",
             ApiError::GoalNotFound(_) => "not_found",
@@ -164,6 +170,7 @@ impl ResponseError for ApiError {
             ApiError::GoalsUnavailable
             | ApiError::Unavailable
             | ApiError::NoQuorum
+            | ApiError::FragmentsUnavailable
             | ApiError::OutcomeUnknown => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::GoalNotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,

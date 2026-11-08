@@ -13,12 +13,13 @@
 use std::ffi::OsString;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 
 /// The only configuration keys read from the dotenv file and the environment.
-const CONFIG_KEYS: [&str; 7] = [
+const CONFIG_KEYS: [&str; 9] = [
     "server.host",
     "server.port",
     "storage.path",
@@ -26,6 +27,8 @@ const CONFIG_KEYS: [&str; 7] = [
     "model.tokens_per_second",
     "cluster.node_id",
     "cluster.peers",
+    "cluster.snapshot_every",
+    "cluster.shrink_after",
 ];
 
 /// Address the HTTP server binds to.
@@ -75,13 +78,26 @@ impl Default for ModelSettings {
 pub struct ClusterSettings {
     pub node_id: u64,
     pub peers: Vec<(u64, String)>,
+    /// Log entries applied between snapshots.
+    pub snapshot_every: u64,
+    /// How long two peers may stay silent before the leader drops them from the voters.
+    pub shrink_after: Duration,
 }
+
+/// Log entries applied between snapshots unless `CLUSTER.SNAPSHOT_EVERY` says otherwise.
+const SNAPSHOT_EVERY: u64 = 10_000;
+
+/// Seconds two peers may stay silent before the shrink unless `CLUSTER.SHRINK_AFTER` says otherwise.
+/// A shrink is permanent and no timeout tells slow from dead, so the default is cautious.
+const SHRINK_AFTER: u64 = 600;
 
 /// The cluster keys as written, before they are checked against each other.
 #[derive(Debug, Default, Deserialize)]
 struct RawCluster {
     node_id: Option<u64>,
     peers: Option<String>,
+    snapshot_every: Option<u64>,
+    shrink_after: Option<u64>,
 }
 
 impl RawCluster {
@@ -104,7 +120,20 @@ impl RawCluster {
         if peers.len() % 2 == 0 {
             return Err(invalid("CLUSTER.PEERS must list an odd number of peers"));
         }
-        Ok(Some(ClusterSettings { node_id, peers }))
+        let snapshot_every = self.snapshot_every.unwrap_or(SNAPSHOT_EVERY);
+        if snapshot_every == 0 {
+            return Err(invalid("CLUSTER.SNAPSHOT_EVERY must be positive"));
+        }
+        let shrink_after = self.shrink_after.unwrap_or(SHRINK_AFTER);
+        if shrink_after == 0 {
+            return Err(invalid("CLUSTER.SHRINK_AFTER must be positive"));
+        }
+        Ok(Some(ClusterSettings {
+            node_id,
+            peers,
+            snapshot_every,
+            shrink_after: Duration::from_secs(shrink_after),
+        }))
     }
 }
 
@@ -295,6 +324,41 @@ mod tests {
             c.peers,
             vec![(1, "a:1".into()), (2, "b:2".into()), (3, "c:3".into())]
         );
+    }
+
+    #[test]
+    fn the_snapshot_interval_defaults_to_ten_thousand_and_can_be_set_but_not_to_zero() {
+        let with = |extra: &[(&str, &str)]| {
+            let mut pairs = vec![
+                ("STORAGE.PATH", "/d"),
+                ("CLUSTER.NODE_ID", "1"),
+                ("CLUSTER.PEERS", "1=a:1"),
+            ];
+            pairs.extend_from_slice(extra);
+            clustered(&pairs).map(|s| s.cluster.unwrap().snapshot_every)
+        };
+        assert_eq!(with(&[]).unwrap(), 10_000);
+        assert_eq!(with(&[("CLUSTER.SNAPSHOT_EVERY", "50")]).unwrap(), 50);
+        let zero = with(&[("CLUSTER.SNAPSHOT_EVERY", "0")]).unwrap_err();
+        assert!(zero.to_string().contains("SNAPSHOT_EVERY"), "{zero}");
+    }
+
+    #[test]
+    fn the_shrink_delay_defaults_to_ten_minutes_and_can_be_set_but_not_to_zero() {
+        let with = |extra: &[(&str, &str)]| {
+            let mut pairs = vec![
+                ("STORAGE.PATH", "/d"),
+                ("CLUSTER.NODE_ID", "1"),
+                ("CLUSTER.PEERS", "1=a:1"),
+            ];
+            pairs.extend_from_slice(extra);
+            clustered(&pairs).map(|s| s.cluster.unwrap().shrink_after)
+        };
+        assert_eq!(with(&[]).unwrap(), std::time::Duration::from_secs(600));
+        let set = with(&[("CLUSTER.SHRINK_AFTER", "5")]).unwrap();
+        assert_eq!(set, std::time::Duration::from_secs(5));
+        let zero = with(&[("CLUSTER.SHRINK_AFTER", "0")]).unwrap_err();
+        assert!(zero.to_string().contains("SHRINK_AFTER"), "{zero}");
     }
 
     #[test]

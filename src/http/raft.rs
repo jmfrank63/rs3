@@ -1,17 +1,22 @@
 //! The Raft RPC routes: a peer's `Network` posts here. Each call runs on the node's own runtime.
-use actix_web::{HttpResponse, post, web};
+use std::path::PathBuf;
+
+use actix_web::{HttpResponse, get, post, web};
 use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
 use serde::Serialize;
 
 use crate::raft::{ClusterError, Node, TypeConfig};
 use crate::store::Command;
 
-/// Register the routes; the node is the only state they need.
+/// Register the routes; they need the node and the directory of its fragment files.
 pub fn configure(
     node: web::Data<Node>,
+    fragments: PathBuf,
 ) -> impl Fn(&mut web::ServiceConfig) + Clone + Send + 'static {
     move |cfg: &mut web::ServiceConfig| {
         cfg.app_data(node.clone())
+            .app_data(web::Data::new(Fragments(fragments.clone())))
+            .service(fragment)
             .service(append)
             .service(vote)
             .service(snapshot)
@@ -29,6 +34,23 @@ async fn run<T: Serialize + Send + 'static>(
         Ok(result) => HttpResponse::Ok().json(result),
         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
+}
+
+pub(crate) struct Fragments(pub(crate) PathBuf);
+
+/// The raw bytes of fragment file `stream` in `dir`, or 404. The file name is built from the
+/// parsed id, never from a raw path segment.
+pub(crate) async fn read_fragment(dir: PathBuf, stream: u64) -> HttpResponse {
+    match web::block(move || std::fs::read(dir.join(stream.to_string()))).await {
+        Ok(Ok(bytes)) => HttpResponse::Ok().body(bytes),
+        _ => HttpResponse::NotFound().finish(),
+    }
+}
+
+/// `GET /raft/fragment/{stream}` serves this node's fragment of a sealed stream.
+#[get("/raft/fragment/{stream}")]
+async fn fragment(dir: web::Data<Fragments>, stream: web::Path<u64>) -> HttpResponse {
+    read_fragment(dir.0.clone(), *stream).await
 }
 
 #[post("/raft/append")]
@@ -95,10 +117,19 @@ mod tests {
         let dir = crate::storage::TempDir::new();
         let db = crate::storage::open(&dir.path().join("db")).unwrap();
         let members = BTreeMap::from([(1, "127.0.0.1:1".to_owned())]);
-        let node = Node::start(1, &members, db.clone(), Store::durable(db).unwrap())
-            .await
-            .unwrap();
-        let app = atest::init_service(App::new().configure(configure(web::Data::new(node)))).await;
+        let node = Node::start(
+            1,
+            &members,
+            db.clone(),
+            Store::durable(db).unwrap(),
+            crate::raft::testing::SNAPSHOT_EVERY,
+        )
+        .await
+        .unwrap();
+        let app = atest::init_service(
+            App::new().configure(configure(web::Data::new(node), PathBuf::new())),
+        )
+        .await;
         let req = atest::TestRequest::post()
             .uri("/raft/vote")
             .insert_header(("content-type", "application/json"))
@@ -115,10 +146,19 @@ mod tests {
         let dir = crate::storage::TempDir::new();
         let db = crate::storage::open(&dir.path().join("db")).unwrap();
         let members = BTreeMap::from([(1, "127.0.0.1:1".to_owned())]);
-        let node = Node::start(1, &members, db.clone(), Store::durable(db).unwrap())
-            .await
-            .unwrap();
-        let app = atest::init_service(App::new().configure(configure(web::Data::new(node)))).await;
+        let node = Node::start(
+            1,
+            &members,
+            db.clone(),
+            Store::durable(db).unwrap(),
+            crate::raft::testing::SNAPSHOT_EVERY,
+        )
+        .await
+        .unwrap();
+        let app = atest::init_service(
+            App::new().configure(configure(web::Data::new(node), PathBuf::new())),
+        )
+        .await;
         let req = atest::TestRequest::post()
             .uri("/raft/snapshot")
             .set_json(InstallSnapshotRequest::<TypeConfig> {
@@ -194,6 +234,25 @@ mod tests {
                 i.to_string()
             );
         }
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
+    async fn a_follower_retries_a_read_the_leader_it_asked_refuses_as_not_the_leader() {
+        let cluster = Cluster::start(3, 3).await;
+        let follower = cluster.follower().await;
+        cluster
+            .refuse
+            .0
+            .store(3, std::sync::atomic::Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        let got = cluster.nodes[follower].read_barrier().await;
+        assert!(got.is_ok(), "{got:?}");
+        assert_eq!(
+            cluster.refuse.0.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
         cluster.stop().await;
     }
 

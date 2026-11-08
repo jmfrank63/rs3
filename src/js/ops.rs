@@ -249,7 +249,13 @@ fn answer(
         class: e.get_class().into_owned(),
         message: e.get_message().into_owned(),
     });
-    match log.log_op(op, args, &logged) {
+    // Only a cluster commit is a wait; a local append counts towards the timeout.
+    let appended = if log.is_cluster() {
+        ctx.job.waiting(|| log.log_op(op, args, &logged))
+    } else {
+        log.log_op(op, args, &logged)
+    };
+    match appended {
         Ok(()) => result,
         Err(e) => Err(log_failure(ctx, &e)),
     }
@@ -419,7 +425,10 @@ fn op_rs3_insert(state: &mut OpState, #[scoped] body: StrArg) -> Result<String, 
     let logged = Ok(echo.clone());
     if let Some(log) = ctx.log.as_ref().filter(|log| log.is_cluster()) {
         let write = Command::Put { entries };
-        return match log.commit("op_rs3_insert", &args, &logged, Some(write)) {
+        return match ctx
+            .job
+            .waiting(|| log.commit("op_rs3_insert", &args, &logged, Some(write)))
+        {
             Ok(_) => Ok(echo),
             Err(e) => Err(log_failure(ctx, &e)),
         };
@@ -459,7 +468,10 @@ fn op_rs3_delete(state: &mut OpState, #[scoped] key: StrArg) -> Result<String, J
             class: missing.get_class().into_owned(),
             message: missing.get_message().into_owned(),
         });
-        return match log.commit("op_rs3_delete", &args, &refusal, Some(write)) {
+        return match ctx
+            .job
+            .waiting(|| log.commit("op_rs3_delete", &args, &refusal, Some(write)))
+        {
             Ok(Response::Removed(old)) => Ok(old),
             Ok(_) => Err(missing),
             Err(e) => Err(log_failure(ctx, &e)),

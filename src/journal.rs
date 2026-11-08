@@ -21,8 +21,11 @@ use std::sync::Arc;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-const RECORDS: TableDefinition<(u64, u64), &[u8]> = TableDefinition::new("journal_records");
+pub(crate) const RECORDS: TableDefinition<(u64, u64), &[u8]> =
+    TableDefinition::new("journal_records");
 const HEADS: TableDefinition<u64, &[u8]> = TableDefinition::new("journal_heads");
+/// One replicated JSON `SealRecord` per sealed stream.
+pub(crate) const SEALS: TableDefinition<u64, &[u8]> = TableDefinition::new("journal_seals");
 
 /// Version byte at the start of every stored record.
 const FORMAT: u8 = 1;
@@ -31,6 +34,25 @@ const HASH_LEN: usize = 32;
 // Stored head layout: last sequence number, last hash, ended flag, checksum.
 
 type Hash = [u8; HASH_LEN];
+
+/// How an ended stream is split over `members`, and who has stored their fragment so far. The
+/// full copy of the stream goes away once every member has confirmed.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SealRecord {
+    /// Node ids; a member's position is its fragment index.
+    pub members: Vec<u64>,
+    pub data: usize,
+    pub parity: usize,
+    /// Length of the stream bytes the fragments rebuild.
+    pub len: usize,
+    /// BLAKE3 checksum of each fragment, by index.
+    pub checksums: Vec<[u8; 32]>,
+    pub confirmed: Vec<u64>,
+    /// A re-encoding being confirmed while this seal stays authoritative; it replaces this seal
+    /// when its last member confirms.
+    #[serde(default)]
+    pub pending: Option<Box<SealRecord>>,
+}
 
 /// One entry of a stream.
 ///
@@ -141,6 +163,9 @@ pub enum JournalError {
     /// The cluster could not take the command now; the caller may retry it.
     #[error("unavailable: {0}")]
     Unavailable(String),
+    /// A sealed stream could not be rebuilt: too few valid fragments could be reached in time.
+    #[error("stream {stream}: fragments unavailable: {reason}")]
+    FragmentsUnavailable { stream: u64, reason: String },
     /// The caller's view of the stream is stale, or it skipped ahead.
     #[error("stream {stream}: expected to write seq {expected}, but the next seq is {actual}")]
     SeqConflict {
@@ -174,6 +199,64 @@ pub(crate) fn storage<E: Into<redb::Error>>(e: E) -> JournalError {
     JournalError::Storage(e.into().to_string())
 }
 
+/// Every row of `def` as of `txn`, mapped by `row`; a table never written is empty.
+pub(crate) fn dump_table<K: redb::Key + 'static, V: redb::Value + 'static, R>(
+    txn: &redb::ReadTransaction,
+    def: TableDefinition<K, V>,
+    row: impl for<'a> Fn(K::SelfType<'a>, V::SelfType<'a>) -> R,
+) -> Result<Vec<R>, JournalError> {
+    let table = match txn.open_table(def) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+        Err(e) => return Err(storage(e)),
+    };
+    let mut rows = vec![];
+    for entry in table.iter().map_err(storage)? {
+        let (key, value) = entry.map_err(storage)?;
+        rows.push(row(key.value(), value.value()));
+    }
+    Ok(rows)
+}
+
+/// A copy of the records, heads and seals tables, raw bytes as stored.
+#[derive(Serialize, Deserialize, Default)]
+pub(crate) struct Image {
+    records: Vec<((u64, u64), Vec<u8>)>,
+    heads: Vec<(u64, Vec<u8>)>,
+    seals: Vec<(u64, Vec<u8>)>,
+}
+
+impl Image {
+    /// Everything the journal tables hold as of `txn`.
+    pub(crate) fn dump_in(txn: &redb::ReadTransaction) -> Result<Self, JournalError> {
+        Ok(Self {
+            records: dump_table(txn, RECORDS, |k, v| (k, v.to_vec()))?,
+            heads: dump_table(txn, HEADS, |k, v| (k, v.to_vec()))?,
+            seals: dump_table(txn, SEALS, |k, v| (k, v.to_vec()))?,
+        })
+    }
+
+    /// Make the journal tables in `txn` hold exactly this image.
+    pub(crate) fn replace_in(&self, txn: &redb::WriteTransaction) -> Result<(), JournalError> {
+        txn.delete_table(RECORDS).map_err(storage)?;
+        txn.delete_table(HEADS).map_err(storage)?;
+        txn.delete_table(SEALS).map_err(storage)?;
+        let mut records = txn.open_table(RECORDS).map_err(storage)?;
+        for (key, raw) in &self.records {
+            records.insert(*key, raw.as_slice()).map_err(storage)?;
+        }
+        let mut heads = txn.open_table(HEADS).map_err(storage)?;
+        for (key, raw) in &self.heads {
+            heads.insert(*key, raw.as_slice()).map_err(storage)?;
+        }
+        let mut seals = txn.open_table(SEALS).map_err(storage)?;
+        for (key, raw) in &self.seals {
+            seals.insert(*key, raw.as_slice()).map_err(storage)?;
+        }
+        Ok(())
+    }
+}
+
 /// Shared handle to the journal tables of one database.
 #[derive(Clone)]
 pub struct Journal {
@@ -186,6 +269,7 @@ impl Journal {
         let txn = db.begin_write().map_err(storage)?;
         txn.open_table(RECORDS).map_err(storage)?;
         txn.open_table(HEADS).map_err(storage)?;
+        txn.open_table(SEALS).map_err(storage)?;
         txn.commit().map_err(storage)?;
         Ok(Self { db })
     }
@@ -266,31 +350,119 @@ impl Journal {
     /// stream does not exist.
     pub fn read(&self, stream: u64) -> Result<Vec<Record>, JournalError> {
         let txn = self.db.begin_read().map_err(storage)?;
+        let head = head_in(&txn, stream)?;
+        verify_rows(stream, head.as_ref(), &rows_in(&txn, stream)?)
+    }
+
+    /// Verify `rows`, as returned by `rows_in`, against the head of `stream`, like `read`.
+    pub fn read_rows(&self, stream: u64, rows: &[u8]) -> Result<Vec<Record>, JournalError> {
+        let txn = self.db.begin_read().map_err(storage)?;
+        verify_rows(stream, head_in(&txn, stream)?.as_ref(), rows)
+    }
+
+    /// A read transaction, for reading `rows_in` and `seal_in` of one stream consistently.
+    pub fn begin_read(&self) -> Result<redb::ReadTransaction, JournalError> {
+        self.db.begin_read().map_err(storage)
+    }
+
+    /// The seal of `stream`, or `None` when it is not sealed.
+    pub fn seal(&self, stream: u64) -> Result<Option<SealRecord>, JournalError> {
+        seal_in(&self.begin_read()?, stream)
+    }
+
+    /// Remove the stored records of `stream` in `txn`; its head stays.
+    pub fn drop_records_in(
+        &self,
+        txn: &redb::WriteTransaction,
+        stream: u64,
+    ) -> Result<(), JournalError> {
+        let mut records = txn.open_table(RECORDS).map_err(storage)?;
+        records
+            .retain_in((stream, 0)..=(stream, u64::MAX), |_, _| false)
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Whether `stream` has ended, judged from its head, or `None` when it has no readable head.
+    pub fn ended_in(
+        &self,
+        txn: &redb::WriteTransaction,
+        stream: u64,
+    ) -> Result<Option<bool>, JournalError> {
         let heads = txn.open_table(HEADS).map_err(storage)?;
-        let records = txn.open_table(RECORDS).map_err(storage)?;
-        let head = match heads.get(stream).map_err(storage)? {
-            Some(raw) => Some(Head::decode(stream, raw.value())?),
-            None => None,
-        };
+        let head = heads.get(stream).map_err(storage)?;
+        Ok(head
+            .and_then(|raw| Head::parse(stream, raw.value()))
+            .map(|h| h.ended))
+    }
 
-        let mut out = Vec::new();
-        let mut prev = [0; HASH_LEN];
-        for entry in records
-            .range((stream, 0)..=(stream, u64::MAX))
-            .map_err(storage)?
-        {
-            let (key, value) = entry.map_err(storage)?;
-            let (_, seq) = key.value();
-            let next_seq = out.len() as u64;
-            if seq != next_seq {
-                return Err(corrupt(stream, next_seq, "record is missing"));
-            }
-            let (hash, record) = decode_record(stream, seq, &prev, value.value())?;
-            out.push(record);
-            prev = hash;
+    /// The seal of `stream` as seen by the write transaction `txn`.
+    pub fn seal_for_write(
+        &self,
+        txn: &redb::WriteTransaction,
+        stream: u64,
+    ) -> Result<Option<SealRecord>, JournalError> {
+        let seals = txn.open_table(SEALS).map_err(storage)?;
+        let raw = seals.get(stream).map_err(storage)?;
+        raw.map(|raw| decode_seal(stream, raw.value())).transpose()
+    }
+
+    /// Store `seal` for `stream` in `txn`.
+    pub fn put_seal_in(
+        &self,
+        txn: &redb::WriteTransaction,
+        stream: u64,
+        seal: &SealRecord,
+    ) -> Result<(), JournalError> {
+        let raw = serde_json::to_vec(seal)
+            .map_err(|e| JournalError::Storage(format!("cannot encode seal: {e}")))?;
+        let mut seals = txn.open_table(SEALS).map_err(storage)?;
+        seals.insert(stream, raw.as_slice()).map_err(storage)?;
+        Ok(())
+    }
+
+    /// Every seal with its stream id, in order.
+    pub fn seals(&self) -> Result<Vec<(u64, SealRecord)>, JournalError> {
+        let txn = self.begin_read()?;
+        let seals = txn.open_table(SEALS).map_err(storage)?;
+        let mut out = vec![];
+        for entry in seals.iter().map_err(storage)? {
+            let (key, raw) = entry.map_err(storage)?;
+            out.push((key.value(), decode_seal(key.value(), raw.value())?));
         }
+        Ok(out)
+    }
 
-        check_head(stream, head.as_ref(), out.len() as u64, &prev)?;
+    /// The seals fully confirmed over members other than `voters` that are not re-encoding to
+    /// `voters` yet: the ones the leader should reseal.
+    pub fn reseal_candidates(
+        &self,
+        voters: &[u64],
+    ) -> Result<Vec<(u64, SealRecord)>, JournalError> {
+        let confirmed = |s: &SealRecord| s.members.iter().all(|m| s.confirmed.contains(m));
+        Ok(self
+            .seals()?
+            .into_iter()
+            .filter(|(_, s)| s.members != voters && confirmed(s))
+            .filter(|(_, s)| s.pending.as_ref().is_none_or(|p| p.members != voters))
+            .collect())
+    }
+
+    /// The ids of every ended stream without a seal, in order.
+    pub fn ended_unsealed(&self) -> Result<Vec<u64>, JournalError> {
+        let txn = self.db.begin_read().map_err(storage)?;
+        let heads = txn.open_table(HEADS).map_err(storage)?;
+        let seals = txn.open_table(SEALS).map_err(storage)?;
+        let mut out = vec![];
+        for entry in heads.iter().map_err(storage)? {
+            let (key, raw) = entry.map_err(storage)?;
+            let id = key.value();
+            if Head::parse(id, raw.value()).is_some_and(|h| h.ended)
+                && seals.get(id).map_err(storage)?.is_none()
+            {
+                out.push(id);
+            }
+        }
         Ok(out)
     }
 
@@ -301,6 +473,13 @@ impl Journal {
         let heads = txn.open_table(HEADS).map_err(storage)?;
         let head = heads.get(stream).map_err(storage)?;
         Ok(head.is_some_and(|raw| Head::parse(stream, raw.value()).is_some_and(|h| !h.ended)))
+    }
+
+    /// Whether `stream` has a head, ended or not.
+    pub fn exists(&self, stream: u64) -> Result<bool, JournalError> {
+        let txn = self.db.begin_read().map_err(storage)?;
+        let heads = txn.open_table(HEADS).map_err(storage)?;
+        Ok(heads.get(stream).map_err(storage)?.is_some())
     }
 
     /// The ids of every live stream, in order.
@@ -336,6 +515,69 @@ impl Journal {
         }
         Ok(state.map(|state| ThinkingState { next_seq, ..state }))
     }
+}
+
+/// The stored records of `stream` as one byte string: each record, in order, behind its
+/// length as four little-endian bytes.
+pub fn rows_in(txn: &redb::ReadTransaction, stream: u64) -> Result<Vec<u8>, JournalError> {
+    let records = txn.open_table(RECORDS).map_err(storage)?;
+    let mut out = Vec::new();
+    for entry in records
+        .range((stream, 0)..=(stream, u64::MAX))
+        .map_err(storage)?
+    {
+        let (_, value) = entry.map_err(storage)?;
+        let row = value.value();
+        let len = u32::try_from(row.len())
+            .map_err(|_| JournalError::Storage("record too large".into()))?;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(row);
+    }
+    Ok(out)
+}
+
+/// The seal of `stream` as seen by `txn`.
+pub fn seal_in(
+    txn: &redb::ReadTransaction,
+    stream: u64,
+) -> Result<Option<SealRecord>, JournalError> {
+    let seals = txn.open_table(SEALS).map_err(storage)?;
+    let raw = seals.get(stream).map_err(storage)?;
+    raw.map(|raw| decode_seal(stream, raw.value())).transpose()
+}
+
+fn decode_seal(stream: u64, raw: &[u8]) -> Result<SealRecord, JournalError> {
+    serde_json::from_slice(raw).map_err(|e| corrupt(stream, 0, format!("cannot decode seal: {e}")))
+}
+
+fn head_in(txn: &redb::ReadTransaction, stream: u64) -> Result<Option<Head>, JournalError> {
+    let heads = txn.open_table(HEADS).map_err(storage)?;
+    let raw = heads.get(stream).map_err(storage)?;
+    raw.map(|raw| Head::decode(stream, raw.value())).transpose()
+}
+
+/// Decode and verify the `rows` of `stream` against its `head`.
+fn verify_rows(
+    stream: u64,
+    head: Option<&Head>,
+    mut rows: &[u8],
+) -> Result<Vec<Record>, JournalError> {
+    let mut out = Vec::new();
+    let mut prev = [0; HASH_LEN];
+    while !rows.is_empty() {
+        let seq = out.len() as u64;
+        let short = || corrupt(stream, seq, "record is too short");
+        let (len, rest) = rows.split_first_chunk::<4>().ok_or_else(short)?;
+        let (row, rest) = rest
+            .split_at_checked(u32::from_le_bytes(*len) as usize)
+            .ok_or_else(short)?;
+        let (hash, record) = decode_record(stream, seq, &prev, row)?;
+        out.push(record);
+        prev = hash;
+        rows = rest;
+    }
+    check_head(stream, head, out.len() as u64, &prev)?;
+    Ok(out)
 }
 
 /// Require the stored head to describe exactly the records that were read.

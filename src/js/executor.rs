@@ -64,8 +64,8 @@ fn effective_stack_bytes(settings: &JsSettings) -> usize {
 
 /// A command from a worker to its watchdog thread.
 enum Cmd {
-    /// Watch this job: time it out at the deadline.
-    Arm(Arc<JobState>, Instant),
+    /// Watch this job: time it out at the deadline, moved by at most the credit for cluster waits.
+    Arm(Arc<JobState>, Instant, Duration),
     /// The job is over: stop watching it.
     Disarm,
 }
@@ -80,26 +80,38 @@ const REFIRE: Duration = Duration::from_millis(50);
 /// Rust code, which V8 termination cannot interrupt.
 const BACKSTOP_GRACE: Duration = Duration::from_secs(2);
 
+/// How long a job may wait for the cluster beyond its timeout: at most this many timeouts more, so
+/// a script that only waits for commits, or retries without a quorum, still ends.
+const WAIT_CREDIT: u32 = 10;
+
+fn wait_credit(timeout: Duration) -> Duration {
+    timeout.saturating_mul(WAIT_CREDIT)
+}
+
 /// A worker's watchdog. Idle, it waits for `Arm`. Armed, it waits until the
 /// deadline, then fires the job (time it out, terminate every registered
 /// isolate) and fires again every `REFIRE` while the job stays armed. `Disarm`
 /// returns it to idle; it returns once its worker is gone. It never panics.
 fn watchdog_loop(rx: Receiver<Cmd>) {
-    let mut armed: Option<(Arc<JobState>, Instant)> = None;
+    let mut armed: Option<(Arc<JobState>, Instant, Duration)> = None;
     loop {
         let msg = match &armed {
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            Some((job, deadline)) => rx.recv_timeout(if job.timed_out() {
+            Some((job, deadline, credit)) => rx.recv_timeout(if job.timed_out() {
                 REFIRE
             } else {
-                deadline.saturating_duration_since(Instant::now())
+                job.remaining(*deadline, *credit)
             }),
         };
         match msg {
-            Ok(Cmd::Arm(job, deadline)) => armed = Some((job, deadline)),
+            Ok(Cmd::Arm(job, deadline, credit)) => armed = Some((job, deadline, credit)),
             Ok(Cmd::Disarm) => armed = None,
             Err(RecvTimeoutError::Timeout) => {
-                if let Some((job, _)) = &armed {
+                if let Some((job, deadline, credit)) = &armed {
+                    // Time the job spent waiting for the cluster moved its deadline.
+                    if !job.timed_out() && !job.remaining(*deadline, *credit).is_zero() {
+                        continue;
+                    }
                     job.fire();
                     // The worker finished first: nothing is left to terminate.
                     if !job.timed_out() {
@@ -216,7 +228,8 @@ impl JsExecutor {
         F: FnOnce() -> Reply + Send + 'static,
     {
         let (started, started_rx) = oneshot::channel();
-        let (reply, reply_rx) = oneshot::channel();
+        let (reply, mut reply_rx) = oneshot::channel();
+        let waits = Arc::clone(&job);
         self.tx
             .send(Envelope {
                 run: Box::new(f),
@@ -231,19 +244,23 @@ impl JsExecutor {
         // too and answers Unavailable below.
         let _ = started_rx.await;
         let limit = Duration::from_millis(self.limits.timeout_ms).saturating_add(BACKSTOP_GRACE);
-        match tokio::time::timeout(limit, reply_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(ExecError::Unavailable),
-            Err(_) => {
-                eprintln!(
-                    "error: JS worker did not reply within {} ms",
-                    limit.as_millis()
-                );
-                Err(ExecError::Timeout {
-                    limit_ms: self.limits.timeout_ms,
-                })
+        // Time the job spent waiting for the cluster extends the backstop as well.
+        let deadline = Instant::now() + limit;
+        let credit = wait_credit(Duration::from_millis(self.limits.timeout_ms));
+        while !waits.remaining(deadline, credit).is_zero() {
+            match tokio::time::timeout(waits.remaining(deadline, credit), &mut reply_rx).await {
+                Ok(Ok(result)) => return result,
+                Ok(Err(_)) => return Err(ExecError::Unavailable),
+                Err(_) => {}
             }
         }
+        eprintln!(
+            "error: JS worker did not reply within {} ms",
+            limit.as_millis()
+        );
+        Err(ExecError::Timeout {
+            limit_ms: self.limits.timeout_ms,
+        })
     }
 
     /// Run `job` on a JS worker with its tokio runtime entered and return its
@@ -377,7 +394,9 @@ fn worker_loop(
         let _ = started.send(());
         // A deadline past what Instant can hold is no deadline at all.
         if let Some(deadline) = Instant::now().checked_add(timeout)
-            && watchdog.send(Cmd::Arm(Arc::clone(&job), deadline)).is_err()
+            && watchdog
+                .send(Cmd::Arm(Arc::clone(&job), deadline, wait_credit(timeout)))
+                .is_err()
         {
             eprintln!("error: JS watchdog is gone; {label:?} runs without a timeout");
         }
@@ -736,8 +755,11 @@ mod tests {
         })
     }
 
+    /// Run `source`, failing instead of hanging when no answer comes within 30 s.
     fn exec_js(exec: &JsExecutor, source: &str) -> Result<String, ExecError> {
-        block_on(exec.execute(Store::new(), "t".into(), source.to_owned()))
+        let job = exec.execute(Store::new(), "t".into(), source.to_owned());
+        block_on(async { tokio::time::timeout(Duration::from_secs(30), job).await })
+            .expect("the job never answered")
     }
 
     #[test]

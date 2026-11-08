@@ -5,13 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actix_web::dev::ServerHandle;
-use actix_web::{App, HttpResponse, HttpServer, post, web};
+use actix_web::{App, HttpResponse, HttpServer, get, post, web};
 use openraft::EntryPayload;
 use openraft::error::RaftError;
 use openraft::raft::{AppendEntriesRequest, AppendEntriesResponse};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{Node, TypeConfig};
+
+/// A small snapshot interval, so tests reach a snapshot and a log purge with few writes.
+pub const SNAPSHOT_EVERY: u64 = 50;
 use crate::goals::Goals;
 use crate::state::{AppState, test_state};
 use crate::storage::TempDir;
@@ -20,6 +23,9 @@ use crate::store::Store;
 
 /// Tokens per second the goals of every node emit.
 pub const RATE: std::num::NonZeroU32 = std::num::NonZeroU32::new(200).unwrap();
+
+/// Short, so a test sees a shrink without a long wait.
+pub const SHRINK_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub const WAIT: Option<Duration> = Some(Duration::from_secs(15));
 
@@ -45,6 +51,23 @@ pub struct Slow {
     pub millis: Arc<AtomicU64>,
 }
 
+/// The number of next `read_index` requests a node refuses as a node that has just stopped leading
+/// would, which a follower still pointing at it meets while leadership moves.
+#[derive(Clone, Default)]
+pub struct Refuse(pub Arc<AtomicU64>);
+
+#[post("/raft/read_index")]
+async fn read_index(node: web::Data<Node>, refuse: web::Data<Refuse>) -> HttpResponse {
+    let refused = refuse
+        .0
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .is_ok();
+    if refused {
+        return crate::http::raft::answer::<()>(Err(super::ClusterError::NotLeader(None)));
+    }
+    crate::http::raft::answer(node.read_index().await)
+}
+
 #[post("/raft/forward")]
 async fn forward(
     node: web::Data<Node>,
@@ -62,6 +85,21 @@ async fn forward(
         return HttpResponse::InternalServerError().finish();
     }
     crate::http::raft::answer(written)
+}
+
+/// Like the real route, but node `slow.node` answers only after `slow.millis` ms.
+#[get("/raft/fragment/{stream}")]
+async fn fragment(
+    node: web::Data<Node>,
+    slow: web::Data<Slow>,
+    dir: web::Data<crate::http::raft::Fragments>,
+    stream: web::Path<u64>,
+) -> HttpResponse {
+    if slow.node.load(Ordering::SeqCst) == node.raft().metrics().borrow().id {
+        let millis = slow.millis.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(millis)).await;
+    }
+    crate::http::raft::read_fragment(dir.0.clone(), *stream).await
 }
 
 #[post("/raft/append")]
@@ -100,6 +138,7 @@ pub struct Cluster {
     pub cut: Cut,
     pub lose: Lose,
     pub slow: Slow,
+    pub refuse: Refuse,
     pub nodes: Vec<Arc<Node>>,
     pub stores: Vec<Store>,
     /// The goals of each running node; idle until `work`.
@@ -108,6 +147,7 @@ pub struct Cluster {
     pub dbs: Vec<Arc<redb::Database>>,
     servers: Vec<ServerHandle>,
     down: BTreeSet<usize>,
+    assigning: AtomicBool,
     _dir: TempDir,
 }
 
@@ -127,6 +167,7 @@ impl Cluster {
             cut: Cut::default(),
             lose: Lose::default(),
             slow: Slow::default(),
+            refuse: Refuse::default(),
             nodes: Vec::new(),
             stores: Vec::new(),
             goals: Vec::new(),
@@ -134,6 +175,7 @@ impl Cluster {
             dbs: Vec::new(),
             servers: Vec::new(),
             down: BTreeSet::new(),
+            assigning: AtomicBool::new(false),
             _dir: dir,
         };
         for (listener, id) in listeners.into_iter().zip(1..=running) {
@@ -159,28 +201,31 @@ impl Cluster {
         store: Store,
     ) -> (Arc<Node>, ServerHandle, Goals) {
         let node = Arc::new(
-            Node::start(id, &self.config, db.clone(), store.clone())
+            Node::start(id, &self.config, db.clone(), store.clone(), SNAPSHOT_EVERY)
                 .await
                 .unwrap(),
         );
         let goals = Goals::open_in_cluster(db, RATE, id, &store).unwrap();
         goals.enable_scripts(store.clone(), crate::js::test_executor());
-        goals.connect(node.clone());
         let state = AppState {
             store,
             goals: Some(goals.clone()),
             cluster: Some(node.clone()),
             ..test_state()
         };
+        let dir = super::seal::fragment_dir(&self._dir.path().join(format!("db{id}")));
+        goals.connect(node.clone(), dir.clone());
         let (app, raft) = (
             crate::http::configure(state),
-            crate::http::raft::configure(web::Data::from(node.clone())),
+            crate::http::raft::configure(web::Data::from(node.clone()), dir.clone()),
         );
-        let (cut, lose, slow, data) = (
+        let (cut, lose, slow, refuse, data, dir) = (
             self.cut.clone(),
             self.lose.clone(),
             self.slow.clone(),
+            self.refuse.clone(),
             web::Data::from(node.clone()),
+            dir.clone(),
         );
         let server = HttpServer::new(move || {
             // Registered first, so it answers /raft/append in place of the real route.
@@ -188,9 +233,13 @@ impl Cluster {
                 .app_data(web::Data::new(cut.clone()))
                 .app_data(web::Data::new(lose.clone()))
                 .app_data(web::Data::new(slow.clone()))
+                .app_data(web::Data::new(refuse.clone()))
                 .app_data(data.clone())
+                .app_data(web::Data::new(crate::http::raft::Fragments(dir.clone())))
                 .service(append)
+                .service(fragment)
                 .service(forward)
+                .service(read_index)
                 .configure(app.clone())
                 .configure(raft.clone())
         })
@@ -212,10 +261,26 @@ impl Cluster {
 
     /// Run the assignment loop on every node, so created goals get an owner.
     pub fn assign(&self) {
-        let members: Vec<u64> = (1..=self.addrs.len() as u64).collect();
-        for ((node, goals), id) in self.nodes.iter().zip(&self.goals).zip(1..) {
-            super::assign::spawn(node.clone(), goals.clone(), id, members.clone());
+        self.assigning.store(true, Ordering::SeqCst);
+        for i in 0..self.nodes.len() {
+            self.assign_node(i);
         }
+    }
+
+    fn assign_node(&self, i: usize) {
+        let (node, goals) = (self.nodes[i].clone(), self.goals[i].clone());
+        super::assign::spawn(
+            node,
+            goals,
+            i as u64 + 1,
+            Some(self.fragments(i)),
+            SHRINK_AFTER,
+        );
+    }
+
+    /// Where node `i` keeps its fragment files.
+    pub fn fragments(&self, i: usize) -> std::path::PathBuf {
+        super::seal::fragment_dir(&self._dir.path().join(format!("db{}", i + 1)))
     }
 
     /// Stop node `i`: its HTTP server and its Raft. Its data stays on disk for `start_node`.
@@ -234,35 +299,34 @@ impl Cluster {
         self.goals[i] = goals;
         self.nodes[i] = node;
         self.servers[i] = server;
+        if self.assigning.load(Ordering::SeqCst) {
+            self.assign_node(i);
+        }
     }
 
-    /// Wait until the nodes that are up agree on one leader, and return its index.
+    /// Wait until the nodes that are up agree on one leader, and return its index. An election
+    /// that is lost under load is waited out, not failed.
     pub async fn leader(&self) -> usize {
-        let mut leaders = Vec::new();
-        for (i, node) in self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !self.down.contains(i))
-        {
-            let metrics = node
-                .raft()
-                .wait(WAIT)
-                .metrics(|m| m.current_leader.is_some(), "a leader")
-                .await
-                .unwrap();
-            leaders.push((i, metrics.current_leader));
+        let deadline = tokio::time::Instant::now() + 4 * WAIT.unwrap();
+        loop {
+            let leaders: Vec<_> = self
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !self.down.contains(i))
+                .map(|(_, node)| node.raft().metrics().borrow().current_leader)
+                .collect();
+            if let Some(Some(leader)) = leaders.first()
+                && leaders.iter().all(|l| l == &Some(*leader))
+            {
+                return *leader as usize - 1;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no agreed leader: {leaders:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let leader = leaders[0].1;
-        for (i, _) in leaders {
-            self.nodes[i]
-                .raft()
-                .wait(WAIT)
-                .metrics(|m| m.current_leader == leader, "the same leader")
-                .await
-                .unwrap();
-        }
-        leader.unwrap() as usize - 1
     }
 
     /// Wait for an agreed leader, and return the index of a node that is not it.

@@ -340,15 +340,23 @@ stop_server
 CITERS=5
 CBUDGET=2000
 CSCRIPT="const get=(k)=>Deno.core.ops.op_rs3_get(k);const insert=(o)=>Deno.core.ops.op_rs3_insert(JSON.stringify(o));for(let i=0;i<${CITERS};i++){const n=Number(get('count'));const t=get('trail');insert({count:String(n+1),trail:t+i+','});const e=Date.now()+1000;while(Date.now()<e){}}get('count')"
-CPORTS=($(python3 -I -c 'import socket; ss=[socket.socket() for _ in range(3)]
+CDIR="$DIR"
+CRATE=200
+# cnodes N: allocate N free ports into CPORTS and build PEERS for an N-node cluster.
+cnodes() {
+  CPORTS=($(python3 -I -c 'import socket,sys; ss=[socket.socket() for _ in range(int(sys.argv[1]))]
 for s in ss: s.bind(("127.0.0.1", 0))
-print(*[s.getsockname()[1] for s in ss])'))
-PEERS="1=127.0.0.1:${CPORTS[0]},2=127.0.0.1:${CPORTS[1]},3=127.0.0.1:${CPORTS[2]}"
+print(*[s.getsockname()[1] for s in ss])' "$1"))
+  PEERS=""
+  local i
+  for i in "${!CPORTS[@]}"; do PEERS+="${PEERS:+,}$((i + 1))=127.0.0.1:${CPORTS[$i]}"; done
+}
+cnodes 3
 
 # cstart I: start cluster node I (0-based) in the background; its pid goes to CPIDS[I].
 cstart() {
   env -i PATH="$PATH" SERVER.HOST=127.0.0.1 SERVER.PORT="${CPORTS[$1]}" CLUSTER.NODE_ID=$(($1 + 1)) \
-    CLUSTER.PEERS="$PEERS" STORAGE.PATH="$DIR/node$(($1 + 1)).db" MODEL.TOKENS_PER_SECOND=200 \
+    CLUSTER.PEERS="$PEERS" STORAGE.PATH="$CDIR/node$(($1 + 1)).db" MODEL.TOKENS_PER_SECOND="$CRATE" \
     "$BIN" >>"$LOG" 2>&1 &
   CPIDS[$1]=$!
 }
@@ -380,7 +388,7 @@ cwhen() {
 cleader() {
   local dl=$((SECONDS + 60)) i
   while (( SECONDS < dl )); do
-    for i in 0 1 2; do
+    for i in "${!CPORTS[@]}"; do
       [[ "$i" != "${1:-}" ]] || continue
       creq "$i" POST /raft/read_index
       if [[ "$CODE" == 200 ]]; then echo "$i"; return 0; fi
@@ -404,7 +412,7 @@ cwait_done() {
   fail "cluster goal $2 not done after 60s: ${BODY}"
 }
 
-for i in 0 1 2; do cstart "$i"; done
+for i in "${!CPORTS[@]}"; do cstart "$i"; done
 cwhen 0 POST /insert "$(python3 -I -c 'import json,sys; print(json.dumps({"count":"0","trail":"","job":sys.argv[1]}))' "$CSCRIPT")"
 [[ "$CODE" == 200 ]] || fail "cluster POST /insert -> ${CODE} ${BODY}"
 LEADER=$(cleader)
@@ -428,7 +436,7 @@ done
 kill -9 "${CPIDS[$LEADER]}"
 wait "${CPIDS[$LEADER]}" 2>/dev/null || true
 CPIDS[$LEADER]=""
-LIVE=$(( (LEADER + 1) % 3 ))
+LIVE=$(( (LEADER + 1) % ${#CPORTS[@]} ))
 NEWLEADER=$(cleader "$LEADER")
 echo "ci-smoke: ok   killed leader node $((LEADER + 1)) (kill -9); new leader is node $((NEWLEADER + 1))"
 
@@ -436,11 +444,56 @@ CD1=$(cwait_done "$LIVE" "$CG"); CDS=$(cwait_done "$LIVE" "$CS")
 [[ "$(jf "$CD1" output)" == "$REF11" ]] || fail "cluster generation output differs from the single-node reference: ${CD1}"
 [[ "$(jf "$CDS" output)" == "$CITERS" ]] || fail "cluster script goal output: ${CDS}"
 TRAIL5="$(python3 -I -c 'import sys; print("".join(f"{i}," for i in range(int(sys.argv[1]))),end="")' "$CITERS")"
-for i in 0 1 2; do
+for i in "${!CPORTS[@]}"; do
   [[ "$i" != "$LEADER" ]] || continue
   cwhen "$i" GET /key/count; [[ "$BODY" == "\"${CITERS}\"" ]] || fail "node $((i + 1)) count -> ${CODE} ${BODY}"
   cwhen "$i" GET /key/trail; [[ "$BODY" == "\"${TRAIL5}\"" ]] || fail "node $((i + 1)) trail -> ${CODE} ${BODY}"
 done
 echo "ci-smoke: ok   cluster generation goal equals the reference; script wrote each of ${CITERS} entries exactly once after the leader kill"
+
+# Stop the 3-node survivors before the 5-node cluster starts.
+for i in "${!CPIDS[@]}"; do
+  [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
+done
+CPIDS=()
+
+# ---- 5-node release cluster: seal, kill two, read ----
+CDIR="$DIR/five"
+mkdir -p "$CDIR"
+cnodes 5
+for i in "${!CPORTS[@]}"; do cstart "$i"; done
+LEADER=$(cleader)
+echo "ci-smoke: ok   5-node cluster up, leader is node $((LEADER + 1))"
+cwhen 0 POST /goals "{\"priority\":0,\"budget\":${CBUDGET},\"seed\":11,\"prompt\":\"p\"}"
+[[ "$CODE" == 201 ]] || fail "5-node POST /goals -> ${CODE} ${BODY}"
+FG=$(jf "$BODY" id)
+[[ "$(jf "$(cwait_done 0 "$FG")" output)" == "$REF11" ]] || fail "5-node goal output differs from the reference"
+for i in "${!CPORTS[@]}"; do
+  dl=$((SECONDS + 60))
+  while :; do
+    creq "$i" GET "/goals/$FG/storage"
+    if [[ "$CODE" == 200 && "$(jf "$BODY" holds)" == fragment && "$(jf "$BODY" data)" == 3 && "$(jf "$BODY" parity)" == 2 ]]; then break; fi
+    (( SECONDS < dl )) || fail "node $((i + 1)) GET /goals/$FG/storage -> ${CODE} ${BODY}, expected an RS(3,2) fragment"
+    sleep 0.2
+  done
+done
+echo "ci-smoke: ok   goal sealed: RS(3,2) fragment on every node, no full copy"
+
+# Kill -9 the leader and one follower; 3 of 5 voters stay a quorum.
+LEADER=$(cleader)
+OTHER=$(( (LEADER + 1) % 5 ))
+for k in "$LEADER" "$OTHER"; do
+  kill -9 "${CPIDS[$k]}"
+  wait "${CPIDS[$k]}" 2>/dev/null || true
+  CPIDS[$k]=""
+done
+cleader >/dev/null
+for i in "${!CPORTS[@]}"; do
+  [[ "$i" != "$LEADER" && "$i" != "$OTHER" ]] || continue
+  cwhen "$i" GET "/goals/$FG"
+  [[ "$CODE" == 200 ]] || fail "node $((i + 1)) GET /goals/$FG -> ${CODE} ${BODY}"
+  [[ "$(jf "$BODY" output)" == "$REF11" ]] || fail "node $((i + 1)) sealed output differs from the reference: ${BODY:0:200}"
+done
+echo "ci-smoke: ok   after kill -9 of nodes $((LEADER + 1)) and $((OTHER + 1)) every survivor serves the sealed output equal to the reference"
 
 echo "ci-smoke: OK (${BIN}, port ${PORT})"

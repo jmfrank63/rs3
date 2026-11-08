@@ -1,21 +1,25 @@
 //! Goal routes: `POST /goals` creates a generation goal, or a script goal that
 //! runs the script stored under a key (pinned at creation), and `GET /goals/{id}`
 //! reports its status and committed output, and `DELETE /goals/{id}` cancels it
-//! durably and answers the same way. All answer 503 `goals_unavailable`
+//! durably and answers the same way, and `GET /goals/{id}/storage` says what this node holds of
+//! it. All answer 503 `goals_unavailable`
 //! when the server runs without a database.
 use actix_web::{HttpResponse, delete, get, post, web};
 use serde::Deserialize;
 
 use super::error::ApiError;
 use super::kv::{blocking_failed, read_barrier};
-use crate::goals::{GoalSpec, GoalStatus, Goals};
+use crate::goals::{GoalSpec, GoalStatus, Goals, Holds};
 use crate::journal::JournalError;
 use crate::state::AppState;
 use crate::store::StoreError;
 
 /// Register the goal routes. The shared `AppState` is registered by `http::configure`.
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(create).service(get_goal).service(cancel_goal);
+    cfg.service(create)
+        .service(get_goal)
+        .service(cancel_goal)
+        .service(storage);
 }
 
 /// What a client sends to create a goal: generation fields, or a script key.
@@ -127,6 +131,38 @@ async fn cancel_goal(
     path: web::Path<String>,
 ) -> Result<HttpResponse, ApiError> {
     goal_status(state, path, Goals::cancel).await
+}
+
+/// `GET /goals/{id}/storage` says what this node holds of a known goal: `{"holds":"full"}` while it
+/// has the records, `{"holds":"fragment","index","len","data","parity"}` once only its fragment of
+/// the sealed stream is left, `{"holds":"none"}` when that fragment is lost; else 404 `not_found`.
+#[get("/goals/{id}/storage")]
+async fn storage(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    let goals = goals(&state)?;
+    read_barrier(&state).await?;
+    let raw = path.into_inner();
+    let id: u64 = raw
+        .parse()
+        .map_err(|_| ApiError::GoalNotFound(raw.clone()))?;
+    let holds = web::block(move || goals.holds(id))
+        .await
+        .map_err(blocking_failed)??
+        .ok_or(ApiError::GoalNotFound(raw))?;
+    Ok(HttpResponse::Ok().json(match holds {
+        Holds::Full => serde_json::json!({ "holds": "full" }),
+        Holds::None => serde_json::json!({ "holds": "none" }),
+        Holds::Fragment {
+            index,
+            len,
+            data,
+            parity,
+        } => serde_json::json!({
+            "holds": "fragment", "index": index, "len": len, "data": data, "parity": parity
+        }),
+    }))
 }
 
 #[cfg(test)]
@@ -474,6 +510,44 @@ mod tests {
         }
         let resp = call(&f.state, get_request(1)).await;
         assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+    }
+
+    fn storage_request(id: impl std::fmt::Display) -> atest::TestRequest {
+        atest::TestRequest::get().uri(&format!("/goals/{id}/storage"))
+    }
+
+    #[actix_web::test]
+    async fn a_known_goal_holds_a_full_copy_even_after_it_ended() {
+        let f = fixture(1_000_000, None);
+        let id = create(&f.state, &goal_body(5)).await;
+        let resp = call(&f.state, storage_request(id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#"{"holds":"full"}"#)
+        );
+        delete(&f.state, id).await;
+        let resp = call(&f.state, storage_request(id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            atest::read_body(resp).await,
+            web::Bytes::from_static(br#"{"holds":"full"}"#)
+        );
+    }
+
+    #[actix_web::test]
+    async fn storage_of_an_unknown_goal_is_not_found() {
+        let f = fixture(1_000_000, None);
+        for id in ["999", "abc"] {
+            let resp = call(&f.state, storage_request(id)).await;
+            assert_json_error(resp, StatusCode::NOT_FOUND, "not_found").await;
+        }
+    }
+
+    #[actix_web::test]
+    async fn storage_answers_503_without_a_database() {
+        let resp = call(&test_state(), storage_request(1)).await;
+        assert_json_error(resp, StatusCode::SERVICE_UNAVAILABLE, "goals_unavailable").await;
     }
 
     #[actix_web::test]
