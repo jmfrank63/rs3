@@ -206,6 +206,16 @@ impl Store {
         }
     }
 
+    /// The value under `key` as of the write transaction `txn`, or `None`.
+    pub(crate) fn get_in(
+        txn: &redb::WriteTransaction,
+        key: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let table = txn.open_table(KV).map_err(storage)?;
+        let value = table.get(key).map_err(storage)?;
+        Ok(value.map(|v| v.value().to_owned()))
+    }
+
     /// Every pair the kv table holds as of `txn`.
     pub(crate) fn dump(txn: &redb::ReadTransaction) -> Result<Vec<(String, String)>, StoreError> {
         let table = txn.open_table(KV).map_err(storage)?;

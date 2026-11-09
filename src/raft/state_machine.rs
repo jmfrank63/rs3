@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::{Reply, TypeConfig, blocking};
 use crate::journal::{self, Journal};
 use crate::store::{Response, Store, StoreError, command};
-use crate::{goals, lease};
+use crate::{goals, lease, sessions};
 
 type Entry = openraft::Entry<TypeConfig>;
 type Membership = StoredMembership<u64, openraft::BasicNode>;
@@ -28,6 +28,7 @@ struct Image {
     goals: Vec<goals::Row>,
     journal: journal::Image,
     leases: lease::Image,
+    sessions: Vec<(u64, Vec<u8>)>,
 }
 
 /// Applies committed entries to `store` and records how far it got.
@@ -183,6 +184,7 @@ impl RaftStateMachine<TypeConfig> for RedbStateMachine {
             goals::replace_in(&txn, &image.goals)?;
             image.journal.replace_in(&txn)?;
             image.leases.replace_in(&txn)?;
+            sessions::replace_in(&txn, &image.sessions)?;
             if let Some(applied) = &meta.last_log_id {
                 write_sm(&txn, applied, Some(&meta.last_membership))?;
             }
@@ -229,6 +231,7 @@ impl RaftSnapshotBuilder<TypeConfig> for RedbStateMachine {
                 goals: goals::dump_in(&txn)?,
                 journal: journal::Image::dump_in(&txn)?,
                 leases: lease::Image::dump_in(&txn)?,
+                sessions: sessions::dump_in(&txn)?,
             })?;
             let meta = SnapshotMeta {
                 last_log_id,

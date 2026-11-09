@@ -121,7 +121,12 @@ async fn run() -> Result<(), String> {
 
 #[actix_web::main]
 async fn main() -> ExitCode {
-    match run().await {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match args.split_first() {
+        Some((command, urls)) if command == "acp" => rs3::acp::run(urls).await,
+        _ => run().await,
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");

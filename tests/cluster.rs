@@ -1,10 +1,16 @@
 //! Three real rs3 processes form one Raft cluster that every node reads and writes through.
 
 #[cfg(test)]
+#[path = "common/acp.rs"]
+mod acp;
+#[cfg(test)]
 #[path = "common/cluster.rs"]
 mod cluster;
 #[cfg(test)]
 mod common;
+#[cfg(test)]
+#[path = "common/proxy.rs"]
+mod proxy;
 
 #[cfg(test)]
 mod tests {
@@ -567,5 +573,642 @@ mod tests {
             });
             assert_eq!(output(&done), single_node_output(seed), "{done}");
         }
+    }
+    fn session_id(cluster: &Cluster, node: usize) -> u64 {
+        let reply = cluster.request_when_available(node, "POST", "/sessions", "");
+        let created: serde_json::Value = serde_json::from_str(&reply).expect(&reply);
+        created["id"].as_u64().expect(&reply)
+    }
+
+    fn session_turn(
+        cluster: &Cluster,
+        node: usize,
+        session: u64,
+        turn: u64,
+        prompt: &str,
+    ) -> (u16, String) {
+        let body = format!(r#"{{"turn":{turn},"prompt":"{prompt}"}}"#);
+        let path = format!("/sessions/{session}/turns");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let (status, reply) = cluster.request_status(node, "POST", &path, &body);
+            if status != 503 {
+                return (status, reply);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no leader for a session turn: {reply}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn session_goal(cluster: &Cluster, node: usize, session: u64, turn: u64, prompt: &str) -> u64 {
+        let (status, reply) = session_turn(cluster, node, session, turn, prompt);
+        assert_eq!(status, 201, "{reply}");
+        let started: serde_json::Value = serde_json::from_str(&reply).expect(&reply);
+        started["goal"].as_u64().expect(&reply)
+    }
+
+    fn session_body(cluster: &Cluster, node: usize, session: u64) -> (u16, String) {
+        cluster.request_status(node, "GET", &format!("/sessions/{session}"), "")
+    }
+
+    #[test]
+    fn script_turn_started_through_one_node_resends_to_the_same_goal_and_a_missing_key_records_nothing()
+     {
+        let cluster = Cluster::start("cluster-script-turn", 3);
+        let source = r#"Deno.core.ops.op_rs3_insert('{"w":"1"}'); 'ran'"#;
+        cluster.request_when_available(
+            0,
+            "POST",
+            "/insert",
+            &serde_json::json!({ "job": source }).to_string(),
+        );
+        let session = session_id(&cluster, 0);
+        let first = session_goal(&cluster, 1, session, 0, "/run job");
+        let again = session_goal(&cluster, 2, session, 0, "/run job");
+        assert_eq!(first, again);
+        let done = wait_until("the script turn to finish", Duration::from_secs(10), || {
+            let goal = cluster.goal(0, first);
+            (goal["status"] == "done").then_some(goal)
+        });
+        assert_eq!(done["output"], "ran", "{done}");
+
+        let (status, reply) = session_turn(&cluster, 2, session, 1, "/run nothing");
+        assert_eq!(status, 404, "{reply}");
+        assert!(reply.contains("not_found"), "{reply}");
+        for node in 0..3 {
+            let (status, body) = session_body(&cluster, node, session);
+            assert_eq!(status, 200);
+            let turns: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(turns["turns"].as_array().unwrap().len(), 1, "node {node}");
+        }
+    }
+
+    #[test]
+    fn a_session_created_through_one_node_reads_the_same_through_every_node() {
+        let cluster = Cluster::start("cluster-session-read", 3);
+        let session = session_id(&cluster, 1);
+        let bodies: Vec<_> = (0..3).map(|n| session_body(&cluster, n, session)).collect();
+        assert_eq!(bodies[0], (200, r#"{"turns":[]}"#.to_string()));
+        assert!(bodies.iter().all(|b| *b == bodies[0]), "{bodies:?}");
+    }
+
+    #[test]
+    fn two_sessions_created_through_different_nodes_get_different_ids() {
+        let cluster = Cluster::start("cluster-session-ids", 3);
+        let ids: Vec<u64> = (0..3).map(|n| session_id(&cluster, n)).collect();
+        let distinct: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(distinct.len(), 3, "{ids:?}");
+    }
+
+    #[test]
+    fn a_session_turn_resent_through_another_node_is_one_goal_that_finishes() {
+        let cluster = Cluster::start("cluster-session-resend", 3);
+        let session = session_id(&cluster, 0);
+        let first = session_goal(&cluster, 1, session, 0, "hello");
+        let again = session_goal(&cluster, 2, session, 0, "hello");
+        assert_eq!(first, again);
+        for node in 0..3 {
+            let (status, reply) = cluster.request_status(node, "GET", "/goals/2", "");
+            assert_eq!(status, 404, "node {node}: {reply}");
+        }
+        wait_until("the session goal to finish", WAIT, || {
+            (cluster.goal(0, first)["status"] == "done").then_some(())
+        });
+        let bodies: Vec<_> = (0..3).map(|n| session_body(&cluster, n, session)).collect();
+        assert!(bodies.iter().all(|b| *b == bodies[0]), "{bodies:?}");
+        assert!(bodies[0].1.contains("hello"), "{bodies:?}");
+    }
+
+    #[test]
+    fn a_refused_session_turn_leaves_the_session_unchanged_on_every_node() {
+        let cluster = Cluster::start("cluster-session-refused", 3);
+        let session = session_id(&cluster, 0);
+        session_goal(&cluster, 0, session, 0, "first");
+        let before: Vec<_> = (0..3).map(|n| session_body(&cluster, n, session)).collect();
+        let (status, reply) = session_turn(&cluster, 1, session, 0, "other");
+        assert_eq!(status, 409, "{reply}");
+        assert!(reply.contains("turn_conflict"), "{reply}");
+        let (status, reply) = session_turn(&cluster, 2, session, 5, "skipped");
+        assert_eq!(status, 409, "{reply}");
+        let (status, reply) = session_turn(&cluster, 1, 99, 0, "nobody");
+        assert_eq!(status, 404, "{reply}");
+        assert!(reply.contains("not_found"), "{reply}");
+        let after: Vec<_> = (0..3).map(|n| session_body(&cluster, n, session)).collect();
+        assert_eq!(before, after);
+        let (status, _) = cluster.request_status(0, "GET", "/goals/2", "");
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn a_node_restarted_from_an_empty_directory_gets_its_sessions_from_a_snapshot() {
+        let mut cluster = Cluster::start("cluster-session-snapshot", 3);
+        let session = session_id(&cluster, 0);
+        let goal = session_goal(&cluster, 0, session, 0, "remember me");
+        wait_until("the session goal to finish", WAIT, || {
+            (cluster.goal(0, goal)["status"] == "done").then_some(())
+        });
+        for n in 0..120 {
+            let reply = cluster.request_when_available(
+                0,
+                "POST",
+                "/insert",
+                &format!(r#"{{"late{n}":"v"}}"#),
+            );
+            assert!(!reply.contains("error"), "{reply}");
+        }
+        let expected = session_body(&cluster, 0, session);
+        assert_eq!(expected.0, 200);
+        let victim = (cluster.leader() + 1) % 3;
+        cluster.kill(victim);
+        let node = format!("node{}.db", victim + 1);
+        std::fs::remove_file(cluster.dir.0.join(&node)).unwrap();
+        let _ = std::fs::remove_dir_all(cluster.dir.0.join(format!("{node}.fragments")));
+        cluster.restart(victim);
+        let restored = wait_until(
+            "the restarted node to answer the session",
+            Duration::from_secs(20),
+            || {
+                let reply = session_body(&cluster, victim, session);
+                (reply.0 == 200).then_some(reply)
+            },
+        );
+        assert_eq!(restored, expected);
+    }
+
+    #[test]
+    fn a_lost_turn_response_leaves_one_goal_and_one_session_turn_on_every_node() {
+        use serde_json::json;
+
+        use crate::acp::Acp;
+        use crate::proxy::Proxy;
+
+        let cluster = Cluster::start_with(
+            "cluster-lost-turn",
+            3,
+            &[("MODEL.TOKENS_PER_SECOND", "500")],
+        );
+        cluster.leader();
+        let proxy = Proxy::start(cluster.ports[0]);
+        let urls = [
+            format!("http://127.0.0.1:{}", proxy.port),
+            format!("http://127.0.0.1:{}", cluster.ports[1]),
+        ];
+        let mut acp = Acp::start(&cluster.dir.0, &urls);
+        let session = acp.new_session(1);
+        proxy.drop_next(1);
+        let (response, chunks) = acp.prompt(2, &session, &["lost"]);
+        assert_eq!(proxy.dropped(), 1);
+        assert_eq!(response["result"]["stopReason"], "end_turn");
+        let first = cluster.goal(0, 1);
+        assert_eq!(chunks.concat(), output(&first));
+        for node in 0..3 {
+            let (status, _) = cluster.request_status(node, "GET", "/goals/2", "");
+            assert_eq!(status, 404, "node {node}");
+            let body = cluster.request_when_available(node, "GET", "/sessions/1", "");
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                body,
+                json!({"turns": [{"prompt": "lost", "goal": 1}]}),
+                "node {node}"
+            );
+        }
+        assert!(acp.finish().success());
+        assert!(acp.rest_of_stdout().is_empty());
+    }
+
+    /// The output of turn 0 of session `session` run on a single-node server.
+    fn single_node_turn(session: u64, prompt: &str) -> String {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = TempDir::new(&format!("cluster-turn-reference-{call}"));
+        let server = Server::start(&dir.0, Some(&dir.0.join("rs3.db")), &[]);
+        loop {
+            let created: serde_json::Value =
+                serde_json::from_str(&server.request("POST", "/sessions", "")).unwrap();
+            let id = created["id"].as_u64().unwrap();
+            assert!(id <= session, "session {session} was skipped");
+            if id == session {
+                break;
+            }
+        }
+        let body = format!(r#"{{"turn":0,"prompt":"{prompt}"}}"#);
+        let started = server.request("POST", &format!("/sessions/{session}/turns"), &body);
+        let started: serde_json::Value = serde_json::from_str(&started).expect(&started);
+        let path = format!("/goals/{}", started["goal"]);
+        wait_until("the reference turn", WAIT, || {
+            let goal: serde_json::Value =
+                serde_json::from_str(&server.request("GET", &path, "")).unwrap();
+            (goal["status"] == "done").then(|| output(&goal))
+        })
+    }
+
+    /// Start `rs3 acp` over every node in order, open a session and send one prompt; return the
+    /// adapter, the session id and the text of the first chunk.
+    fn start_turn(
+        cluster: &Cluster,
+        env: &[(&str, &str)],
+        prompt: &str,
+    ) -> (crate::acp::Acp, u64, String) {
+        start_turn_on(
+            cluster,
+            &node_urls(cluster, 0..cluster.ports.len()),
+            env,
+            prompt,
+        )
+    }
+
+    fn node_urls(cluster: &Cluster, nodes: std::ops::Range<usize>) -> Vec<String> {
+        nodes
+            .map(|n| format!("http://127.0.0.1:{}", cluster.ports[n]))
+            .collect()
+    }
+
+    /// Like `start_turn`, with the adapter given only `urls`.
+    fn start_turn_on(
+        cluster: &Cluster,
+        urls: &[String],
+        env: &[(&str, &str)],
+        prompt: &str,
+    ) -> (crate::acp::Acp, u64, String) {
+        cluster.leader();
+        let mut acp = crate::acp::Acp::start_with(&cluster.dir.0, urls, env);
+        let session = acp.new_session(1);
+        assert_eq!(acp.advertised()["params"]["sessionId"], session.as_str());
+        acp.request(
+            2,
+            "session/prompt",
+            serde_json::json!({"sessionId": session, "prompt": [{"type": "text", "text": prompt}]}),
+        );
+        let first = acp.recv_within(WAIT).expect("no first chunk");
+        assert_eq!(first["method"], "session/update", "{first}");
+        let text = first["params"]["update"]["content"]["text"]
+            .as_str()
+            .unwrap();
+        (acp, session.parse().unwrap(), text.to_owned())
+    }
+
+    /// Collect chunk texts until the response to the prompt, waiting up to `WAIT` for each line.
+    fn finish_turn(acp: &mut crate::acp::Acp) -> (serde_json::Value, Vec<String>) {
+        let mut chunks = Vec::new();
+        loop {
+            let message = acp.recv_within(WAIT).expect("no line from rs3 acp");
+            if message["id"] == 2 {
+                return (message, chunks);
+            }
+            chunks.push(
+                message["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+    }
+
+    fn assert_one_turn_and_no_second_goal(cluster: &Cluster, live: &[usize], session: u64) {
+        for &node in live {
+            let (status, reply) = cluster.request_status(node, "GET", "/goals/2", "");
+            assert_eq!(status, 404, "node {node}: {reply}");
+            let body =
+                cluster.request_when_available(node, "GET", &format!("/sessions/{session}"), "");
+            let body: serde_json::Value = serde_json::from_str(&body).expect(&body);
+            assert_eq!(
+                body["turns"].as_array().unwrap().len(),
+                1,
+                "node {node}: {body}"
+            );
+        }
+    }
+
+    const SLOW: [(&str, &str); 1] = [("MODEL.TOKENS_PER_SECOND", "100")];
+
+    #[test]
+    fn acp_turn_survives_killing_the_owner_and_the_node_in_use() {
+        let mut cluster = Cluster::start_with("cluster-acp-failover", 5, &SLOW);
+        let (mut acp, session, first) = start_turn(&cluster, &[], "failover");
+        let owner = cluster.goal(0, 1)["node"].as_u64().unwrap() as usize - 1;
+        let second = if owner == 0 { 1 } else { owner };
+        cluster.kill(0);
+        cluster.kill(second);
+        let (response, rest) = finish_turn(&mut acp);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        let text = format!("{first}{}", rest.concat());
+        assert!(
+            text.len() > first.len(),
+            "the kills came after the turn ended"
+        );
+        let live: Vec<usize> = (0..5).filter(|n| *n != 0 && *n != second).collect();
+        let done = wait_until("the goal to be done", WAIT, || {
+            let goal = cluster.goal(live[0], 1);
+            (goal["status"] == "done").then_some(goal)
+        });
+        assert_eq!(text, output(&done));
+        assert_eq!(text, single_node_turn(session, "failover"));
+        let log = acp.stderr_text();
+        assert!(
+            log.lines()
+                .any(|l| l.starts_with("GET ") || l.starts_with("POST ")),
+            "no failed attempt in: {log}"
+        );
+        assert_one_turn_and_no_second_goal(&cluster, &live, session);
+    }
+
+    #[test]
+    fn acp_run_script_turn_writes_once_across_an_owner_kill() {
+        let mut cluster = Cluster::start("cluster-acp-script", 3);
+        let source = r#"for (let i = 0; i < 5; i++) {
+                Deno.core.ops.op_rs3_insert('{"s' + i + '":"' + i + '"}');
+                const end = Date.now() + 1000;
+                while (Date.now() < end) {}
+            }
+            String(Object.keys(JSON.parse(Deno.core.ops.op_rs3_list())).length)"#;
+        cluster.request_when_available(
+            0,
+            "POST",
+            "/insert",
+            &serde_json::json!({ "job": source }).to_string(),
+        );
+        let mut acp = crate::acp::Acp::start_with(
+            &cluster.dir.0,
+            &node_urls(&cluster, 0..cluster.ports.len()),
+            &[],
+        );
+        let session = acp.new_session(1);
+        assert_eq!(acp.advertised()["params"]["sessionId"], session.as_str());
+        acp.request(
+            2,
+            "session/prompt",
+            serde_json::json!({"sessionId": session, "prompt": [{"type": "text", "text": "/run job"}]}),
+        );
+        let goal_id = wait_until("the session to name its goal", WAIT, || {
+            let body =
+                cluster.request_when_available(0, "GET", &format!("/sessions/{session}"), "");
+            let body: serde_json::Value = serde_json::from_str(&body).ok()?;
+            body["turns"].as_array()?.first()?["goal"].as_u64()
+        });
+        let victim = wait_until("the script to start writing", WAIT, || {
+            let goal = cluster.goal(0, goal_id);
+            let first = cluster.request_when_available(0, "GET", "/key/s0", "");
+            (goal["status"] == "running" && first == r#""0""#).then(|| {
+                goal["node"]
+                    .as_u64()
+                    .expect("a running goal names its node") as usize
+                    - 1
+            })
+        });
+        cluster.kill(victim);
+        let live: Vec<usize> = (0..3).filter(|n| *n != victim).collect();
+        let (response, chunks) = finish_turn(&mut acp);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        // `job` plus s0..s4, each written once.
+        assert_eq!(chunks.concat(), "6");
+        for &node in &live {
+            for i in 0..5 {
+                let got = cluster.request_when_available(node, "GET", &format!("/key/s{i}"), "");
+                assert_eq!(got, format!(r#""{i}""#), "node {node}");
+            }
+            let body =
+                cluster.request_when_available(node, "GET", &format!("/sessions/{session}"), "");
+            let body: serde_json::Value = serde_json::from_str(&body).expect(&body);
+            assert_eq!(body["turns"].as_array().unwrap().len(), 1, "{body}");
+        }
+    }
+
+    #[test]
+    fn acp_turn_waits_through_quorum_loss_and_completes_when_a_node_returns() {
+        let mut cluster = Cluster::start_with("cluster-acp-quorum", 5, &SLOW);
+        let (mut acp, session, first) = start_turn(&cluster, &[], "quorum");
+        for node in 0..3 {
+            cluster.kill(node);
+        }
+        let mut text = first;
+        let quiet = Instant::now() + Duration::from_secs(5);
+        while let Some(wait) = quiet.checked_duration_since(Instant::now()) {
+            if let Some(message) = acp.recv_within(wait) {
+                assert_ne!(message["id"], 2, "answered during the outage: {message}");
+                text.push_str(
+                    message["params"]["update"]["content"]["text"]
+                        .as_str()
+                        .unwrap(),
+                );
+            }
+        }
+        cluster.restart(0);
+        let (response, rest) = finish_turn(&mut acp);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        text.push_str(&rest.concat());
+        assert_eq!(text, single_node_turn(session, "quorum"));
+        assert_one_turn_and_no_second_goal(&cluster, &[0, 3, 4], session);
+    }
+
+    #[test]
+    fn acp_turn_answers_cluster_unavailable_after_the_timeout_and_keeps_the_goal() {
+        let mut cluster = Cluster::start_with("cluster-acp-timeout", 5, &SLOW);
+        let (mut acp, session, first) =
+            start_turn(&cluster, &[("ACP_UNAVAILABLE_TIMEOUT", "2")], "timeout");
+        for node in 0..3 {
+            cluster.kill(node);
+        }
+        let (response, rest) = finish_turn(&mut acp);
+        let error = &response["error"];
+        assert_eq!(error["code"], -32001, "{response}");
+        assert_eq!(error["message"], "cluster_unavailable", "{response}");
+        assert_eq!(error["data"]["error"], "cluster_unavailable", "{response}");
+        let received = format!("{first}{}", rest.concat());
+        for node in 0..3 {
+            cluster.restart(node);
+        }
+        let done = wait_until("the goal to be done", WAIT, || {
+            let goal = cluster.goal(3, 1);
+            (goal["status"] == "done").then_some(goal)
+        });
+        assert!(
+            output(&done).starts_with(&received),
+            "{received:?} vs {done}"
+        );
+        assert_eq!(output(&done), single_node_turn(session, "timeout"));
+        assert_one_turn_and_no_second_goal(&cluster, &[0, 1, 2, 3, 4], session);
+        let mut fresh = crate::acp::Acp::start(&cluster.dir.0, &node_urls(&cluster, 0..5));
+        let (response, updates) = fresh.load(1, &session.to_string(), WAIT);
+        assert_eq!(response["result"], serde_json::Value::Null, "{response}");
+        let replay = [
+            ("user_message_chunk".to_owned(), "timeout".to_owned()),
+            ("agent_message_chunk".to_owned(), output(&done)),
+        ];
+        assert_eq!(updates, replay);
+        assert!(fresh.finish().success());
+    }
+
+    fn holds_fragment(cluster: &Cluster, node: usize, id: u64) -> bool {
+        let path = format!("/goals/{id}/storage");
+        let (status, reply) = cluster.request_status(node, "GET", &path, "");
+        status == 200 && reply.contains("\"fragment\"")
+    }
+
+    #[test]
+    fn acp_restart_mid_turn_loads_then_delivers_the_rest_of_the_turn_and_its_own() {
+        let cluster = Cluster::start_with("cluster-acp-restart", 3, &SLOW);
+        let (acp, session, _) = start_turn(&cluster, &[], "restart");
+        drop(acp);
+        let urls = node_urls(&cluster, 0..3);
+        let mut fresh = crate::acp::Acp::start_with(&cluster.dir.0, &urls, &[]);
+        let (response, updates) = fresh.load(1, &session.to_string(), WAIT);
+        assert_eq!(response["result"], serde_json::Value::Null, "{response}");
+        let replayed = updates[1].1.clone();
+        let params = serde_json::json!({"sessionId": session.to_string(), "prompt": [{"type": "text", "text": "after"}]});
+        fresh.request(2, "session/prompt", params);
+        let (response, chunks) = finish_turn(&mut fresh);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        let first = output(&cluster.goal(0, 1));
+        let second = output(&cluster.goal(0, 2));
+        assert_eq!(first, single_node_turn(session, "restart"));
+        assert_eq!(
+            format!("{replayed}{}", chunks.concat()),
+            format!("{first}{second}")
+        );
+        for node in 0..3 {
+            let (status, reply) = cluster.request_status(node, "GET", "/goals/3", "");
+            assert_eq!(status, 404, "node {node}: {reply}");
+            let path = format!("/sessions/{session}");
+            let body = cluster.request_when_available(node, "GET", &path, "");
+            let body: serde_json::Value = serde_json::from_str(&body).expect(&body);
+            assert_eq!(body["turns"].as_array().unwrap().len(), 2, "{body}");
+        }
+        assert!(fresh.finish().success());
+    }
+
+    #[test]
+    fn acp_load_replays_sealed_goals_byte_identical_with_two_nodes_killed() {
+        let mut cluster = Cluster::start("cluster-acp-sealed", 5);
+        cluster.leader();
+        let urls = node_urls(&cluster, 0..5);
+        let mut writer = crate::acp::Acp::start_with(&cluster.dir.0, &urls, &[]);
+        let session = writer.new_session(1);
+        let mut texts = Vec::new();
+        for (id, prompt) in [(2, "one"), (3, "two")] {
+            let (response, chunks) = writer.prompt(id, &session, &[prompt]);
+            assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+            texts.push(chunks.concat());
+        }
+        assert!(writer.finish().success());
+        for node in 0..5 {
+            wait_until("both goals sealed", WAIT, || {
+                (holds_fragment(&cluster, node, 1) && holds_fragment(&cluster, node, 2))
+                    .then_some(())
+            });
+        }
+        cluster.kill(0);
+        cluster.kill(2);
+        let mut acp = crate::acp::Acp::start(&cluster.dir.0, &urls);
+        let (response, updates) = acp.load(1, &session, WAIT);
+        assert_eq!(response["result"], serde_json::Value::Null, "{response}");
+        let user = |t: &str| ("user_message_chunk".to_owned(), t.to_owned());
+        let agent = |t: &String| ("agent_message_chunk".to_owned(), t.clone());
+        let expected = [user("one"), agent(&texts[0]), user("two"), agent(&texts[1])];
+        assert_eq!(updates, expected);
+        assert!(acp.finish().success());
+    }
+
+    #[test]
+    fn acp_cancel_mid_turn_answers_cancelled_and_the_goal_is_cancelled_on_every_node() {
+        let cluster = Cluster::start_with("cluster-acp-cancel", 5, &SLOW);
+        let (mut acp, session, first) = start_turn(&cluster, &[], "cancel");
+        acp.cancel(&session.to_string());
+        let (response, rest) = finish_turn(&mut acp);
+        assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
+        for node in 0..5 {
+            let goal = wait_until("the goal to be cancelled", WAIT, || {
+                let goal = cluster.goal(node, 1);
+                (goal["status"] == "cancelled").then_some(goal)
+            });
+            assert_eq!(format!("{first}{}", rest.concat()), output(&goal));
+        }
+    }
+
+    #[test]
+    fn acp_cancel_with_quorum_lost_answers_cluster_unavailable_and_leaves_the_goal() {
+        let mut cluster = Cluster::start_with("cluster-acp-cancel-quorum", 5, &SLOW);
+        // Only the nodes about to die: a DELETE that reached a surviving node could commit
+        // later, so this way the cancel can never reach the cluster.
+        let urls = node_urls(&cluster, 0..3);
+        let (mut acp, session, first) = start_turn_on(
+            &cluster,
+            &urls,
+            &[("ACP_UNAVAILABLE_TIMEOUT", "2")],
+            "cancel",
+        );
+        for node in 0..3 {
+            cluster.kill(node);
+        }
+        acp.cancel(&session.to_string());
+        let (response, rest) = finish_turn(&mut acp);
+        assert_eq!(response["error"]["code"], -32001, "{response}");
+        let received = format!("{first}{}", rest.concat());
+        cluster.restart(0);
+        let (response, later) = acp.call(
+            3,
+            "session/prompt",
+            serde_json::json!({"sessionId": session.to_string(), "prompt": [{"type": "text", "text": "again"}]}),
+        );
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        let done = wait_until("the goal to be done", WAIT, || {
+            let goal = cluster.goal(3, 1);
+            (goal["status"] == "done").then_some(goal)
+        });
+        let later: String = later
+            .iter()
+            .map(|u| u["params"]["update"]["content"]["text"].as_str().unwrap())
+            .collect();
+        assert!(
+            format!("{received}{later}").starts_with(&output(&done)),
+            "{received:?} {later:?} vs {done}"
+        );
+    }
+
+    #[test]
+    fn acp_cancel_during_a_pending_prompt_takes_effect_when_quorum_returns() {
+        let mut cluster = Cluster::start_with("cluster-acp-cancel-pending", 5, &SLOW);
+        cluster.leader();
+        let urls = node_urls(&cluster, 0..5);
+        let mut acp = crate::acp::Acp::start(&cluster.dir.0, &urls);
+        let session = acp.new_session(1);
+        for node in 0..3 {
+            cluster.kill(node);
+        }
+        acp.request(
+            2,
+            "session/prompt",
+            serde_json::json!({"sessionId": session, "prompt": [{"type": "text", "text": "pending"}]}),
+        );
+        acp.cancel(&session);
+        if let Some(message) = acp.recv_within(Duration::from_secs(5)) {
+            panic!("answered during the outage: {message}");
+        }
+        cluster.restart(0);
+        let (response, _) = finish_turn(&mut acp);
+        assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
+        for node in [0, 3, 4] {
+            wait_until("goal 1 to be cancelled", WAIT, || {
+                (cluster.goal(node, 1)["status"] == "cancelled").then_some(())
+            });
+        }
+    }
+
+    #[test]
+    fn acp_cancel_after_the_goal_ended_still_answers_cancelled() {
+        let mut cluster = Cluster::start_with("cluster-acp-cancel-ended", 5, &SLOW);
+        let urls = node_urls(&cluster, 0..1);
+        let (mut acp, session, _) = start_turn_on(&cluster, &urls, &[], "ended");
+        cluster.kill(0);
+        wait_until("the goal to be done", WAIT, || {
+            (cluster.goal(1, 1)["status"] == "done").then_some(())
+        });
+        acp.cancel(&session.to_string());
+        cluster.restart(0);
+        let (response, _) = finish_turn(&mut acp);
+        assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
+        assert_eq!(cluster.goal(1, 1)["status"], "done");
     }
 }

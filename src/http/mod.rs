@@ -8,6 +8,7 @@ pub mod error;
 pub mod goals;
 pub mod kv;
 pub mod raft;
+pub mod sessions;
 
 /// Build the app configuration for one shared `AppState`.
 ///
@@ -22,7 +23,8 @@ pub fn configure(state: AppState) -> impl Fn(&mut web::ServiceConfig) + Clone + 
             .service(status)
             .service(patch_key)
             .configure(kv::configure)
-            .configure(goals::configure);
+            .configure(goals::configure)
+            .configure(sessions::configure);
     }
 }
 

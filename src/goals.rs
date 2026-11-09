@@ -23,6 +23,7 @@ use crate::js::oplog::{LogStop, OpLog};
 use crate::lease::{self, Fence};
 use crate::model::{FakeModel, Model};
 use crate::raft::{Node, seal as sealing};
+use crate::sessions::{self, SESSIONS, Turn, TurnOutcome};
 use crate::store::{Command, GoalEvent, Response, Store};
 
 const GOALS: TableDefinition<u64, (i64, u64)> = TableDefinition::new("goals");
@@ -105,6 +106,18 @@ struct Inner {
     fragments: OnceLock<PathBuf>,
     /// Tokens this node has generated, including any it generated again.
     generated: AtomicU64,
+}
+
+/// The start record of a fake-model generation from `seed` and `prompt`.
+pub(crate) fn inference_start(seed: u64, prompt: &str) -> Record {
+    Record::InferenceStart {
+        engine: "fake".into(),
+        model_hash: "fake".into(),
+        tokenizer_hash: "fake".into(),
+        sampler: serde_json::json!({ "seed": seed }).to_string(),
+        rng_state: FakeModel.start_state(seed, prompt),
+        prompt_tokens: prompt.bytes().map(u32::from).collect(),
+    }
 }
 
 /// A goal row: id, then priority and budget.
@@ -307,6 +320,7 @@ impl Goals {
         let journal = Journal::new(db.clone())?;
         let txn = db.begin_write().map_err(storage)?;
         txn.open_table(GOALS).map_err(storage)?;
+        txn.open_table(SESSIONS).map_err(storage)?;
         txn.commit().map_err(storage)?;
         let goals = Self(Arc::new(Inner {
             db,
@@ -420,14 +434,7 @@ impl Goals {
 
     /// Create a goal and queue it. The caller validates the budget.
     pub fn create(&self, spec: GoalSpec) -> Result<u64, JournalError> {
-        let start = Record::InferenceStart {
-            engine: "fake".into(),
-            model_hash: "fake".into(),
-            tokenizer_hash: "fake".into(),
-            sampler: serde_json::json!({ "seed": spec.seed }).to_string(),
-            rng_state: FakeModel.start_state(spec.seed, &spec.prompt),
-            prompt_tokens: spec.prompt.bytes().map(u32::from).collect(),
-        };
+        let start = inference_start(spec.seed, &spec.prompt);
         self.insert_goal(spec.priority, spec.budget, &start)
     }
 
@@ -458,14 +465,92 @@ impl Goals {
         let txn = self.0.db.begin_write().map_err(storage)?;
         let id = create_in(&txn, &self.0.journal, priority, budget, start)?;
         txn.commit().map_err(storage)?;
-        self.sched().queue.push(Goal {
+        self.enqueue(Goal {
             id,
             priority,
             budget,
         });
+        Ok(id)
+    }
+
+    /// Queue a goal that was just made durable, and make room for it if it outranks a running one.
+    fn enqueue(&self, goal: Goal) {
+        self.sched().queue.push(goal);
         self.0.wake.notify_one();
         self.preempt();
+    }
+
+    /// Add an empty session and answer its id.
+    pub fn create_session(&self) -> Result<u64, JournalError> {
+        if self.0.me.is_some() {
+            return match self.propose(Command::CreateSession)? {
+                Response::SessionCreated(id) => Ok(id),
+                other => Err(JournalError::Storage(format!(
+                    "unexpected answer: {other:?}"
+                ))),
+            };
+        }
+        let txn = self.0.db.begin_write().map_err(storage)?;
+        let id = sessions::create_in(&txn)?;
+        txn.commit().map_err(storage)?;
         Ok(id)
+    }
+
+    /// Start turn `turn` of `session`. Only a new turn creates (and queues) a goal; a refusal
+    /// or a resent turn writes nothing.
+    pub fn start_turn(
+        &self,
+        session: u64,
+        turn: u64,
+        prompt: String,
+    ) -> Result<TurnOutcome, JournalError> {
+        if self.0.me.is_some() {
+            return self.propose_turn(session, turn, prompt);
+        }
+        let txn = self.0.db.begin_write().map_err(storage)?;
+        let outcome = sessions::start_turn_in(&txn, &self.0.journal, session, turn, prompt)?;
+        if let TurnOutcome::New(id) = outcome {
+            txn.commit().map_err(storage)?;
+            self.enqueue(Goal {
+                id,
+                priority: 0,
+                budget: sessions::TURN_BUDGET,
+            });
+        }
+        Ok(outcome)
+    }
+
+    /// Start a turn through Raft. The leader assigns a new turn's goal; a resend through any node
+    /// answers the same one, so a new turn and a recorded one both come back as `Existing`.
+    fn propose_turn(
+        &self,
+        session: u64,
+        turn: u64,
+        prompt: String,
+    ) -> Result<TurnOutcome, JournalError> {
+        match self.propose(Command::StartTurn {
+            session,
+            turn,
+            prompt,
+        })? {
+            Response::TurnStarted(goal) => Ok(TurnOutcome::Existing(goal)),
+            Response::Refused(code) => match code.as_str() {
+                "turn_conflict" => Ok(TurnOutcome::Conflict),
+                "not_found" => Ok(TurnOutcome::NotFound),
+                "unknown_script" => Ok(TurnOutcome::UnknownScript),
+                other => Err(JournalError::Storage(format!(
+                    "unexpected refusal: {other}"
+                ))),
+            },
+            other => Err(JournalError::Storage(format!(
+                "unexpected answer: {other:?}"
+            ))),
+        }
+    }
+
+    /// The turns of `session`, or `None` when there is no such session.
+    pub fn session(&self, id: u64) -> Result<Option<Vec<Turn>>, JournalError> {
+        sessions::read_in(&self.0.db.begin_read().map_err(storage)?, id)
     }
 
     /// The status of goal `id`, or `None` when there is no such goal.

@@ -6,6 +6,7 @@ use super::{Effects, Store, StoreError};
 use crate::goals;
 use crate::journal::{Journal, JournalError, Record, SealRecord};
 use crate::lease::{self, Fence};
+use crate::sessions::{self, TurnOutcome};
 
 /// A change to the key/value table. `Store::apply` is the one place it is carried out.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -19,6 +20,14 @@ pub enum Command {
         priority: i64,
         budget: u64,
         start: Record,
+    },
+    /// Add an empty session under the next free id.
+    CreateSession,
+    /// Start turn `turn` of `session`; a resend of a recorded turn answers its goal.
+    StartTurn {
+        session: u64,
+        turn: u64,
+        prompt: String,
     },
     /// End a live goal durably.
     CancelGoal { id: u64 },
@@ -84,6 +93,9 @@ pub enum Response {
     /// The value the removed key held.
     Removed(String),
     GoalCreated(u64),
+    SessionCreated(u64),
+    /// The goal answering the turn, new or already recorded.
+    TurnStarted(u64),
     Cancelled,
     /// The goal does not exist or has already ended.
     NotLive,
@@ -177,6 +189,26 @@ pub(crate) fn apply_in(
             start,
         } => goals::create_in(txn, journal_of, *priority, *budget, start)
             .map(|id| (Response::GoalCreated(id), None))
+            .map_err(journal),
+        Command::CreateSession => sessions::create_in(txn)
+            .map(|id| (Response::SessionCreated(id), None))
+            .map_err(journal),
+        Command::StartTurn {
+            session,
+            turn,
+            prompt,
+        } => sessions::start_turn_in(txn, journal_of, *session, *turn, prompt.clone())
+            .map(|outcome| {
+                let answer = match outcome {
+                    TurnOutcome::New(goal) | TurnOutcome::Existing(goal) => {
+                        Response::TurnStarted(goal)
+                    }
+                    TurnOutcome::Conflict => Response::Refused("turn_conflict".into()),
+                    TurnOutcome::NotFound => Response::Refused("not_found".into()),
+                    TurnOutcome::UnknownScript => Response::Refused("unknown_script".into()),
+                };
+                (answer, None)
+            })
             .map_err(journal),
         Command::CancelGoal { id } => goals::cancel_in(txn, journal_of, *id)
             .map(|done| {

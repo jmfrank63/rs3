@@ -1598,6 +1598,32 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn a_session_turn_resent_through_another_node_answers_the_same_goal() {
+        use crate::sessions::TurnOutcome;
+        let cluster = super::testing::Cluster::start(3, 3).await;
+        cluster.leader().await;
+        let (a, b) = (cluster.goals[0].clone(), cluster.goals[1].clone());
+        let (first, again, other, skipped, unknown) = off(move || {
+            let session = a.create_session().unwrap();
+            let first = a.start_turn(session, 0, "hi".into()).unwrap();
+            (
+                first,
+                b.start_turn(session, 0, "hi".into()).unwrap(),
+                b.start_turn(session, 0, "no".into()).unwrap(),
+                b.start_turn(session, 5, "hi".into()).unwrap(),
+                b.start_turn(99, 0, "hi".into()).unwrap(),
+            )
+        })
+        .await;
+        assert_eq!(first, TurnOutcome::Existing(1));
+        assert_eq!(again, first);
+        assert_eq!(other, TurnOutcome::Conflict);
+        assert_eq!(skipped, TurnOutcome::Conflict);
+        assert_eq!(unknown, TurnOutcome::NotFound);
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
     async fn a_goal_whose_owner_stops_is_reassigned_and_finishes_with_a_single_node_output() {
         let mut cluster = super::testing::Cluster::start(3, 3).await;
         cluster.work();

@@ -13,7 +13,9 @@
 //! `outcome_unknown` (503, fixed message `outcome unknown`: a write was handed on and not answered, so it may
 //! still commit; check before retrying)
 //! and `internal` (500, fixed message `internal error`; details go to stderr).
-//! An unknown goal answers `not_found` (404, `goal not found: {id}`).
+//! An unknown goal answers `not_found` (404, `goal not found: {id}`), and so does an unknown session
+//! (`session not found: {id}`); so does a `/run` turn whose key holds no script (`script not found: {prompt}`). `turn_conflict` (409) refuses a turn that skips ahead or changes the
+//! prompt it was started with.
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 
 use crate::journal::JournalError;
@@ -46,6 +48,15 @@ pub enum ApiError {
     /// No goal has this id (as given in the path).
     #[error("goal not found: {0}")]
     GoalNotFound(String),
+    /// No session has this id (as given in the path).
+    #[error("session not found: {0}")]
+    SessionNotFound(String),
+    /// A `/run` turn names a key that holds no script (carries the prompt).
+    #[error("script not found: {0}")]
+    ScriptNotFound(String),
+    /// The turn skips ahead of its session, or was started before with another prompt.
+    #[error("turn does not follow the session or its prompt differs from the recorded one")]
+    TurnConflict,
     /// The cluster has no leader or no quorum to answer.
     #[error("unavailable")]
     Unavailable,
@@ -152,7 +163,10 @@ impl ApiError {
             ApiError::FragmentsUnavailable => "fragments_unavailable",
             ApiError::NoQuorum => "no_quorum",
             ApiError::OutcomeUnknown => "outcome_unknown",
-            ApiError::GoalNotFound(_) => "not_found",
+            ApiError::GoalNotFound(_)
+            | ApiError::SessionNotFound(_)
+            | ApiError::ScriptNotFound(_) => "not_found",
+            ApiError::TurnConflict => "turn_conflict",
         }
     }
 }
@@ -172,7 +186,10 @@ impl ResponseError for ApiError {
             | ApiError::NoQuorum
             | ApiError::FragmentsUnavailable
             | ApiError::OutcomeUnknown => StatusCode::SERVICE_UNAVAILABLE,
-            ApiError::GoalNotFound(_) => StatusCode::NOT_FOUND,
+            ApiError::GoalNotFound(_)
+            | ApiError::SessionNotFound(_)
+            | ApiError::ScriptNotFound(_) => StatusCode::NOT_FOUND,
+            ApiError::TurnConflict => StatusCode::CONFLICT,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

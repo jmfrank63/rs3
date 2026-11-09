@@ -15,7 +15,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 pub struct Cluster {
     /// `None` while a node is killed.
     nodes: Vec<Option<Server>>,
-    ports: Vec<u16>,
+    pub ports: Vec<u16>,
     peers: String,
     /// The directory of every node's database and fragment files.
     pub dir: TempDir,

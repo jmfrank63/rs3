@@ -254,6 +254,42 @@ output as an uninterrupted run, and each write a script goal makes to the store 
 A script must be repeatable from its log: host clocks such as `Intl.DateTimeFormat` with no date are not,
 and a script that uses them fails visibly with `replay_diverged` instead of giving a different result.
 
+## T3 Code (ACP)
+
+`rs3 acp <url> [<url> ...]` is an Agent Client Protocol adapter that speaks JSON-RPC over stdin and stdout.
+In T3 Code, set the "Local ACP command" to the binary followed by every node URL:
+
+```
+rs3 acp http://10.0.0.1:5000 http://10.0.0.2:5000 http://10.0.0.3:5000
+```
+
+The adapter holds no state of its own. Sessions and turns live in the cluster, so they survive an adapter
+restart: `session/load` replays them. Each prompt becomes a turn that runs as a goal, and a node failure
+mid-turn does not repeat or lose work. When no node answers, the adapter waits up to
+`ACP_UNAVAILABLE_TIMEOUT` seconds (default 300) and then answers `-32001`; the goal is kept.
+
+A prompt that starts with `/run <key>` runs the script stored under `<key>` as one turn, with each write applied
+once. The adapter advertises `/run` as a command.
+
+| Code | Meaning |
+|------|---------|
+| -32700 | parse error |
+| -32600 | invalid request |
+| -32601 | method not found |
+| -32602 | invalid params |
+| -32603 | internal error |
+| -32000 | the goal failed; `data.error` is its code, such as `js_error` |
+| -32001 | `cluster_unavailable`: no quorum within the timeout |
+| -32002 | `turn_in_flight`: the session already has a running turn |
+| -32003 | `unknown_script`: `/run` named a key that does not exist |
+
+The adapter calls these routes, which you can also use directly. All answer 503 without `STORAGE.PATH`.
+
+- **`POST /sessions`** answers 201 `{"id":n}` once the session is durable.
+- **`POST /sessions/{id}/turns`** with `{"turn":n,"prompt":"..."}` answers 201 `{"goal":n}`. Resending the same
+  turn answers the same goal. A prompt starting `/run <key>` starts a script goal; a missing key answers 404 `not_found`.
+- **`GET /sessions/{id}`** answers 200 `{"turns":[{"prompt":...,"goal":...}]}`, or 404.
+
 ## JavaScript ops
 
 `PATCH /key/{key}` runs the value stored under `key` as a JavaScript script on

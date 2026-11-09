@@ -46,8 +46,22 @@ struct ScriptGoal {
     script: String,
 }
 
-fn goals(state: &AppState) -> Result<Goals, ApiError> {
+pub(super) fn goals(state: &AppState) -> Result<Goals, ApiError> {
     state.goals.clone().ok_or(ApiError::GoalsUnavailable)
+}
+
+/// Parse a request body as UTF-8 JSON of type `T`: bad UTF-8 or JSON is `malformed_json`, JSON of
+/// the wrong shape is `invalid_input` naming `what`.
+pub(super) fn parse_body<T: serde::de::DeserializeOwned>(
+    body: &[u8],
+    what: &str,
+) -> Result<T, StoreError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|e| StoreError::MalformedJson(format!("body is not valid UTF-8: {e}")))?;
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| StoreError::MalformedJson(e.to_string()))?;
+    serde_json::from_value(value)
+        .map_err(|e| StoreError::InvalidInput(format!("invalid {what}: {e}")))
 }
 
 /// `POST /goals` creates a goal and answers 201 `{"id":n}` once it is durable.
@@ -56,12 +70,7 @@ fn goals(state: &AppState) -> Result<Goals, ApiError> {
 #[post("/goals")]
 async fn create(state: web::Data<AppState>, body: web::Bytes) -> Result<HttpResponse, ApiError> {
     let goals = goals(&state)?;
-    let text = std::str::from_utf8(&body)
-        .map_err(|e| StoreError::MalformedJson(format!("body is not valid UTF-8: {e}")))?;
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| StoreError::MalformedJson(e.to_string()))?;
-    let new: NewGoal = serde_json::from_value(value)
-        .map_err(|e| StoreError::InvalidInput(format!("invalid goal: {e}")))?;
+    let new: NewGoal = parse_body(&body, "goal")?;
     let id = match new {
         NewGoal::Generation(g) => {
             let budget = u64::try_from(g.budget)

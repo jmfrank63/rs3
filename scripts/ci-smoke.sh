@@ -30,6 +30,10 @@
 #                              generation output is a prefix of its reference, trail is 0,1,...,n-1,
 #   after the last restart  -> all three goals done; generation output equals the reference byte for
 #                              byte (2000 words); script output and count are 40; trail is exact
+# Then, on a fresh 3-node cluster, `rs3 acp` drives initialize, session/new and one session/prompt
+#   while the leader is kill -9'd after the first chunk: JSON-RPC 2.0 lines only, at least one chunk
+#   after the kill, stopReason end_turn, one turn in GET /sessions/{id}, and the streamed text equals
+#   that turn's goal output byte for byte.
 # The release binary uses the default JS limits: nesting depth 4 and a 5000 ms timeout. Both are
 # set in code; there is no environment knob, so the timeout check waits about 5 s. This smoke is
 # the only place where the timeout watchdog terminates a script under the protected V8 platform
@@ -452,6 +456,72 @@ done
 echo "ci-smoke: ok   cluster generation goal equals the reference; script wrote each of ${CITERS} entries exactly once after the leader kill"
 
 # Stop the 3-node survivors before the 5-node cluster starts.
+for i in "${!CPIDS[@]}"; do
+  [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
+done
+CPIDS=()
+
+# ---- ACP adapter on a fresh 3-node cluster, leader killed mid-turn ----
+CDIR="$DIR/acp"
+mkdir -p "$CDIR"
+cnodes 3
+for i in "${!CPORTS[@]}"; do cstart "$i"; done
+LEADER=$(cleader)
+ACPURLS=()
+for p in "${CPORTS[@]}"; do ACPURLS+=("http://127.0.0.1:${p}"); done
+ACPOUT=$(timeout 120 python3 -I - "$BIN" "${CPIDS[$LEADER]}" "$LOG" "${ACPURLS[@]}" <<'PY'
+import json, os, subprocess, sys
+binary, leader, log, urls = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4:]
+with open(log, "ab") as err:
+    adapter = subprocess.Popen([binary, "acp", *urls], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=err)
+def send(i, method, params):
+    adapter.stdin.write((json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params}) + "\n").encode())
+    adapter.stdin.flush()
+chunks, after_kill, killed = [], 0, False
+def read_until(i):
+    global after_kill, killed
+    for line in adapter.stdout:
+        m = json.loads(line)
+        assert m.get("jsonrpc") == "2.0", line
+        if m.get("method") == "session/update":
+            u = m["params"]["update"]
+            if u["sessionUpdate"] == "agent_message_chunk":
+                chunks.append(u["content"]["text"])
+                if killed:
+                    after_kill += 1
+                else:
+                    os.kill(leader, 9)
+                    killed = True
+        elif m.get("id") == i:
+            assert "error" not in m, line
+            return m["result"]
+    raise SystemExit("adapter closed stdout before answering %d" % i)
+try:
+    send(1, "initialize", {"protocolVersion": 1})
+    read_until(1)
+    send(2, "session/new", {"cwd": "/", "mcpServers": []})
+    session = read_until(2)["sessionId"]
+    send(3, "session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "p"}]})
+    result = read_until(3)
+    assert killed and after_kill >= 1, "leader kill did not fall inside the turn"
+    assert result["stopReason"] == "end_turn", result
+    print(json.dumps({"session": session, "text": "".join(chunks)}))
+finally:
+    adapter.stdin.close()
+    adapter.wait(timeout=10)
+PY
+) || fail "ACP turn through a leader kill failed (adapter stderr is in ${LOG})"
+wait "${CPIDS[$LEADER]}" 2>/dev/null || true
+CPIDS[$LEADER]=""
+SURV=$(( (LEADER + 1) % 3 ))
+ASESS=$(jf "$ACPOUT" session)
+cwhen "$SURV" GET "/sessions/${ASESS}"
+[[ "$CODE" == 200 ]] || fail "GET /sessions/${ASESS} -> ${CODE} ${BODY}"
+[[ "$(python3 -I -c 'import json,sys; print(len(json.loads(sys.argv[1])["turns"]))' "$BODY")" == 1 ]] || fail "session ${ASESS} should hold exactly one turn: ${BODY}"
+AGOAL=$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["turns"][0]["goal"])' "$BODY")
+[[ "$(jf "$(cwait_done "$SURV" "$AGOAL")" output)" == "$(jf "$ACPOUT" text)" ]] || fail "ACP text differs from goal ${AGOAL} output: ${ACPOUT}"
+echo "ci-smoke: ok   ACP turn on 3 nodes: leader node $((LEADER + 1)) killed mid-turn, end_turn, streamed text equals goal ${AGOAL} output"
 for i in "${!CPIDS[@]}"; do
   [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
 done

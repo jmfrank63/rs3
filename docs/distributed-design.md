@@ -77,7 +77,7 @@ at least 3 nodes at once.
 2. Scheduler and resumable agent on one node, using a deterministic fake model. **Done:** `src/goals.rs`, `src/lease.rs`, `src/model.rs`, `src/http/goals.rs`.
 3. Raft on 3 nodes with several workers, then 5. **Done:** `CLUSTER.NODE_ID` and `CLUSTER.PEERS` start a cluster; `tests/cluster.rs` covers 3 and 5 nodes, and `scripts/ci-smoke.sh` kills the leader of a 3-node release cluster.
 4. Reed-Solomon sealing and repair. **Done:** `src/seal.rs`, `src/raft/seal.rs`, `src/raft/assign.rs` (shrink to the 3 live voters and RS(2,1) re-encode, after the configurable CLUSTER.SHRINK_AFTER); `tests/sealing.rs` covers acceptance 1-7, and `scripts/ci-smoke.sh` seals a goal on a 5-node release cluster and reads it after two kills.
-5. T3 Code provider adapter. T3 Code is the control surface: `rs3` owns agent state and failover.
+5. T3 Code provider adapter. **Done:** `src/acp.rs`, `src/sessions.rs`, `tests/acp.rs`, the `acp_` tests in `tests/cluster.rs`, and the ACP section of `scripts/ci-smoke.sh`. T3 Code is the control surface: `rs3` owns agent state and failover.
 
 JavaScript engine replacement (V8, Boa, Wasmtime) and real model inference are separate later decisions. Keep both
 behind small interfaces.
