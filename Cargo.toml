@@ -10,8 +10,8 @@ license = "MIT"
 # auto-discovered. See https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-actix-web = { version = "4.17.0", default-features = false, features = ["macros"] }
-deno_core = "0.412.0"
+actix-web = { version = "4.19.0", default-features = false, features = ["macros"] }
+deno_core = "0.413.0"
 # Must stay "0.7": deno_core pins deno_error =0.7.1. Never `cargo add` it.
 deno_error = "0.7"
 papaya = "0.2.5"
@@ -21,19 +21,19 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 thiserror = "2.0.21"
 # JS worker runtimes and the job queue; the same tokio deno_core already pulls in.
-tokio = { version = "1.54.0", features = ["rt", "rt-multi-thread", "sync", "time"] }
-redb = "4.4.0"
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "sync", "time"] }
+redb = "4.5.0"
 blake3 = "1.8.7"
-openraft = { version = "=0.9.25", features = ["serde", "storage-v2"] }
+openraft = { version = "=0.9.26", features = ["serde", "storage-v2"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
 reed-solomon-simd = "3.1.0"
 
 [dev-dependencies]
 # Unprotected V8 platform for test builds only, so libtest's threads can create isolates.
 # Phase 4 fallback (research question 1): move this feature to [dependencies] if x86 CI crashes.
-deno_core = { version = "0.412.0", features = ["unsafe_use_unprotected_platform"] }
+deno_core = { version = "0.413.0", features = ["unsafe_use_unprotected_platform"] }
 # tokio::join! in the concurrency tests; the graph already enables this feature.
-tokio = { version = "1.54.0", features = ["macros"] }
+tokio = { version = "1.54.1", features = ["macros"] }
 
 [lints.rust]
 unsafe_code = "forbid"

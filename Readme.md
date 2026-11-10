@@ -293,7 +293,7 @@ The adapter calls these routes, which you can also use directly. All answer 503 
 ## JavaScript ops
 
 `PATCH /key/{key}` runs the value stored under `key` as a JavaScript script on
-deno_core 0.412 (an embedded V8). The script runs on a dedicated JS worker
+deno_core 0.413 (an embedded V8). The script runs on a dedicated JS worker
 thread, never on an HTTP worker. It reaches the store through five ops on
 `Deno.core.ops`, for example `Deno.core.ops.op_rs3_get("k")`. There is no
 bootstrap call.
