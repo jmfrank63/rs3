@@ -1,7 +1,7 @@
 # rs3 JavaScript store ops
 
 `PATCH /key/{key}` runs the value stored under `key` as a JavaScript script on
-deno_core 0.412 (an embedded V8). Scripts reach the store through five ops on
+deno_core 0.413 (an embedded V8). Scripts reach the store through five ops on
 `Deno.core.ops`. Each op's JavaScript name is the name of its Rust function, so
 the five ops are `op_rs3_list`, `op_rs3_get`, `op_rs3_insert`, `op_rs3_delete`
 and `op_rs3_patch`.
