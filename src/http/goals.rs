@@ -17,6 +17,7 @@ use crate::store::StoreError;
 /// Register the goal routes. The shared `AppState` is registered by `http::configure`.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(create)
+        .service(generated)
         .service(get_goal)
         .service(cancel_goal)
         .service(storage);
@@ -132,6 +133,13 @@ async fn goal_status(
         body["node"] = status.node.into();
     }
     Ok(HttpResponse::Ok().json(body))
+}
+
+/// `GET /goals/generated` answers 200 `{"generated":n}`: the tokens this node sampled since it started.
+#[get("/goals/generated")]
+async fn generated(state: web::Data<AppState>) -> Result<HttpResponse, ApiError> {
+    let n = goals(&state)?.generated_tokens();
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "generated": n })))
 }
 
 /// `GET /goals/{id}` answers 200 `{status, output, error}` (plus `node`, the owner or null, in a
@@ -313,6 +321,27 @@ mod tests {
         let goal = wait_for(&f.state, id, "done").await;
         assert_eq!(tokens(&goal), 21);
         assert_eq!(goal["error"], Value::Null);
+    }
+
+    #[actix_web::test]
+    async fn generated_reports_the_tokens_this_node_sampled() {
+        let f = fixture(1_000_000, Some(2));
+        let id = create(&f.state, &goal_body(5)).await;
+        wait_for(&f.state, id, "done").await;
+        let resp = call(&f.state, atest::TestRequest::get().uri("/goals/generated")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = atest::read_body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"generated": 5}));
+    }
+
+    #[actix_web::test]
+    async fn generated_answers_503_without_a_database() {
+        let resp = call(
+            &test_state(),
+            atest::TestRequest::get().uri("/goals/generated"),
+        )
+        .await;
+        assert_json_error(resp, StatusCode::SERVICE_UNAVAILABLE, "goals_unavailable").await;
     }
 
     #[actix_web::test]
