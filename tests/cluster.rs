@@ -768,7 +768,7 @@ mod tests {
         proxy.drop_next(1);
         let (response, chunks) = acp.prompt(2, &session, &["lost"]);
         assert_eq!(proxy.dropped(), 1);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         let first = cluster.goal(0, 1);
         assert_eq!(chunks.concat(), output(&first));
         for node in 0..3 {
@@ -900,7 +900,7 @@ mod tests {
         cluster.kill(0);
         cluster.kill(second);
         let (response, rest) = finish_turn(&mut acp);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let text = format!("{first}{}", rest.concat());
         assert!(
             text.len() > first.len(),
@@ -1004,7 +1004,7 @@ mod tests {
         }
         cluster.restart(0);
         let (response, rest) = finish_turn(&mut acp);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         text.push_str(&rest.concat());
         assert_eq!(text, single_node_turn(session, "quorum"));
         assert_one_turn_and_no_second_goal(&cluster, &[0, 3, 4], session);
@@ -1067,7 +1067,7 @@ mod tests {
         let params = serde_json::json!({"sessionId": session.to_string(), "prompt": [{"type": "text", "text": "after"}]});
         fresh.request(2, "session/prompt", params);
         let (response, chunks) = finish_turn(&mut fresh);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let first = output(&cluster.goal(0, 1));
         let second = output(&cluster.goal(0, 2));
         assert_eq!(first, single_node_turn(session, "restart"));
@@ -1096,7 +1096,7 @@ mod tests {
         let mut texts = Vec::new();
         for (id, prompt) in [(2, "one"), (3, "two")] {
             let (response, chunks) = writer.prompt(id, &session, &[prompt]);
-            assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+            assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
             texts.push(chunks.concat());
         }
         assert!(writer.finish().success());
@@ -1159,7 +1159,7 @@ mod tests {
             "session/prompt",
             serde_json::json!({"sessionId": session.to_string(), "prompt": [{"type": "text", "text": "again"}]}),
         );
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let done = wait_until("the goal to be done", WAIT, || {
             let goal = cluster.goal(3, 1);
             (goal["status"] == "done").then_some(goal)
@@ -1229,6 +1229,13 @@ mod cluster_model {
     use crate::common::{Server, TempDir};
     use crate::model::model_files;
 
+    /// Real-model tests run one at a time: concurrent model loads starve or kill nodes.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     const BUDGET: u64 = 48;
     const PROMPT: &str =
         "List twenty different animals, one per line, with a short description of each. /no_think";
@@ -1263,6 +1270,7 @@ mod cluster_model {
 
     #[test]
     fn mismatch_node_declines_and_goal_finishes_elsewhere() {
+        let _one = exclusive();
         let reference = reference();
         assert_eq!(reference["reason"], "budget", "{reference}");
         let (gguf, tokenizer) = model_files();
@@ -1291,5 +1299,100 @@ mod cluster_model {
         let generated: serde_json::Value =
             serde_json::from_str(&cluster.request(0, "GET", "/goals/generated", "")).unwrap();
         assert_eq!(generated["generated"].as_u64(), Some(0), "{generated}");
+    }
+
+    /// Most tokens one uncommitted batch can hold: a survivor may sample that many beyond the
+    /// positions nobody committed.
+    const BATCH_SLACK: u64 = 8;
+
+    /// Goal `id` as node `node` shows it, or `None` while the node does not answer yet.
+    fn try_goal(cluster: &Cluster, node: usize, id: u64) -> Option<serde_json::Value> {
+        let (status, reply) = cluster.request_status(node, "GET", &format!("/goals/{id}"), "");
+        (status == 200).then(|| serde_json::from_str(&reply).ok())?
+    }
+
+    #[test]
+    fn failover_after_killing_the_owner_and_another_node_samples_no_committed_position_again() {
+        let _one = exclusive();
+        let reference = reference();
+        let (gguf, tokenizer) = model_files();
+        let mut cluster =
+            Cluster::start_with("cluster-model-failover", 5, &model_env(&gguf, &tokenizer));
+        let id = cluster.create_goal(0, &body());
+        let wait = Duration::from_secs(240);
+        let owner = wait_until("output on a running goal", wait, || {
+            let got = try_goal(&cluster, 0, id)?;
+            let started = got["status"] == "running" && !got["output"].as_str()?.is_empty();
+            started.then(|| got["node"].as_u64().map(|n| n as usize - 1))?
+        });
+        let leader = cluster.leader();
+        let other = if leader != owner {
+            leader
+        } else {
+            (owner + 1) % 5
+        };
+        cluster.kill(owner);
+        cluster.kill(other);
+
+        let db = cluster.dir.0.join(format!("node{}.db", owner + 1));
+        let committed = {
+            let journal = rs3::journal::Journal::new(rs3::storage::open(&db).unwrap()).unwrap();
+            let state = journal.restore(id).unwrap().expect("goal stream exists");
+            assert!(
+                state.ended.is_none(),
+                "the kill landed after the goal ended"
+            );
+            state.tokens.len() as u64
+        };
+        assert!(
+            0 < committed && committed < BUDGET,
+            "committed {committed} of {BUDGET}"
+        );
+
+        let survivors: Vec<usize> = (0..5).filter(|i| *i != owner && *i != other).collect();
+        let done = wait_until("the goal to finish on a survivor", wait, || {
+            let got = try_goal(&cluster, survivors[0], id)?;
+            (got["status"] == "done").then_some(got)
+        });
+        assert_eq!(done["output"], reference["output"], "C={committed}");
+        assert_eq!(done["reason"], reference["reason"]);
+        let on = done["node"].as_u64().unwrap() as usize - 1;
+        assert!(survivors.contains(&on), "finished on killed node: {done}");
+
+        let sampled: u64 = survivors
+            .iter()
+            .map(|&node| {
+                let reply = cluster.request(node, "GET", "/goals/generated", "");
+                let got: serde_json::Value = serde_json::from_str(&reply).unwrap();
+                got["generated"].as_u64().unwrap()
+            })
+            .sum();
+        let uncommitted = BUDGET - committed;
+        assert!(
+            sampled <= uncommitted,
+            "resampled: {sampled} > {uncommitted}, C={committed}"
+        );
+        assert!(
+            sampled + BATCH_SLACK >= uncommitted,
+            "a survivor sampled {sampled} of {uncommitted}, C={committed}"
+        );
+
+        for &node in &survivors {
+            let path = format!("/goals/{id}/storage");
+            wait_until(
+                "a fragment on every survivor",
+                Duration::from_secs(60),
+                || {
+                    let (status, reply) = cluster.request_status(node, "GET", &path, "");
+                    (status == 200 && reply.contains("\"fragment\"")).then_some(())
+                },
+            );
+        }
+        for &node in &survivors {
+            let got = wait_until("a survivor to answer", Duration::from_secs(60), || {
+                try_goal(&cluster, node, id)
+            });
+            assert_eq!(got["output"], reference["output"], "node {node}");
+        }
     }
 }

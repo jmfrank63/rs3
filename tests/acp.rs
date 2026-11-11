@@ -81,7 +81,7 @@ mod tests {
             assert_eq!(update["content"]["type"], "text");
             chunks.push(update["content"]["text"].as_str().unwrap().to_owned());
         };
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert!(chunks.len() >= 2, "{chunks:?}");
         assert!(chunks.iter().all(|c| !c.is_empty()));
         let done = goal(&server, 1);
@@ -99,7 +99,7 @@ mod tests {
         let second = acp.new_session(2);
         assert_ne!(first, second);
         let (response, chunks) = acp.prompt(3, &second, &["x"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert!(!chunks.is_empty());
     }
 
@@ -113,7 +113,7 @@ mod tests {
             "session/prompt",
             json!({"sessionId": session, "prompt": blocks}),
         );
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert!(updates.len() >= 2);
         goal(&server, 1)["output"].as_str().unwrap().to_owned()
     }
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(updates, expected);
         assert_eq!(server.request_status("GET", "/goals/3", "").0, 404);
         let (response, chunks) = acp.prompt(2, &session, &["p3"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert_eq!(chunks.concat(), out(3));
         let turns = server.request("GET", &format!("/sessions/{session}"), "");
         let turns: Value = serde_json::from_str(&turns).unwrap();
@@ -267,7 +267,7 @@ mod tests {
         assert!(replayed.starts_with(&head), "{replayed}");
         assert!(acp.recv_within(Duration::from_millis(300)).is_none());
         let (response, chunks) = acp.prompt(2, &session, &["next"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let expected = format!("{}{}", &output(1)[replayed.len()..], output(2));
         assert_eq!(chunks.concat(), expected);
         assert_eq!(session_of(&server, 1)["turns"].as_array().unwrap().len(), 2);
@@ -289,7 +289,7 @@ mod tests {
         let (response, _) = loaded(&mut acp, 1, &session);
         assert_eq!(response["result"], Value::Null, "{response}");
         let (response, chunks) = acp.prompt(2, &session, &["next"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert_eq!(
             chunks.concat(),
             goal(&server, 2)["output"].as_str().unwrap()
@@ -322,7 +322,7 @@ mod tests {
         let (refused, mut updates) = acp.read_until(3);
         assert_eq!(refused["error"]["code"], -32002, "{refused}");
         let (response, rest) = acp.read_until(2);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         updates.extend(rest);
         let mut all = vec![first];
         all.extend(updates);
@@ -409,11 +409,11 @@ mod tests {
         response["error"]["code"].as_i64().unwrap()
     }
 
-    /// A normal turn on a fresh session ends in end_turn with the goal output as chunks.
+    /// A normal turn on a fresh session ends in max_tokens with the goal output as chunks.
     fn assert_normal_turn(acp: &mut Acp, server: &Server, id: u64, goal_id: u64) {
         let session = acp.new_session(id);
         let (response, chunks) = acp.prompt(id + 1, &session, &["again"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert_eq!(
             chunks.concat(),
             goal(server, goal_id)["output"].as_str().unwrap()
@@ -566,7 +566,7 @@ mod tests {
             }
             chunks.push(message["params"]["update"]["content"]["text"].clone());
         };
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let text: String = chunks.iter().map(|c| c.as_str().unwrap()).collect();
         assert_eq!(text, goal(&server, 1)["output"].as_str().unwrap());
     }
@@ -632,7 +632,7 @@ mod tests {
         let session = acp.new_session(1);
         for id in [2, 3] {
             let (response, _) = acp.prompt(id, &session, &["same"]);
-            assert_eq!(response["result"]["stopReason"], "end_turn");
+            assert_eq!(response["result"]["stopReason"], "max_tokens");
         }
         let turns = session_of(&server, 1)["turns"].clone();
         assert_eq!(
@@ -664,7 +664,7 @@ mod tests {
             "{refused}"
         );
         let (response, rest) = acp.read_until(2);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         updates.extend(rest);
         let mut chunks = vec![first];
         chunks.extend(updates);
@@ -685,7 +685,7 @@ mod tests {
         let session = acp.new_session(1);
         for id in 2..6 {
             let (response, _) = acp.prompt(id, &session, &["x"]);
-            assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+            assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         }
     }
 
@@ -710,7 +710,7 @@ mod tests {
         let mut acp = Acp::start(&dir.0, &urls);
         let session = acp.new_session(1);
         let (response, chunks) = acp.prompt(2, &session, &["x"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert_eq!(
             chunks.concat(),
             goal(&server, 1)["output"].as_str().unwrap()
@@ -789,7 +789,7 @@ mod tests {
         let session = acp.new_session(1);
         proxy.drop_next(1);
         let (response, _) = acp.prompt(2, &session, &["x"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert_eq!(proxy.dropped(), 1);
         let (status, _) = server.request_status("GET", "/goals/2", "");
         assert_eq!(status, 404);
@@ -808,7 +808,7 @@ mod tests {
         assert!(proxy.dropped() >= 1);
         proxy.drop_next(0);
         let (response, _) = acp.prompt(3, &session, &["x"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         let turns = session_of(&server, 1)["turns"].clone();
         assert_eq!(turns, json!([{"prompt": "x", "goal": 1}]));
     }
@@ -855,7 +855,7 @@ mod tests {
         assert!(chunks.is_empty(), "{chunks:?}");
         let server = Server::start_on(port, &dir.0, Some(&db), &rate);
         let (response, chunks) = acp.prompt(4, &session, &["y"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         received.extend(chunks);
         let (first, second) = (goal(&server, 1), goal(&server, 2));
         let expected = format!(
@@ -894,7 +894,7 @@ mod tests {
         let (mut acp, session, server) = unfinished_turn_on_a_restarted_node(&dir, "20");
         server.request("DELETE", "/goals/1", "");
         let (response, chunks) = acp.prompt(3, &session, &["y"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let own = goal(&server, 2);
         assert_eq!(own["status"], "done", "{own}");
         assert!(chunks.concat().ends_with(own["output"].as_str().unwrap()));
@@ -924,7 +924,7 @@ mod tests {
         let session = acp.new_session(1);
         for (id, goal_id) in [(2, 1), (3, 2)] {
             let (response, chunks) = acp.prompt(id, &session, &["same"]);
-            assert_eq!(response["result"]["stopReason"], "end_turn");
+            assert_eq!(response["result"]["stopReason"], "max_tokens");
             let output = goal(&server, goal_id)["output"]
                 .as_str()
                 .unwrap()
@@ -959,7 +959,7 @@ mod tests {
         let text = format!("{}{}", chunk_text(&first), joined(&rest));
         assert_eq!(text, cancelled["output"].as_str().unwrap());
         let (response, chunks) = acp.prompt(3, &session, &["next"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert_eq!(
             chunks.concat(),
             goal(&server, 2)["output"].as_str().unwrap()
@@ -990,7 +990,7 @@ mod tests {
         let session = acp.new_session(1);
         cancel_note(&mut acp, &session);
         let (response, _) = acp.prompt(2, &session, &["hi"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert!(acp.finish().success());
     }
 
@@ -1003,7 +1003,7 @@ mod tests {
         assert!(acp.recv_within(Duration::from_millis(300)).is_none());
         let session = acp.new_session(1);
         let (response, _) = acp.prompt(2, &session, &["hi"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert!(acp.finish().success());
     }
 
@@ -1136,7 +1136,7 @@ mod tests {
         let (responses, chunks) = read_both(&mut acp, [3, 4]);
         for id in [3, 4] {
             let response = response_for(&responses, id);
-            assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+            assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         }
         let (a_first, a_last) = positions(&chunks, &a);
         let (b_first, b_last) = positions(&chunks, &b);
@@ -1181,7 +1181,7 @@ mod tests {
         );
         assert_eq!(
             response_for(&responses, 4)["result"]["stopReason"],
-            "end_turn"
+            "max_tokens"
         );
         let a_goal = goal(&server, goal_of_session(&server, 1));
         let b_goal = goal(&server, goal_of_session(&server, 2));
@@ -1272,7 +1272,7 @@ mod tests {
         assert_eq!(response["error"]["message"], "js_error", "{response}");
         assert_eq!(response["error"]["data"]["error"], "js_error", "{response}");
         let (response, _) = acp.prompt(3, &session, &["next"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert!(acp.finish().success());
     }
 
@@ -1295,7 +1295,7 @@ mod tests {
             json!({"turns": []})
         );
         let (response, _) = acp.prompt(3, &session, &["next"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert!(acp.finish().success());
     }
 
@@ -1348,7 +1348,7 @@ mod tests {
         post_turn(&server, &session, 0, "other");
         wait_done(&server, 1);
         let (response, chunks) = acp.prompt(2, &session, &["mine"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let out = |id| goal(&server, id)["output"].as_str().unwrap().to_owned();
         assert_eq!(chunks.concat(), format!("{}{}", out(1), out(2)));
         let turns = session_of(&server, 1);
@@ -1373,7 +1373,7 @@ mod tests {
         wait_done(&server, 1);
         wait_done(&server, 2);
         let (response, chunks) = acp.prompt(2, &session, &["mine"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let out = |id| goal(&server, id)["output"].as_str().unwrap().to_owned();
         assert_eq!(chunks.concat(), format!("{}{}{}", out(1), out(2), out(3)));
         assert_eq!(session_of(&server, 1)["turns"].as_array().unwrap().len(), 3);
@@ -1394,7 +1394,7 @@ mod tests {
         let mut received = prompt_cut_off_by_a_dead_node(&mut acp, &session, server);
         let server = Server::start_on(port, &dir.0, Some(&db), &rate);
         let (response, chunks) = acp.prompt(3, &session, &["y"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         received.extend(chunks);
         let out = |id| goal(&server, id)["output"].as_str().unwrap().to_owned();
         assert_eq!(received.concat(), format!("{}{}", out(1), out(2)));

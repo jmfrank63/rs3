@@ -32,7 +32,7 @@
 #                              byte (2000 words); script output and count are 40; trail is exact
 # Then, on a fresh 3-node cluster, `rs3 acp` drives initialize, session/new and one session/prompt
 #   while the leader is kill -9'd after the first chunk: JSON-RPC 2.0 lines only, at least one chunk
-#   after the kill, stopReason end_turn, one turn in GET /sessions/{id}, and the streamed text equals
+#   after the kill, stopReason max_tokens, one turn in GET /sessions/{id}, and the streamed text equals
 #   that turn's goal output byte for byte.
 # The release binary uses the default JS limits: nesting depth 4 and a 5000 ms timeout. Both are
 # set in code; there is no environment knob, so the timeout check waits about 5 s. This smoke is
@@ -505,7 +505,7 @@ try:
     send(3, "session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "p"}]})
     result = read_until(3)
     assert killed and after_kill >= 1, "leader kill did not fall inside the turn"
-    assert result["stopReason"] == "end_turn", result
+    assert result["stopReason"] == "max_tokens", result
     print(json.dumps({"session": session, "text": "".join(chunks)}))
 finally:
     adapter.stdin.close()
@@ -521,7 +521,7 @@ cwhen "$SURV" GET "/sessions/${ASESS}"
 [[ "$(python3 -I -c 'import json,sys; print(len(json.loads(sys.argv[1])["turns"]))' "$BODY")" == 1 ]] || fail "session ${ASESS} should hold exactly one turn: ${BODY}"
 AGOAL=$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["turns"][0]["goal"])' "$BODY")
 [[ "$(jf "$(cwait_done "$SURV" "$AGOAL")" output)" == "$(jf "$ACPOUT" text)" ]] || fail "ACP text differs from goal ${AGOAL} output: ${ACPOUT}"
-echo "ci-smoke: ok   ACP turn on 3 nodes: leader node $((LEADER + 1)) killed mid-turn, end_turn, streamed text equals goal ${AGOAL} output"
+echo "ci-smoke: ok   ACP turn on 3 nodes: leader node $((LEADER + 1)) killed mid-turn, max_tokens, streamed text equals goal ${AGOAL} output"
 for i in "${!CPIDS[@]}"; do
   [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
 done

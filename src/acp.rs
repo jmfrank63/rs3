@@ -242,7 +242,7 @@ async fn stream_goal(
     mut offset: usize,
     emit: impl Fn(&str, usize),
     cancelled: impl Fn() -> bool,
-) -> Result<(), CallError> {
+) -> Result<Option<String>, CallError> {
     let path = format!("/goals/{id}");
     loop {
         let method = if cancelled() {
@@ -260,7 +260,7 @@ async fn stream_goal(
             Some("done" | "failed" | "cancelled") if cancelled() => {
                 return Err(CallError::Cancelled);
             }
-            Some("done") => return Ok(()),
+            Some("done") => return Ok(goal["reason"].as_str().map(str::to_owned)),
             Some("cancelled") => return Err(CallError::Cancelled),
             Some("failed") => {
                 let error = goal["error"].as_str().unwrap_or_default();
@@ -322,7 +322,7 @@ impl Turn {
 
     /// Follow `goal` from `offset`, keeping the session's record of how far the client has
     /// read. Only a final answer clears it; an unavailable cluster keeps it for the next prompt.
-    async fn follow(&self, goal: u64, offset: usize) -> Result<(), CallError> {
+    async fn follow(&self, goal: u64, offset: usize) -> Result<Option<String>, CallError> {
         let emit = |text: &str, read: usize| {
             chunk(&self.out, &self.session, "agent_message_chunk", text);
             self.sessions
@@ -339,7 +339,7 @@ impl Turn {
     /// Finish the goal a timed-out prompt left behind, then start the next turn of the
     /// session and follow its goal. The turn number moves on only once the node has answered,
     /// so a failed call is resent as the same turn.
-    async fn stream(&self) -> Result<(), CallError> {
+    async fn stream(&self) -> Result<Option<String>, CallError> {
         let state = self.sessions.get(&self.session).unwrap_or_default();
         if let Some((goal, offset)) = state.unfinished {
             self.finish_earlier(goal, offset).await?;
@@ -393,7 +393,7 @@ impl Turn {
             {
                 Ok(())
             }
-            result => result,
+            result => result.map(drop),
         }
     }
 
@@ -404,7 +404,14 @@ impl Turn {
             s.cancel = false;
         });
         match result {
-            Ok(()) => respond(&self.out, &self.id, json!({"stopReason": "end_turn"})),
+            Ok(reason) => {
+                let stop = if reason.as_deref() == Some("budget") {
+                    "max_tokens"
+                } else {
+                    "end_turn"
+                };
+                respond(&self.out, &self.id, json!({"stopReason": stop}));
+            }
             Err(error) => fail_call(&self.out, &self.id, error),
         }
     }
