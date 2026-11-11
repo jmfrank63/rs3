@@ -1,0 +1,32 @@
+{
+  "name": "iso-agents",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "postinstall": "node scripts/copy-quickjs-wasm.mjs",
+    "test": "vitest run",
+    "test:live": "node scripts/test-typecheck-live.mjs && node scripts/test-sandbox-live.mjs && node scripts/test-agent-live.mjs && node scripts/test-shell-live.mjs && node scripts/test-typecheck-wasm-live.mjs",
+    "test:watch": "vitest",
+    "bench:tsc-rs": "node scripts/bench-tsc-rs.mjs",
+    "check": "tsc --noEmit",
+    "bundle:check": "wrangler deploy --dry-run --outdir dist-bundle",
+    "gate:no-host-eval": "! grep -rnE '\\beval\\(|new Function\\(' src/"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.0",
+    "@cloudflare/workers-types": "5.20261010.1",
+    "tsc-rs": "0.2.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11",
+    "wrangler": "4.149.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "workerd@1.20261006.1": true
+  },
+  "dependencies": {
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "quickjs-emscripten-core": "0.32.0"
+  }
+}

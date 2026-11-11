@@ -81,3 +81,15 @@ at least 3 nodes at once.
 
 JavaScript engine replacement (V8, Boa, Wasmtime) and real model inference are separate later decisions. Keep both
 behind small interfaces.
+
+## Coding-loop prototype
+
+`prototypes/iso-agents/` is the TypeScript prototype of the coding loop, imported from
+[jmfrank63/iso-agents](https://github.com/jmfrank63/iso-agents) at `eaf4b4c` without its GSD tooling and planning
+files. It runs one agent in a Cloudflare workerd isolate: the model writes TypeScript, tsc-rs (built to WebAssembly)
+type-checks it, a QuickJS sandbox runs it, and the errors go back to the model until the code passes. State is held in
+memory only. `src/typecheck-wasm/ts_rust.wasm` is the only copy of its build of an unpublished tsc-rs fork; see
+`prototypes/iso-agents/docs/ts-rust-wasm.md`.
+
+It is the reference for a later milestone that runs this loop as a durable rs3 goal, with every iteration journaled.
+CI does not build or test it. Once the loop runs in Rust, delete the prototype or keep only its benchmarks.

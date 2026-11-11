@@ -1,0 +1,17 @@
+# Copy to .dev.vars (gitignored) — loaded automatically by `wrangler dev`.
+# All vars are declared (optional) in Env (src/index.ts) so later-phase
+# plumbing never changes shape.
+
+# LLM provider selection (Phase 4). "mock" = deterministic mock, zero API keys.
+LLM_PROVIDER=mock
+
+# OpenAI-compatible provider (Phase 4) — uncomment and fill to activate.
+# LLM_BASE_URL=https://api.openai.com/v1
+# LLM_API_KEY=sk-...
+# LLM_MODEL=gpt-4o-mini
+
+# Agent loop guardrails (Phase 4)
+AGENT_MAX_ITERATIONS=5
+
+# Sandbox deadline per guest execution, ms (Phase 3)
+SANDBOX_TIMEOUT_MS=2000
