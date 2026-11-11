@@ -28,6 +28,9 @@ pub enum Command {
         session: u64,
         turn: u64,
         prompt: String,
+        /// The goal's start record, fixed by the proposer; `None` derives it from the prompt.
+        #[serde(default)]
+        start: Option<Record>,
     },
     /// End a live goal durably.
     CancelGoal { id: u64 },
@@ -200,19 +203,27 @@ pub(crate) fn apply_in(
             session,
             turn,
             prompt,
-        } => sessions::start_turn_in(txn, journal_of, *session, *turn, prompt.clone())
-            .map(|outcome| {
-                let answer = match outcome {
-                    TurnOutcome::New(goal) | TurnOutcome::Existing(goal) => {
-                        Response::TurnStarted(goal)
-                    }
-                    TurnOutcome::Conflict => Response::Refused("turn_conflict".into()),
-                    TurnOutcome::NotFound => Response::Refused("not_found".into()),
-                    TurnOutcome::UnknownScript => Response::Refused("unknown_script".into()),
-                };
-                (answer, None)
-            })
-            .map_err(journal),
+            start,
+        } => sessions::start_turn_in(
+            txn,
+            journal_of,
+            *session,
+            *turn,
+            prompt.clone(),
+            start.clone(),
+        )
+        .map(|outcome| {
+            let answer = match outcome {
+                TurnOutcome::New(goal) | TurnOutcome::Existing(goal) => Response::TurnStarted(goal),
+                TurnOutcome::Conflict => Response::Refused("turn_conflict".into()),
+                TurnOutcome::NotFound => Response::Refused("not_found".into()),
+                TurnOutcome::UnknownScript => Response::Refused("unknown_script".into()),
+                // Length is checked by the proposer, before the command exists.
+                TurnOutcome::TooLong(_) => Response::Refused("too_long".into()),
+            };
+            (answer, None)
+        })
+        .map_err(journal),
         Command::CancelGoal { id } => goals::cancel_in(txn, journal_of, *id)
             .map(|done| {
                 (

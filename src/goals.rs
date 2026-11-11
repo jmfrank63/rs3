@@ -22,7 +22,7 @@ use crate::js::ExecError;
 use crate::js::executor::JsExecutor;
 use crate::js::oplog::{LogStop, OpLog};
 use crate::lease::{self, Fence};
-use crate::model::{Engine, FakeModel, Generation, Model, TEMPERATURE, TOP_P};
+use crate::model::{Candle, Engine, FakeModel, Generation, Model, TEMPERATURE, TOP_P, final_text};
 use crate::raft::{Node, seal as sealing};
 use crate::sessions::{self, SESSIONS, Turn, TurnOutcome};
 use crate::store::{Command, GoalEvent, Response, Store};
@@ -34,6 +34,31 @@ const BATCH: u64 = 8;
 
 /// The most tokens a candle goal's prompt and output may hold together.
 const CONTEXT: u64 = 4096;
+
+/// The start record of a candle generation over `prompt_tokens`; `Err` says the prompt and
+/// `budget` do not fit the context.
+fn candle_start(
+    candle: &Candle,
+    seed: u64,
+    prompt_tokens: Vec<u32>,
+    budget: u64,
+) -> Result<Record, String> {
+    if prompt_tokens.len() as u64 + budget > CONTEXT {
+        return Err(format!(
+            "prompt and budget must fit in {CONTEXT} tokens, got {} and {budget}",
+            prompt_tokens.len()
+        ));
+    }
+    Ok(Record::InferenceStart {
+        engine: "candle".into(),
+        model_hash: candle.model_hash.clone(),
+        tokenizer_hash: candle.tokenizer_hash.clone(),
+        sampler: serde_json::json!({ "seed": seed, "temperature": TEMPERATURE, "top_p": TOP_P })
+            .to_string(),
+        rng_state: Vec::new(),
+        prompt_tokens,
+    })
+}
 
 /// What a client asks for.
 pub struct GoalSpec {
@@ -470,24 +495,7 @@ impl Goals {
             return Ok(inference_start(spec.seed, &spec.prompt));
         };
         let prompt_tokens = candle.prompt_tokens(&spec.prompt)?;
-        if prompt_tokens.len() as u64 + spec.budget > CONTEXT {
-            return Err(format!(
-                "prompt and budget must fit in {CONTEXT} tokens, got {} and {}",
-                prompt_tokens.len(),
-                spec.budget
-            ));
-        }
-        Ok(Record::InferenceStart {
-            engine: "candle".into(),
-            model_hash: candle.model_hash.clone(),
-            tokenizer_hash: candle.tokenizer_hash.clone(),
-            sampler: serde_json::json!({
-                "seed": spec.seed, "temperature": TEMPERATURE, "top_p": TOP_P
-            })
-            .to_string(),
-            rng_state: Vec::new(),
-            prompt_tokens,
-        })
+        candle_start(candle, spec.seed, prompt_tokens, spec.budget)
     }
 
     /// Create a goal that runs `source` as the script `name`, and queue it.
@@ -548,6 +556,49 @@ impl Goals {
         Ok(id)
     }
 
+    /// The start record of a new turn on the candle engine: the earlier turns' prompts and final
+    /// answers, then `prompt`, as tokens fixed now because applying a command cannot tokenize.
+    /// `None` for a fake engine, a `/run` prompt, or a turn that is not the session's next.
+    fn turn_start(
+        &self,
+        session: u64,
+        turn: u64,
+        prompt: &str,
+    ) -> Result<Result<Option<Record>, String>, JournalError> {
+        let Some(Engine::Candle(candle)) = self.0.engine.get() else {
+            return Ok(Ok(None));
+        };
+        if sessions::script_key(prompt).is_some() {
+            return Ok(Ok(None));
+        }
+        let Some(turns) = self.session(session)? else {
+            return Ok(Ok(None));
+        };
+        if turns.len() as u64 != turn {
+            return Ok(Ok(None));
+        }
+        let mut history = Vec::new();
+        for earlier in &turns {
+            let output = self
+                .status(earlier.goal)?
+                .and_then(|status| status.output)
+                .ok_or_else(|| {
+                    JournalError::Storage(format!("goal {} has no output", earlier.goal))
+                })?;
+            history.push((earlier.prompt.clone(), final_text(&output).to_owned()));
+        }
+        let tokens = candle
+            .chat_tokens(&history, prompt)
+            .map_err(JournalError::Storage)?;
+        Ok(candle_start(
+            candle,
+            sessions::seed(session, turn),
+            tokens,
+            sessions::TURN_BUDGET,
+        )
+        .map(Some))
+    }
+
     /// Start turn `turn` of `session`. Only a new turn creates (and queues) a goal; a refusal
     /// or a resent turn writes nothing.
     pub fn start_turn(
@@ -556,11 +607,15 @@ impl Goals {
         turn: u64,
         prompt: String,
     ) -> Result<TurnOutcome, JournalError> {
+        let start = match self.turn_start(session, turn, &prompt)? {
+            Ok(start) => start,
+            Err(why) => return Ok(TurnOutcome::TooLong(why)),
+        };
         if self.0.me.is_some() {
-            return self.propose_turn(session, turn, prompt);
+            return self.propose_turn(session, turn, prompt, start);
         }
         let txn = self.0.db.begin_write().map_err(storage)?;
-        let outcome = sessions::start_turn_in(&txn, &self.0.journal, session, turn, prompt)?;
+        let outcome = sessions::start_turn_in(&txn, &self.0.journal, session, turn, prompt, start)?;
         if let TurnOutcome::New(id) = outcome {
             txn.commit().map_err(storage)?;
             self.enqueue(Goal {
@@ -579,11 +634,13 @@ impl Goals {
         session: u64,
         turn: u64,
         prompt: String,
+        start: Option<Record>,
     ) -> Result<TurnOutcome, JournalError> {
         match self.propose(Command::StartTurn {
             session,
             turn,
             prompt,
+            start,
         })? {
             Response::TurnStarted(goal) => Ok(TurnOutcome::Existing(goal)),
             Response::Refused(code) => match code.as_str() {

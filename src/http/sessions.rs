@@ -9,6 +9,7 @@ use super::goals::{goals, parse_body};
 use super::kv::{blocking_failed, read_barrier};
 use crate::sessions::TurnOutcome;
 use crate::state::AppState;
+use crate::store::StoreError;
 
 /// Register the session routes. The shared `AppState` is registered by `http::configure`.
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -79,6 +80,7 @@ async fn start_turn(
         TurnOutcome::Conflict => Err(ApiError::TurnConflict),
         TurnOutcome::NotFound => Err(ApiError::SessionNotFound(raw)),
         TurnOutcome::UnknownScript => Err(ApiError::ScriptNotFound(new_prompt)),
+        TurnOutcome::TooLong(why) => Err(StoreError::InvalidInput(why).into()),
     }
 }
 

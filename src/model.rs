@@ -58,6 +58,18 @@ pub struct Candle {
     pub tokenizer_hash: String,
 }
 
+/// The answer in a model's output: the text after the last `</think>` without its leading
+/// newlines, nothing for a `<think>` never closed, else the text as is.
+pub fn final_text(text: &str) -> &str {
+    if let Some(end) = text.rfind("</think>") {
+        text[end + "</think>".len()..].trim_start_matches('\n')
+    } else if text.contains("<think>") {
+        ""
+    } else {
+        text
+    }
+}
+
 fn read(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -97,7 +109,23 @@ impl Candle {
 
     /// The chat-formatted prompt as token ids.
     pub fn prompt_tokens(&self, prompt: &str) -> Result<Vec<u32>, String> {
-        let text = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
+        self.chat_tokens(&[], prompt)
+    }
+
+    /// The chat-formatted conversation as token ids: each earlier `(prompt, final text)` pair as a
+    /// finished exchange, then `prompt` and the assistant opener.
+    pub fn chat_tokens(
+        &self,
+        history: &[(String, String)],
+        prompt: &str,
+    ) -> Result<Vec<u32>, String> {
+        let mut text = String::new();
+        for (user, answer) in history {
+            text += &format!(
+                "<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n{answer}<|im_end|>\n"
+            );
+        }
+        text += &format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
         let encoding = self
             .tokenizer
             .encode(text, false)
