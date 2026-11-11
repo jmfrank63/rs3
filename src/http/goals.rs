@@ -83,11 +83,20 @@ async fn create(state: web::Data<AppState>, body: web::Bytes) -> Result<HttpResp
                 seed: g.seed,
                 prompt: g.prompt,
             };
-            web::block(move || goals.create(spec)).await
+            web::block(move || {
+                let start = goals
+                    .start_record(&spec)
+                    .map_err(StoreError::InvalidInput)?;
+                Ok::<_, ApiError>(goals.create_from(spec.priority, budget, &start)?)
+            })
+            .await
         }
         NewGoal::Script(g) => {
             let source = state.store.get(&g.script)?;
-            web::block(move || goals.create_script(g.priority, g.script, source)).await
+            web::block(move || {
+                Ok::<_, ApiError>(goals.create_script(g.priority, g.script, source)?)
+            })
+            .await
         }
     }
     .map_err(blocking_failed)??;
@@ -116,6 +125,9 @@ async fn goal_status(
         "output": status.output,
         "error": status.error,
     });
+    if let Some(reason) = status.reason {
+        body["reason"] = reason.into();
+    }
     if state.cluster.is_some() {
         body["node"] = status.node.into();
     }

@@ -184,8 +184,8 @@ impl<'a> Generation<'a> {
     }
 }
 
-const TEMPERATURE: f64 = 0.6;
-const TOP_P: f64 = 0.95;
+pub const TEMPERATURE: f64 = 0.6;
+pub const TOP_P: f64 = 0.95;
 
 /// Temperature plus top-p sampling whose only randomness is a hash of (seed, position).
 fn sample(logits: &[f32], seed: u64, position: u64) -> u32 {

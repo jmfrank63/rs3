@@ -5,8 +5,9 @@
 //! environment is only read, never modified. A missing dotenv file is ignored;
 //! any other dotenv problem (a line that does not parse, an unreadable file) is
 //! a configuration error. Only the keys `SERVER.HOST`, `SERVER.PORT`,
-//! `STORAGE.PATH`, `SCHEDULER.WORKERS` and `MODEL.TOKENS_PER_SECOND`
-//! (case-insensitive) are used. Both server keys are required: there are no
+//! `STORAGE.PATH`, `SCHEDULER.WORKERS`, `MODEL.TOKENS_PER_SECOND`, `MODEL.PATH`,
+//! `MODEL.TOKENIZER`, `MODEL.THREADS` (default 4) and the `CLUSTER.*` keys
+//! (case-insensitive) are used. `MODEL.PATH` and `MODEL.TOKENIZER` go together. Both server keys are required: there are no
 //! defaults, and missing or invalid values are an error. Without `STORAGE.PATH`
 //! the store keeps its data in memory only. `SCHEDULER.WORKERS` (default 2) and
 //! `MODEL.TOKENS_PER_SECOND` (default 1000) must be positive integers.
@@ -19,12 +20,15 @@ use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 
 /// The only configuration keys read from the dotenv file and the environment.
-const CONFIG_KEYS: [&str; 9] = [
+const CONFIG_KEYS: [&str; 12] = [
     "server.host",
     "server.port",
     "storage.path",
     "scheduler.workers",
     "model.tokens_per_second",
+    "model.path",
+    "model.tokenizer",
+    "model.threads",
     "cluster.node_id",
     "cluster.peers",
     "cluster.snapshot_every",
@@ -59,16 +63,25 @@ impl Default for SchedulerSettings {
     }
 }
 
-/// How fast a worker emits tokens.
+/// How fast a worker emits tokens, and which real model it runs.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct ModelSettings {
     pub tokens_per_second: NonZeroU32,
+    /// The GGUF weights; with `tokenizer`, switches goals from the fake model to the real one.
+    pub path: Option<PathBuf>,
+    pub tokenizer: Option<PathBuf>,
+    /// Threads the real model computes on.
+    pub threads: NonZeroUsize,
 }
 
 impl Default for ModelSettings {
     fn default() -> Self {
         Self {
             tokens_per_second: NonZeroU32::MIN.saturating_add(999),
+            path: None,
+            tokenizer: None,
+            threads: NonZeroUsize::MIN.saturating_add(3),
         }
     }
 }
@@ -272,6 +285,11 @@ impl Settings {
             .add_source(env)
             .build()?
             .try_deserialize()?;
+        if raw.model.path.is_some() != raw.model.tokenizer.is_some() {
+            return Err(invalid(
+                "MODEL.PATH and MODEL.TOKENIZER must be set together",
+            ));
+        }
         let cluster = raw.cluster.parse()?;
         if cluster.is_some() && raw.storage.path.is_none() {
             return Err(invalid("a cluster needs STORAGE.PATH"));
@@ -484,6 +502,33 @@ mod tests {
             ]));
             assert!(r.is_err(), "{key}={value} accepted: {r:?}");
         }
+    }
+
+    #[test]
+    fn model_files_and_threads_are_read_in_any_case_and_checked() {
+        let base = [("SERVER.HOST", "h"), ("SERVER.PORT", "1")];
+        let with = |extra: &[(&str, &str)]| Settings::from_map(vars(&[&base[..], extra].concat()));
+        let s = with(&[
+            ("Model.Path", "/m.gguf"),
+            ("MODEL.tokenizer", "/t.json"),
+            ("model.THREADS", "2"),
+        ])
+        .unwrap();
+        assert_eq!(s.model.path, Some(PathBuf::from("/m.gguf")));
+        assert_eq!(s.model.tokenizer, Some(PathBuf::from("/t.json")));
+        assert_eq!(s.model.threads.get(), 2);
+        assert_eq!(s.model.tokens_per_second.get(), 1000);
+        assert_eq!(with(&[]).unwrap().model.threads.get(), 4);
+        for extra in [
+            &[("MODEL.PATH", "/m")][..],
+            &[("MODEL.TOKENIZER", "/t")],
+            &[("MODEL.THREADS", "0")],
+            &[("MODEL.THREADS", "many")],
+        ] {
+            assert!(with(extra).is_err(), "{extra:?} accepted");
+        }
+        let e = with(&[("MODEL.PATH", "/m")]).unwrap_err().to_string();
+        assert!(e.contains("MODEL.TOKENIZER"), "unexpected error: {e}");
     }
 
     #[test]

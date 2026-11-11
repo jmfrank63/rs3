@@ -4,6 +4,7 @@ use std::sync::Arc;
 use actix_web::{App, HttpServer, web};
 use rs3::config::Settings;
 use rs3::goals::Goals;
+use rs3::model::{Candle, Engine};
 use rs3::store::Store;
 
 /// The store, its goals and, in a cluster, the database the Raft node shares.
@@ -71,6 +72,13 @@ async fn run() -> Result<(), String> {
     rs3::js::init_platform();
     let js = rs3::js::executor::JsExecutor::start(&rs3::js::JsSettings::default())
         .map_err(|e| format!("cannot start JS runtime: {e}"))?;
+    if let (Some(goals), Some(path), Some(tokenizer)) =
+        (&goals, &settings.model.path, &settings.model.tokenizer)
+    {
+        let candle = Candle::load(path, tokenizer, settings.model.threads.get())
+            .map_err(|e| format!("invalid configuration: cannot load model: {e}"))?;
+        goals.set_engine(Engine::Candle(Arc::new(candle)));
+    }
     if let Some(goals) = &goals {
         goals.enable_scripts(store.clone(), js.clone());
     }
