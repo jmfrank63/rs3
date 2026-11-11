@@ -241,15 +241,17 @@ impl Goals {
         let mut orphans = Vec::new();
         for task in self.0.journal.live_streams()? {
             let owner = lease::owner(&self.0.db, task)?;
-            match owner.and_then(|node| load.get_mut(&node)) {
-                Some(n) => *n += 1,
-                None => orphans.push(task),
+            let declined = lease::declined(&self.0.db, task)?;
+            match owner.filter(|node| !declined.contains(node)) {
+                Some(node) if load.contains_key(&node) => *load.entry(node).or_default() += 1,
+                _ => orphans.push((task, declined)),
             }
         }
         let mut plan = Vec::new();
-        for task in orphans {
-            let Some((&node, _)) = load.iter().min_by_key(|&(&id, &n)| (n, id)) else {
-                break;
+        for (task, declined) in orphans {
+            let pick = load.iter().filter(|(id, _)| !declined.contains(id));
+            let Some((&node, _)) = pick.min_by_key(|&(&id, &n)| (n, id)) else {
+                continue;
             };
             load.insert(node, load[&node] + 1);
             plan.push(Command::Assign {
@@ -1075,8 +1077,20 @@ impl Goals {
                     }
                 }),
             },
-            // Left alone, neither claimed nor queued: a node with its model picks it up.
-            other => other,
+            // Not claimed or queued: tell the cluster this node cannot run it, so the plan
+            // moves it to a node with the model. A refused decline changes nothing.
+            Ok(false) => {
+                if let Some(me) = self.0.me {
+                    let _ = self.retry(|| {
+                        self.propose(Command::Decline {
+                            task: goal.id,
+                            node: me,
+                        })
+                    });
+                }
+                Ok(false)
+            }
+            Err(e) => Err(e),
         };
         let mut sched = self.sched();
         sched.running.remove(&goal.id);
@@ -1190,6 +1204,64 @@ mod tests {
         // Goal 4 is the only live unassigned goal; node 2 carries less than node 1.
         let plan = picks(goals.plan_assignments(&[1, 2, 9]).unwrap());
         assert_eq!(plan, vec![(4, 2)]);
+    }
+
+    fn decline(db: &Database, task: u64, node: u64) {
+        let txn = db.begin_write().unwrap();
+        lease::decline_in(&txn, task, node).unwrap();
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn plan_moves_a_goal_off_a_live_owner_that_declined_it() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        for seed in 0..3 {
+            goals.create(spec(5, seed)).unwrap();
+        }
+        for (task, node) in [(1, 1), (2, 1), (3, 2)] {
+            assign_to(&db, task, node);
+        }
+        assert!(goals.plan_assignments(&[1, 2]).unwrap().is_empty());
+        decline(&db, 1, 1);
+        // Goal 1 no longer counts against node 1, so node 1 holds one goal and node 2 one:
+        // the lowest id of the tie, node 1, has declined, so the goal goes to node 2.
+        let plan = goals.plan_assignments(&[1, 2]).unwrap();
+        assert_eq!(
+            plan,
+            vec![Command::Assign {
+                task: 1,
+                node: 2,
+                expect_token: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn plan_is_empty_when_every_live_node_declined() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        goals.create(spec(5, 0)).unwrap();
+        assign_to(&db, 1, 1);
+        decline(&db, 1, 1);
+        decline(&db, 1, 2);
+        assert!(goals.plan_assignments(&[1, 2]).unwrap().is_empty());
+        // A node that has not declined it takes it.
+        assert_eq!(
+            picks_at(goals.plan_assignments(&[1, 2, 3]).unwrap()),
+            vec![(1, 3)]
+        );
+    }
+
+    fn picks_at(plan: Vec<Command>) -> Vec<(u64, u64)> {
+        plan.into_iter()
+            .map(|c| match c {
+                Command::Assign { task, node, .. } => (task, node),
+                other => panic!("{other:?}"),
+            })
+            .collect()
     }
 
     fn goals_at(path: &Path) -> Goals {

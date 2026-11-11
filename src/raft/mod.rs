@@ -1316,6 +1316,56 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn a_goal_no_node_can_run_is_declined_by_each_in_turn_and_commits_nothing() {
+        let cluster = super::testing::Cluster::start(3, 3).await;
+        cluster.work();
+        let leader = cluster.nodes[cluster.leader().await].clone();
+        let start = crate::journal::Record::InferenceStart {
+            engine: "candle".into(),
+            model_hash: "m".into(),
+            tokenizer_hash: "t".into(),
+            sampler: "{}".into(),
+            rng_state: vec![1],
+            prompt_tokens: vec![7],
+        };
+        let create = Command::CreateGoal {
+            priority: 0,
+            budget: 4,
+            start,
+        };
+        assert_eq!(
+            propose_on_thread(leader.clone(), create).await,
+            Ok(Response::GoalCreated(1))
+        );
+        let assign = Command::Assign {
+            task: 1,
+            node: 2,
+            expect_token: 0,
+        };
+        assert!(matches!(
+            propose_on_thread(leader, assign).await,
+            Ok(Response::Assigned { .. })
+        ));
+        cluster.assign();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        for (node, db) in cluster.nodes.iter().zip(&cluster.dbs) {
+            loop {
+                node.read_barrier().await.unwrap();
+                if crate::lease::declined(db, 1).unwrap() == [1, 2, 3] {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "not declined by all");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        for db in &cluster.dbs {
+            let journal = crate::journal::Journal::new(db.clone()).unwrap();
+            assert_eq!(journal.read(1).unwrap().len(), 1);
+        }
+        cluster.stop().await;
+    }
+
+    #[actix_web::test]
     async fn a_goal_assigned_to_one_node_finishes_there_with_a_single_node_output() {
         let cluster = super::testing::Cluster::start(3, 3).await;
         cluster.work();

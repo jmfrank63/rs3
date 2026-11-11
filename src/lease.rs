@@ -10,11 +10,16 @@ const LEASES: TableDefinition<u64, u64> = TableDefinition::new("leases");
 /// The node a task is assigned to; written only when a claim names an owner.
 const OWNERS: TableDefinition<u64, u64> = TableDefinition::new("lease_owner");
 
-/// A copy of the tokens and owners tables.
+/// The (task, node) pairs where the node owned the task and gave it up: it cannot run it.
+const DECLINED: TableDefinition<(u64, u64), ()> = TableDefinition::new("lease_declined");
+
+/// A copy of the tokens, owners and declined tables.
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct Image {
     leases: Vec<(u64, u64)>,
     owners: Vec<(u64, u64)>,
+    #[serde(default)]
+    declined: Vec<(u64, u64)>,
 }
 
 impl Image {
@@ -23,6 +28,7 @@ impl Image {
         Ok(Self {
             leases: dump_table(txn, LEASES, |k, v| (k, v))?,
             owners: dump_table(txn, OWNERS, |k, v| (k, v))?,
+            declined: dump_table(txn, DECLINED, |k, ()| k)?,
         })
     }
 
@@ -34,6 +40,11 @@ impl Image {
             for (key, value) in rows {
                 table.insert(*key, *value).map_err(storage)?;
             }
+        }
+        txn.delete_table(DECLINED).map_err(storage)?;
+        let mut table = txn.open_table(DECLINED).map_err(storage)?;
+        for pair in &self.declined {
+            table.insert(*pair, ()).map_err(storage)?;
         }
         Ok(())
     }
@@ -88,6 +99,30 @@ pub fn owner_in(txn: &WriteTransaction, task: u64) -> Result<Option<u64>, Journa
     let owners = txn.open_table(OWNERS).map_err(storage)?;
     let owner = owners.get(task).map_err(storage)?.map(|o| o.value());
     Ok(owner)
+}
+
+/// Record in `txn` that `node` cannot run `task`.
+pub(crate) fn decline_in(txn: &WriteTransaction, task: u64, node: u64) -> Result<(), JournalError> {
+    txn.open_table(DECLINED)
+        .map_err(storage)?
+        .insert((task, node), ())
+        .map_err(storage)?;
+    Ok(())
+}
+
+/// The nodes that declined `task`, lowest first.
+pub fn declined(db: &Database, task: u64) -> Result<Vec<u64>, JournalError> {
+    let txn = db.begin_read().map_err(storage)?;
+    let table = match txn.open_table(DECLINED) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+        Err(e) => return Err(storage(e)),
+    };
+    let mut nodes = vec![];
+    for entry in table.range((task, 0)..=(task, u64::MAX)).map_err(storage)? {
+        nodes.push(entry.map_err(storage)?.0.value().1);
+    }
+    Ok(nodes)
 }
 
 /// The node `task` is assigned to, if any.
@@ -283,5 +318,37 @@ mod tests {
         claim(&db, 1).unwrap();
         let txn = db.begin_write().unwrap();
         assert!(check_in(&txn, &on2).is_ok());
+    }
+
+    #[test]
+    fn a_declined_set_survives_an_image_round_trip_and_old_images_load() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let txn = db.begin_write().unwrap();
+        decline_in(&txn, 1, 4).unwrap();
+        decline_in(&txn, 1, 2).unwrap();
+        decline_in(&txn, 2, 9).unwrap();
+        txn.commit().unwrap();
+        assert_eq!(declined(&db, 1).unwrap(), vec![2, 4]);
+        assert_eq!(declined(&db, 3).unwrap(), Vec::<u64>::new());
+
+        let read = db.begin_read().unwrap();
+        let json = serde_json::to_string(&Image::dump_in(&read).unwrap()).unwrap();
+        let other = open(&dir.path().join("other")).unwrap();
+        let txn = other.begin_write().unwrap();
+        serde_json::from_str::<Image>(&json)
+            .unwrap()
+            .replace_in(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+        assert_eq!(declined(&other, 1).unwrap(), vec![2, 4]);
+        assert_eq!(declined(&other, 2).unwrap(), vec![9]);
+
+        let old: Image = serde_json::from_str(r#"{"leases":[[1,1]],"owners":[[1,3]]}"#).unwrap();
+        let txn = other.begin_write().unwrap();
+        old.replace_in(&txn).unwrap();
+        txn.commit().unwrap();
+        assert_eq!(declined(&other, 1).unwrap(), Vec::<u64>::new());
+        assert_eq!(owner(&other, 1).unwrap(), Some(3));
     }
 }
