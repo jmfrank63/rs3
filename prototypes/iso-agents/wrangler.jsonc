@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "iso-agents",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  // REQUIRED at this date: nodejs_compat (+v2) is default-ON for
+  // compatibility_date >= 2026-08-04. Phase 2 depends on `process` NOT
+  // existing (typescript@6 isNodeLikeSystem must stay false). Turning it
+  // off also makes accidental `node:` imports fail the bundle instead of
+  // silently stubbing through unenv. BOTH flags are the complete opt-out.
+  "compatibility_flags": ["no_nodejs_compat", "no_nodejs_compat_v2"],
+  // Locally inert; correct production shape. Schema: {enabled, head_sampling_rate, ...}
+  "observability": { "enabled": true },
+  // Lib .d.ts files ship as Text modules for the in-isolate checker (02-01).
+  // fallthrough is REQUIRED: a custom Text rule without it silently replaces
+  // wrangler's default **/*.txt|html|sql rule (wrangler parseRules behavior).
+  "rules": [{ "type": "Text", "globs": ["**/*.d.ts"], "fallthrough": true }]
+}
