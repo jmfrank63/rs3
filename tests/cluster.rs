@@ -9,15 +9,22 @@ mod cluster;
 #[cfg(test)]
 mod common;
 #[cfg(test)]
+#[path = "common/model.rs"]
+mod model;
+#[cfg(test)]
 #[path = "common/proxy.rs"]
 mod proxy;
+#[cfg(test)]
+#[path = "common/reference.rs"]
+mod reference;
 
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::cluster::{Cluster, goal_body, output, single_node_output, wait_until};
+    use crate::cluster::{Cluster, wait_until};
     use crate::common::{Server, TempDir, free_port, rs3};
+    use crate::reference::{goal_body, output, single_node_output};
 
     #[test]
     fn a_key_written_through_each_node_is_read_through_every_node() {
@@ -1210,5 +1217,79 @@ mod tests {
         let (response, _) = finish_turn(&mut acp);
         assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
         assert_eq!(cluster.goal(1, 1)["status"], "done");
+    }
+}
+
+#[cfg(test)]
+mod cluster_model {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use crate::cluster::{Cluster, wait_until};
+    use crate::common::{Server, TempDir};
+    use crate::model::model_files;
+
+    const BUDGET: u64 = 48;
+    const PROMPT: &str =
+        "List twenty different animals, one per line, with a short description of each. /no_think";
+
+    fn model_env<'a>(gguf: &'a Path, tokenizer: &'a Path) -> [(&'a str, &'a str); 3] {
+        [
+            ("MODEL.PATH", gguf.to_str().expect("utf-8 path")),
+            ("MODEL.TOKENIZER", tokenizer.to_str().expect("utf-8 path")),
+            ("MODEL.THREADS", "1"),
+        ]
+    }
+
+    fn body() -> String {
+        serde_json::json!({"priority": 0, "budget": BUDGET, "seed": 11, "prompt": PROMPT})
+            .to_string()
+    }
+
+    /// The finished goal of one uninterrupted single-node run.
+    fn reference() -> serde_json::Value {
+        let (gguf, tokenizer) = model_files();
+        let dir = TempDir::new("cluster-model-ref");
+        let env = model_env(&gguf, &tokenizer);
+        let server = Server::start(&dir.0, Some(&dir.0.join("rs3.redb")), &env);
+        let (status, text) = server.request_status("POST", "/goals", &body());
+        assert_eq!(status, 201, "{text}");
+        wait_until("the reference goal", Duration::from_secs(180), || {
+            let got: serde_json::Value =
+                serde_json::from_str(&server.request("GET", "/goals/1", "")).unwrap();
+            (got["status"] == "done").then_some(got)
+        })
+    }
+
+    #[test]
+    fn mismatch_node_declines_and_goal_finishes_elsewhere() {
+        let reference = reference();
+        assert_eq!(reference["reason"], "budget", "{reference}");
+        let (gguf, tokenizer) = model_files();
+        let dir = TempDir::new("cluster-model-files");
+        // A copy of the model with its last byte flipped: a different model file.
+        let other = dir.0.join("other.gguf");
+        let mut bytes = std::fs::read(&gguf).unwrap();
+        *bytes.last_mut().unwrap() ^= 0xff;
+        std::fs::write(&other, bytes).unwrap();
+
+        let env = model_env(&gguf, &tokenizer);
+        let own = vec![("MODEL.PATH".to_owned(), other.to_str().unwrap().to_owned())];
+        let cluster = Cluster::start_with_nodes("cluster-model", 3, &env, vec![(0, own)]);
+
+        let id = cluster.create_goal(1, &body());
+        let got = wait_until("the goal to finish", Duration::from_secs(180), || {
+            let got = cluster.goal(1, id);
+            (got["status"] == "done").then_some(got)
+        });
+        assert_eq!(got["output"], reference["output"]);
+        assert_eq!(got["reason"], "budget");
+        assert_ne!(
+            got["node"], 1,
+            "the node on another model finished it: {got}"
+        );
+        let generated: serde_json::Value =
+            serde_json::from_str(&cluster.request(0, "GET", "/goals/generated", "")).unwrap();
+        assert_eq!(generated["generated"].as_u64(), Some(0), "{generated}");
     }
 }
