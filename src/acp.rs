@@ -52,7 +52,7 @@ fn fail_named(out: &Out, id: &Value, code: i64, name: &str) {
     send(out, json!({"jsonrpc": "2.0", "id": id, "error": error}));
 }
 
-/// A `session/update` carrying `text`; `kind` is `user_message_chunk` or `agent_message_chunk`.
+/// A `session/update` carrying `text`; `kind` is `user_message_chunk`, `agent_message_chunk` or `agent_thought_chunk`.
 fn chunk(out: &Out, session: &str, kind: &str, text: &str) {
     let update = json!({
         "sessionUpdate": kind,
@@ -232,7 +232,58 @@ fn fail_call(out: &Out, id: &Value, error: CallError) {
     }
 }
 
-/// Follow goal `id` from byte `offset` of its output, handing every new piece to `emit`. `emit`
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+/// Whether byte `offset` of `output` lies inside a think block.
+fn in_think(output: &str, offset: usize) -> bool {
+    let seen = &output[..offset];
+    seen.rfind(THINK_OPEN) > seen.rfind(THINK_CLOSE)
+}
+
+/// How many bytes at the end of `text` are a proper prefix of `tag`.
+fn partial_tag(text: &str, tag: &str) -> usize {
+    (1..tag.len())
+        .rev()
+        .find(|&k| text.ends_with(&tag[..k]))
+        .unwrap_or(0)
+}
+
+/// Split `text` into (update kind, piece) with the think tags dropped and empty (or, inside think, blank) pieces skipped,
+/// starting inside a think block when `thinking`. Unless `last`, a trailing part of a tag is
+/// not consumed. Also returns the number of bytes consumed.
+fn split_think(text: &str, mut thinking: bool, last: bool) -> (Vec<(&'static str, &str)>, usize) {
+    let mut chunks = Vec::new();
+    let mut rest = text;
+    loop {
+        let (tag, kind) = if thinking {
+            (THINK_CLOSE, "agent_thought_chunk")
+        } else {
+            (THINK_OPEN, "agent_message_chunk")
+        };
+        let found = rest.find(tag);
+        let held = if found.is_some() || last {
+            0
+        } else {
+            partial_tag(rest, tag)
+        };
+        let end = found.unwrap_or(rest.len() - held);
+        let piece = &rest[..end];
+        if !(piece.is_empty() || thinking && piece.trim().is_empty()) {
+            chunks.push((kind, piece));
+        }
+        let Some(at) = found else {
+            rest = &rest[end..];
+            break;
+        };
+        rest = &rest[at + tag.len()..];
+        thinking = !thinking;
+    }
+    (chunks, text.len() - rest.len())
+}
+
+/// Follow goal `id` from byte `offset` of its output, handing the whole output, the offset
+/// already delivered and whether the goal is done to `emit`. `emit`
 /// returns the offset the client has now received up to. While `cancelled` is true each round
 /// is a DELETE, which is idempotent and answers like a GET; a goal that ends then, or is
 /// cancelled by anyone, ends the stream as `Cancelled`.
@@ -240,7 +291,7 @@ async fn stream_goal(
     nodes: &Nodes,
     id: u64,
     mut offset: usize,
-    emit: impl Fn(&str, usize),
+    emit: impl Fn(&str, usize, bool) -> usize,
     cancelled: impl Fn() -> bool,
 ) -> Result<Option<String>, CallError> {
     let path = format!("/goals/{id}");
@@ -251,12 +302,12 @@ async fn stream_goal(
             Method::GET
         };
         let goal = nodes.call(method, &path, None).await?;
-        let new = goal["output"].as_str().and_then(|o| o.get(offset..));
-        if let Some(new) = new.filter(|n| !n.is_empty()) {
-            offset += new.len();
-            emit(new, offset);
+        let status = goal["status"].as_str();
+        let output = goal["output"].as_str().unwrap_or_default();
+        if output.len() > offset {
+            offset = emit(output, offset, status == Some("done"));
         }
-        match goal["status"].as_str() {
+        match status {
             Some("done" | "failed" | "cancelled") if cancelled() => {
                 return Err(CallError::Cancelled);
             }
@@ -323,10 +374,18 @@ impl Turn {
     /// Follow `goal` from `offset`, keeping the session's record of how far the client has
     /// read. Only a final answer clears it; an unavailable cluster keeps it for the next prompt.
     async fn follow(&self, goal: u64, offset: usize) -> Result<Option<String>, CallError> {
-        let emit = |text: &str, read: usize| {
-            chunk(&self.out, &self.session, "agent_message_chunk", text);
+        let emit = |output: &str, from: usize, last: bool| {
+            let Some(text) = output.get(from..) else {
+                return from;
+            };
+            let (chunks, used) = split_think(text, in_think(output, from), last);
+            for (kind, piece) in chunks {
+                chunk(&self.out, &self.session, kind, piece);
+            }
+            let read = from + used;
             self.sessions
                 .update(&self.session, |s| s.unfinished = Some((goal, read)));
+            read
         };
         let cancelled = || self.cancel_asked();
         let result = stream_goal(&self.nodes, goal, offset, emit, cancelled).await;
@@ -430,10 +489,9 @@ fn prompt_text(params: &Value) -> String {
         .collect()
 }
 
-/// The (prompt, output) of every turn of session `number`, read goal by goal, and the goal
-/// still running with the length of the output read; None when the node does not know the
-/// session.
-type Loaded = (Vec<(String, String)>, Option<(u64, usize)>);
+/// The (prompt, output, goal while still running) of every turn of session `number`, read goal
+/// by goal; None when the node does not know the session.
+type Loaded = Vec<(String, String, Option<u64>)>;
 
 async fn load_turns(nodes: &Nodes, number: u64) -> Result<Option<Loaded>, CallError> {
     let path = format!("/sessions/{number}");
@@ -443,7 +501,6 @@ async fn load_turns(nodes: &Nodes, number: u64) -> Result<Option<Loaded>, CallEr
     };
     let bad = |what: &str| CallError::Final(format!("GET {path}: {what}"));
     let mut turns = Vec::new();
-    let mut unfinished = None;
     for turn in listed["turns"].as_array().ok_or_else(|| bad("no turns"))? {
         let id = turn["goal"]
             .as_u64()
@@ -453,34 +510,34 @@ async fn load_turns(nodes: &Nodes, number: u64) -> Result<Option<Loaded>, CallEr
             .await?;
         let prompt = turn["prompt"].as_str().unwrap_or_default();
         let output = goal["output"].as_str().unwrap_or_default();
-        if !matches!(
+        let ended = matches!(
             goal["status"].as_str(),
             Some("done" | "failed" | "cancelled")
-        ) {
-            unfinished = Some((id, output.len()));
-        }
-        turns.push((prompt.to_owned(), output.to_owned()));
+        );
+        turns.push((prompt.to_owned(), output.to_owned(), (!ended).then_some(id)));
     }
-    Ok(Some((turns, unfinished)))
+    Ok(Some(turns))
 }
 
 /// Replay `turns` to the client, adopt the session and answer the load. The session is set
 /// before the response so that a prompt sent on receipt finds it.
-fn adopt(out: &Out, sessions: &Sessions, id: &Value, number: u64, loaded: &Loaded) {
-    let (turns, unfinished) = loaded;
+fn adopt(out: &Out, sessions: &Sessions, id: &Value, number: u64, turns: &Loaded) {
     let session = number.to_string();
-    for (prompt, output) in turns {
+    let mut unfinished = None;
+    for (prompt, output, running) in turns {
         chunk(out, &session, "user_message_chunk", prompt);
-        if !output.is_empty() {
-            chunk(out, &session, "agent_message_chunk", output);
+        let (chunks, used) = split_think(output, false, running.is_none());
+        for (kind, piece) in chunks {
+            chunk(out, &session, kind, piece);
         }
+        unfinished = running.map(|goal| (goal, used)).or(unfinished);
     }
     let next_turn = turns.len() as u64;
     sessions.set(
         &session,
         Session {
             next_turn,
-            unfinished: *unfinished,
+            unfinished,
             ..Session::default()
         },
     );

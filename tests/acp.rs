@@ -12,8 +12,8 @@ mod proxy;
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
@@ -1018,15 +1018,15 @@ mod tests {
         assert!(acp.finish().success());
     }
 
-    /// A stand-in node on which session 1 has goal 1, which reports `status` with no output once
-    /// `open` is set. Returns its port.
-    fn fake_node(status: &'static str, open: &Arc<AtomicBool>) -> u16 {
+    /// Serve HTTP on a free port: `answer` gets each request head and returns the JSON body to
+    /// reply with, or None to leave the request unanswered.
+    fn spawn_node(answer: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let open = Arc::clone(open);
+        let answer = Arc::new(answer);
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
-                let open = Arc::clone(&open);
+                let answer = Arc::clone(&answer);
                 std::thread::spawn(move || {
                     let mut data = Vec::new();
                     let mut buf = [0u8; 4096];
@@ -1037,29 +1037,7 @@ mod tests {
                         }
                     }
                     let head = String::from_utf8_lossy(&data).into_owned();
-                    let body = if head.starts_with("POST /sessions/2/") {
-                        "{\"goal\":2}".to_owned()
-                    } else if head.starts_with("POST /sessions/") {
-                        "{\"goal\":1}".to_owned()
-                    } else if head.starts_with("GET /sessions/") {
-                        "{\"turns\":[{\"goal\":1,\"prompt\":\"p\"}]}".to_owned()
-                    } else if head.starts_with("GET /goals/2") {
-                        "{\"status\":\"done\",\"output\":\"\"}".to_owned()
-                    } else if head.starts_with("POST /sessions") {
-                        "{\"id\":1}".to_owned()
-                    } else {
-                        let deadline = Instant::now() + Duration::from_secs(10);
-                        while !open.load(Ordering::SeqCst) && Instant::now() < deadline {
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        let (output, error) = match status {
-                            "failed" => ("partial", "\"boom\""),
-                            _ => ("", "null"),
-                        };
-                        format!(
-                            "{{\"status\":\"{status}\",\"output\":\"{output}\",\"error\":{error}}}"
-                        )
-                    };
+                    let Some(body) = answer(&head) else { return };
                     let reply = format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -1069,6 +1047,191 @@ mod tests {
             }
         });
         port
+    }
+
+    /// A stand-in node on which session 1 has goal 1, which reports `status` with no output once
+    /// `open` is set. Returns its port.
+    fn fake_node(status: &'static str, open: &Arc<AtomicBool>) -> u16 {
+        let open = Arc::clone(open);
+        spawn_node(move |head| {
+            Some(if head.starts_with("POST /sessions/2/") {
+                "{\"goal\":2}".to_owned()
+            } else if head.starts_with("POST /sessions/") {
+                "{\"goal\":1}".to_owned()
+            } else if head.starts_with("GET /sessions/") {
+                "{\"turns\":[{\"goal\":1,\"prompt\":\"p\"}]}".to_owned()
+            } else if head.starts_with("GET /goals/2") {
+                "{\"status\":\"done\",\"output\":\"\"}".to_owned()
+            } else if head.starts_with("POST /sessions") {
+                "{\"id\":1}".to_owned()
+            } else {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !open.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let (output, error) = match status {
+                    "failed" => ("partial", "\"boom\""),
+                    _ => ("", "null"),
+                };
+                format!("{{\"status\":\"{status}\",\"output\":\"{output}\",\"error\":{error}}}")
+            })
+        })
+    }
+
+    /// A stand-in node with session 1 whose first turn is goal 1 (later turns are goal 2, done
+    /// and empty). Each poll of goal 1 answers the next `(status, output)` of `script`, the last
+    /// one repeating. A `hang` entry is left unanswered until `release` is set.
+    fn scripted_node(script: Vec<(&'static str, &'static str)>, release: &Arc<AtomicBool>) -> u16 {
+        scripted_node_after(script, release, 0)
+    }
+
+    /// Like `scripted_node`, for a session that already has `posted` turns: a new turn is goal 2.
+    fn scripted_node_after(
+        script: Vec<(&'static str, &'static str)>,
+        release: &Arc<AtomicBool>,
+        posted: u64,
+    ) -> u16 {
+        let (release, next, turns) = (Arc::clone(release), Mutex::new(0), Mutex::new(posted));
+        spawn_node(move |head| {
+            if head.starts_with("POST /sessions/") {
+                let mut turns = turns.lock().unwrap();
+                *turns += 1;
+                return Some(format!("{{\"goal\":{}}}", (*turns).min(2)));
+            }
+            if head.starts_with("GET /sessions/") {
+                return Some("{\"turns\":[{\"goal\":1,\"prompt\":\"p\"}]}".to_owned());
+            }
+            if head.starts_with("POST /sessions") {
+                return Some("{\"id\":1}".to_owned());
+            }
+            if !head.contains("/goals/1") {
+                return Some("{\"status\":\"done\",\"output\":\"\"}".to_owned());
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let mut next = next.lock().unwrap();
+                let (status, output) = script[(*next).min(script.len() - 1)];
+                if status != "hang" || release.load(Ordering::SeqCst) {
+                    *next += 1;
+                    if status != "hang" {
+                        let reason = "\"reason\":\"eos\"";
+                        return Some(format!(
+                            "{{\"status\":\"{status}\",\"output\":\"{output}\",{reason}}}"
+                        ));
+                    }
+                } else if Instant::now() >= deadline {
+                    return None;
+                } else {
+                    drop(next);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        })
+    }
+
+    /// The (kind, text) updates of one prompt against a scripted node, which must answer done.
+    fn kinds_of(script: Vec<(&'static str, &'static str)>) -> Vec<(String, String)> {
+        let dir = TempDir::new("acp-think");
+        let port = scripted_node(script, &Arc::new(AtomicBool::new(true)));
+        let mut acp = Acp::start_with(&dir.0, &[url(port)], SHORT);
+        let session = acp.new_session(1);
+        let (response, kinds) = acp.prompt_kinds(2, &session, &["p"]);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        kinds
+    }
+
+    fn per_kind(kinds: &[(String, String)], kind: &str) -> String {
+        let of_kind = kinds.iter().filter(|(k, _)| k == kind);
+        of_kind.map(|(_, text)| text.as_str()).collect()
+    }
+
+    #[test]
+    fn think_text_streams_as_thought_chunks_and_a_split_tag_is_held_back_until_whole() {
+        let kinds = kinds_of(vec![
+            ("running", "a<th"),
+            ("running", "a<think>x</thi"),
+            ("done", "a<think>x</think>y"),
+        ]);
+        let expected = [
+            ("agent_message_chunk", "a"),
+            ("agent_thought_chunk", "x"),
+            ("agent_message_chunk", "y"),
+        ];
+        let expected: Vec<(String, String)> = expected
+            .iter()
+            .map(|(k, t)| ((*k).to_owned(), (*t).to_owned()))
+            .collect();
+        assert_eq!(kinds, expected);
+        assert!(!kinds.iter().any(|(_, text)| text.contains(['<', '>'])));
+    }
+
+    #[test]
+    fn a_dangling_partial_tag_is_flushed_as_text_when_the_goal_is_done() {
+        let kinds = kinds_of(vec![("running", "ab<th"), ("done", "ab<th")]);
+        assert_eq!(per_kind(&kinds, "agent_message_chunk"), "ab<th");
+        assert_eq!(per_kind(&kinds, "agent_thought_chunk"), "");
+    }
+
+    #[test]
+    fn an_empty_think_block_sends_no_thought_chunk_and_no_empty_chunk() {
+        let kinds = kinds_of(vec![("done", "<think>\\n\\n</think>\\n\\nhi")]);
+        assert_eq!(per_kind(&kinds, "agent_thought_chunk"), "");
+        assert_eq!(per_kind(&kinds, "agent_message_chunk").trim(), "hi");
+        assert!(kinds.iter().all(|(_, text)| !text.is_empty()), "{kinds:?}");
+    }
+
+    #[test]
+    fn a_prompt_timed_out_inside_a_think_block_resumes_without_losing_or_repeating_text() {
+        let dir = TempDir::new("acp-think-resume");
+        let release = Arc::new(AtomicBool::new(false));
+        let script = vec![
+            ("running", "<think>x</th"),
+            ("hang", ""),
+            ("done", "<think>x</think>y"),
+        ];
+        let port = scripted_node(script, &release);
+        let mut acp = Acp::start_with(&dir.0, &[url(port)], SHORT);
+        let session = acp.new_session(1);
+        let (response, mut kinds) = acp.prompt_kinds(2, &session, &["p"]);
+        assert_cluster_unavailable(&response);
+        release.store(true, Ordering::SeqCst);
+        let (response, more) = acp.prompt_kinds(3, &session, &["q"]);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        kinds.extend(more);
+        assert_eq!(per_kind(&kinds, "agent_thought_chunk"), "x");
+        assert_eq!(per_kind(&kinds, "agent_message_chunk"), "y");
+    }
+
+    #[test]
+    fn a_loaded_done_goal_replays_thought_and_message_kinds() {
+        let dir = TempDir::new("acp-load-think");
+        let script = vec![("done", "<think>x</think>y")];
+        let port = scripted_node_after(script, &Arc::new(AtomicBool::new(true)), 1);
+        let mut acp = Acp::start_with(&dir.0, &[url(port)], SHORT);
+        let (response, updates) = loaded(&mut acp, 1, "1");
+        assert_eq!(response["result"], Value::Null, "{response}");
+        let expected = [
+            pair("user_message_chunk", "p"),
+            pair("agent_thought_chunk", "x"),
+            pair("agent_message_chunk", "y"),
+        ];
+        assert_eq!(updates, expected);
+    }
+
+    #[test]
+    fn a_loaded_running_goal_inside_a_think_block_is_finished_without_repeats() {
+        let dir = TempDir::new("acp-load-think-running");
+        let script = vec![("running", "<think>x</th"), ("done", "<think>x</think>y")];
+        let port = scripted_node_after(script, &Arc::new(AtomicBool::new(true)), 1);
+        let mut acp = Acp::start_with(&dir.0, &[url(port)], SHORT);
+        let (response, mut kinds) = loaded(&mut acp, 1, "1");
+        assert_eq!(response["result"], Value::Null, "{response}");
+        assert_eq!(per_kind(&kinds, "agent_message_chunk"), "");
+        let (response, more) = acp.prompt_kinds(2, "1", &["q"]);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        kinds.extend(more);
+        assert_eq!(per_kind(&kinds, "agent_thought_chunk"), "x");
+        assert_eq!(per_kind(&kinds, "agent_message_chunk"), "y");
     }
 
     /// Read until the responses to `ids` have all arrived. Returns the responses by id
