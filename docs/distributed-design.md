@@ -78,9 +78,17 @@ at least 3 nodes at once.
 3. Raft on 3 nodes with several workers, then 5. **Done:** `CLUSTER.NODE_ID` and `CLUSTER.PEERS` start a cluster; `tests/cluster.rs` covers 3 and 5 nodes, and `scripts/ci-smoke.sh` kills the leader of a 3-node release cluster.
 4. Reed-Solomon sealing and repair. **Done:** `src/seal.rs`, `src/raft/seal.rs`, `src/raft/assign.rs` (shrink to the 3 live voters and RS(2,1) re-encode, after the configurable CLUSTER.SHRINK_AFTER); `tests/sealing.rs` covers acceptance 1-7, and `scripts/ci-smoke.sh` seals a goal on a 5-node release cluster and reads it after two kills.
 5. T3 Code provider adapter. **Done:** `src/acp.rs`, `src/sessions.rs`, `tests/acp.rs`, the `acp_` tests in `tests/cluster.rs`, and the ACP section of `scripts/ci-smoke.sh`. T3 Code is the control surface: `rs3` owns agent state and failover.
+6. Real model. **Done:** `src/model.rs`, `src/goals.rs`, `src/lease.rs` (Decline), `src/acp.rs`, `tests/model.rs`, `tests/restore.rs`, `tests/cluster.rs` (module `cluster_model`), `tests/acp_model.rs` and the real-model section of `scripts/ci-smoke.sh`.
 
-JavaScript engine replacement (V8, Boa, Wasmtime) and real model inference are separate later decisions. Keep both
-behind small interfaces.
+JavaScript engine replacement (V8, Boa, Wasmtime) is a separate later decision. Keep it behind a small interface.
+
+## Model step
+
+- The live generation is rebuilt from the prompt tokens plus the committed tokens, so any node can resume it.
+- The prompt is prefilled once and each later token is fed alone (D061), so a restore takes the same numerical path.
+- Position `i` is sampled from `blake3(seed‖i)` with a fixed thread pool (D062), so the same seed gives the same text.
+- A node declines a goal on an engine or hash mismatch (D063); it does not claim it.
+- Sessions use ChatML history with think text stripped.
 
 ## Coding-loop prototype
 

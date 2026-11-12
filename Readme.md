@@ -64,10 +64,13 @@ Alternatively, copy `env.example` (`SERVER.HOST=localhost`,
 
 ## Configuration
 
-rs3 reads five settings: `SERVER.HOST`, `SERVER.PORT`, `STORAGE.PATH`, `SCHEDULER.WORKERS`
-(default 2, how many goals run at once) and `MODEL.TOKENS_PER_SECOND` (default 1000, the speed
-of the built-in deterministic model that generation goals use). Both new settings must be
-positive integers. The names are
+rs3 reads these settings: `SERVER.HOST`, `SERVER.PORT`, `STORAGE.PATH`, `SCHEDULER.WORKERS`
+(default 2, how many goals run at once), `MODEL.TOKENS_PER_SECOND` (default 1000, the speed
+of the built-in deterministic fake model), `MODEL.PATH`, `MODEL.TOKENIZER` and `MODEL.THREADS`
+(default 4). `MODEL.PATH` (a GGUF file) and `MODEL.TOKENIZER` (a `tokenizer.json`) must be set
+together, or startup fails with `MODEL.PATH and MODEL.TOKENIZER must be set together`; without them the
+fake model stays the default. The numeric settings must be positive integers. See Real model below.
+The names are
 case-insensitive (`SERVER.HOST`, `server.host` and `Server.Port` all work), but
 the dot is required: underscore names such as `SERVER_HOST` and `SERVER_PORT`
 are not read. Every other variable is ignored.
@@ -254,6 +257,34 @@ output as an uninterrupted run, and each write a script goal makes to the store 
 A script must be repeatable from its log: host clocks such as `Intl.DateTimeFormat` with no date are not,
 and a script that uses them fails visibly with `replay_diverged` instead of giving a different result.
 
+## Real model
+
+Set `MODEL.PATH` and `MODEL.TOKENIZER` and generation goals run Qwen3-0.6B (Q8_0) instead of the fake model.
+The smoke test pins these files:
+
+- `Qwen3-0.6B-Q8_0.gguf`: `https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf`, sha256 `9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031`
+- `tokenizer.json`: `https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer.json`, sha256 `aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4`
+
+```
+mkdir -p models && cd models
+curl -fLO https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf
+curl -fLO https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer.json
+sha256sum Qwen3-0.6B-Q8_0.gguf tokenizer.json   # compare with the values above
+cd ..
+env SERVER.HOST=127.0.0.1 SERVER.PORT=5000 STORAGE.PATH=data.redb \
+  MODEL.PATH=models/Qwen3-0.6B-Q8_0.gguf MODEL.TOKENIZER=models/tokenizer.json MODEL.THREADS=4 \
+  cargo run --release --locked
+curl -X POST localhost:5000/goals -d '{"priority":0,"budget":64,"seed":1,"prompt":"Say hello. /no_think"}'
+```
+
+`GET /goals/{id}` also returns `reason` once the goal is done: `eos` when the model ended the text, `budget`
+when it used all of `budget` tokens. The context is capped at 4096 tokens (history, prompt and budget together);
+a turn over the cap is refused. For the same model file, seed and host, the output is the same after a crash,
+a failover or a rerun. A node whose model file differs from the one a goal was started with declines it; if only
+that node is left, the goal stays queued. `scripts/ci-smoke.sh` runs a real-model goal on a 3-node cluster, kills
+the leader, and compares with a one-node run. It downloads into `RS3_MODEL_DIR` (default `~/.cache/rs3/models`),
+or reuses the files there.
+
 ## T3 Code (ACP)
 
 `rs3 acp <url> [<url> ...]` is an Agent Client Protocol adapter that speaks JSON-RPC over stdin and stdout.
@@ -267,6 +298,11 @@ The adapter holds no state of its own. Sessions and turns live in the cluster, s
 restart: `session/load` replays them. Each prompt becomes a turn that runs as a goal, and a node failure
 mid-turn does not repeat or lose work. When no node answers, the adapter waits up to
 `ACP_UNAVAILABLE_TIMEOUT` seconds (default 300) and then answers `-32001`; the goal is kept.
+
+With the real model, text inside `<think>...</think>` goes out as `agent_thought_chunk` and the rest as
+`agent_message_chunk`. Add `/no_think` to a prompt to make Qwen3 skip thinking. A turn that ends with the model's
+end token stops with `end_turn`; one that uses its whole budget stops with `max_tokens`. Later turns see earlier
+ones as ChatML history with the think text removed.
 
 A prompt that starts with `/run <key>` runs the script stored under `<key>` as one turn, with each write applied
 once. The adapter advertises `/run` as a command.
@@ -416,6 +452,7 @@ scripts after upgrading) is in [docs/js-ops.md](docs/js-ops.md).
 
 Compared with the 2021 version (git tag `msc`):
 
+- **Fake budget turns answer `max_tokens`.** An ACP turn that uses its whole budget used to answer `end_turn`.
 - **`/list` is sorted and escaped.** Entries are sorted by key in byte order,
   and keys and values are JSON-escaped; the `" : "` spacing is kept. The `,]`
   quirk is gone (2021 listed entries in hash order, unescaped, and stripped

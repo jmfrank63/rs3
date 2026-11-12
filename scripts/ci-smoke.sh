@@ -357,12 +357,15 @@ print(*[s.getsockname()[1] for s in ss])' "$1"))
 }
 cnodes 3
 
-# cstart I: start cluster node I (0-based) in the background; its pid goes to CPIDS[I].
+# cstart I [NAME=VALUE...]: start cluster node I (0-based) in the background, with extra env; its pid
+# goes to CPIDS[I].
 cstart() {
-  env -i PATH="$PATH" SERVER.HOST=127.0.0.1 SERVER.PORT="${CPORTS[$1]}" CLUSTER.NODE_ID=$(($1 + 1)) \
-    CLUSTER.PEERS="$PEERS" STORAGE.PATH="$CDIR/node$(($1 + 1)).db" MODEL.TOKENS_PER_SECOND="$CRATE" \
-    "$BIN" >>"$LOG" 2>&1 &
-  CPIDS[$1]=$!
+  local i=$1
+  shift
+  env -i PATH="$PATH" SERVER.HOST=127.0.0.1 SERVER.PORT="${CPORTS[$i]}" CLUSTER.NODE_ID=$((i + 1)) \
+    CLUSTER.PEERS="$PEERS" STORAGE.PATH="$CDIR/node$((i + 1)).db" MODEL.TOKENS_PER_SECOND="$CRATE" \
+    "$@" "$BIN" >>"$LOG" 2>&1 &
+  CPIDS[$i]=$!
 }
 
 # creq I METHOD PATH [BODY]: one request to cluster node I; sets CODE and BODY.
@@ -402,9 +405,10 @@ cleader() {
   fail "no cluster leader within 60 s"
 }
 
-# cwait_done I ID: poll goal ID through node I to done under a 60 s deadline. Prints its JSON.
+# cwait_done I ID [SECONDS]: poll goal ID through node I to done under a deadline (default 60 s).
+# Prints its JSON.
 cwait_done() {
-  local dl=$((SECONDS + 60)) st
+  local dl=$((SECONDS + ${3:-60})) st
   while (( SECONDS < dl )); do
     cwhen "$1" GET "/goals/$2"
     [[ "$CODE" == 200 ]] || fail "GET /goals/$2 -> ${CODE} ${BODY}"
@@ -413,7 +417,7 @@ cwait_done() {
     if [[ "$st" == "done" ]]; then printf '%s' "$BODY"; return 0; fi
     sleep 0.2
   done
-  fail "cluster goal $2 not done after 60s: ${BODY}"
+  fail "cluster goal $2 not done after ${3:-60}s: ${BODY}"
 }
 
 for i in "${!CPORTS[@]}"; do cstart "$i"; done
@@ -565,5 +569,83 @@ for i in "${!CPORTS[@]}"; do
   [[ "$(jf "$BODY" output)" == "$REF11" ]] || fail "node $((i + 1)) sealed output differs from the reference: ${BODY:0:200}"
 done
 echo "ci-smoke: ok   after kill -9 of nodes $((LEADER + 1)) and $((OTHER + 1)) every survivor serves the sealed output equal to the reference"
+
+# ---- real model: 3-node leader kill equals a single-node run ----
+# fetch_model NAME URL SHA: download into the model directory unless a file with that sha256 is there.
+# Keep the pinned URLs and hashes below in sync with tests/common/model.rs.
+MODEL_DIR="${RS3_MODEL_DIR:-$HOME/.cache/rs3/models}"
+fetch_model() {
+  local f="$MODEL_DIR/$1" got
+  mkdir -p "$MODEL_DIR"
+  got=$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1 || true)
+  if [[ "$got" != "$3" ]]; then
+    curl -fL -o "$f.part" "$2" || fail "$1: download from $2 failed"
+    got=$(sha256sum "$f.part" | cut -d' ' -f1)
+    [[ "$got" == "$3" ]] || fail "$1: sha256 expected $3, got $got"
+    mv "$f.part" "$f"
+  fi
+  echo "ci-smoke: ok   model file $1 present, sha256 $3"
+}
+fetch_model Qwen3-0.6B-Q8_0.gguf \
+  https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf \
+  9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031
+fetch_model tokenizer.json \
+  https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer.json \
+  aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4
+MGGUF="$(cd "$MODEL_DIR" && pwd)/Qwen3-0.6B-Q8_0.gguf"
+MTOK="$(cd "$MODEL_DIR" && pwd)/tokenizer.json"
+MENV=(MODEL.PATH="$MGGUF" MODEL.TOKENIZER="$MTOK" MODEL.THREADS=2)
+MGOAL='{"priority":0,"budget":40,"seed":7,"prompt":"What is the capital of France? /no_think"}'
+MSTART=$SECONDS
+
+# Reference: one node, uninterrupted.
+start_server STORAGE.PATH="$DIR/model-ref.db" "${MENV[@]}"
+req POST /goals "$MGOAL"
+[[ "$CODE" == 201 ]] || fail "real-model reference POST /goals -> ${CODE} ${BODY}"
+MID=$(jf "$BODY" id)
+dl=$((SECONDS + 240))
+while :; do
+  g=$(goal "$MID"); st=$(jf "$g" status)
+  [[ "$st" != failed ]] || fail "real-model reference goal failed: ${g}"
+  [[ "$st" != done ]] || break
+  (( SECONDS < dl )) || fail "real-model reference goal not done after 240s: ${g}"
+  sleep 0.5
+done
+MREF=$(jf "$g" output)
+[[ -n "$MREF" ]] || fail "real-model reference output is empty: ${g}"
+stop_server
+echo "ci-smoke: ok   real-model reference run on one node: ${#MREF} chars"
+
+# Cluster: kill -9 the leader while the goal has output but is not done.
+CDIR="$DIR/model"
+mkdir -p "$CDIR"
+cnodes 3
+for i in "${!CPORTS[@]}"; do cstart "$i" "${MENV[@]}"; done
+LEADER=$(cleader)
+cwhen 0 POST /goals "$MGOAL"
+[[ "$CODE" == 201 ]] || fail "real-model cluster POST /goals -> ${CODE} ${BODY}"
+MCID=$(jf "$BODY" id)
+dl=$((SECONDS + 240))
+while :; do
+  cwhen 0 GET "/goals/$MCID"
+  [[ "$(jf "$BODY" status)" != failed ]] || fail "real-model cluster goal failed: ${BODY}"
+  [[ "$(jf "$BODY" status)" != done ]] || fail "real-model goal finished before the leader kill: ${BODY}"
+  [[ -z "$(jf "$BODY" output)" ]] || break
+  (( SECONDS < dl )) || fail "real-model cluster goal produced no output after 240s: ${BODY}"
+  sleep 0.1
+done
+kill -9 "${CPIDS[$LEADER]}"
+wait "${CPIDS[$LEADER]}" 2>/dev/null || true
+CPIDS[$LEADER]=""
+LIVE=$(( (LEADER + 1) % 3 ))
+NEWLEADER=$(cleader "$LEADER")
+echo "ci-smoke: ok   real-model goal running; killed leader node $((LEADER + 1)) (kill -9); new leader is node $((NEWLEADER + 1))"
+MOUT=$(jf "$(cwait_done "$LIVE" "$MCID" 240)" output)
+[[ "$MOUT" == "$MREF" ]] || fail "real-model cluster output differs from the single-node reference: cluster ${MOUT} / reference ${MREF}"
+echo "ci-smoke: ok   real-model cluster output equals the single-node reference byte for byte ($((SECONDS - MSTART)) s for the model section)"
+for i in "${!CPIDS[@]}"; do
+  [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
+done
+CPIDS=()
 
 echo "ci-smoke: OK (${BIN}, port ${PORT})"
