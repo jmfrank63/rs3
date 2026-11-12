@@ -304,9 +304,7 @@ async fn stream_goal(
         let goal = nodes.call(method, &path, None).await?;
         let status = goal["status"].as_str();
         let output = goal["output"].as_str().unwrap_or_default();
-        if output.len() > offset {
-            offset = emit(output, offset, status == Some("done"));
-        }
+        offset = emit(output, offset, status == Some("done"));
         match status {
             Some("done" | "failed" | "cancelled") if cancelled() => {
                 return Err(CallError::Cancelled);
