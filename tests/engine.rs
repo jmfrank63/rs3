@@ -19,7 +19,17 @@ fn generate(
     committed: &[u32],
     upto: usize,
 ) -> Result<Vec<u32>, String> {
-    let prompt = candle.prompt_tokens(PROMPT)?;
+    generate_from(candle, PROMPT, seed, committed, upto)
+}
+
+fn generate_from(
+    candle: &Candle,
+    prompt: &str,
+    seed: u64,
+    committed: &[u32],
+    upto: usize,
+) -> Result<Vec<u32>, String> {
+    let prompt = candle.prompt_tokens(prompt)?;
     let mut g = Generation::new(candle, seed, &prompt, committed)?;
     let mut tokens = committed.to_vec();
     while tokens.len() < upto && !tokens.last().is_some_and(|t| candle.is_eos(*t)) {
@@ -61,8 +71,21 @@ fn restore_continues_exactly_where_it_stopped() {
 #[test]
 fn running_text_never_ends_inside_a_character() {
     let c = load().unwrap();
-    let t = generate(&c, 5, &[], 3).unwrap();
-    assert!(!c.render(&t, false).contains('\u{fffd}'));
+    let prompt = "Write the Japanese word for cat, then three cat emoji. /no_think";
+    let t = generate_from(&c, prompt, 3, &[], 48).unwrap();
+    let whole = c.render(&t, true);
+    let mut cuts = 0;
+    for k in 1..=t.len() {
+        let running = c.render(&t[..k], false);
+        assert!(!running.contains('\u{fffd}'), "cut at {k}: {running:?}");
+        assert!(whole.starts_with(&running), "{running:?} vs {whole:?}");
+        cuts += usize::from(c.render(&t[..k], true).ends_with('\u{fffd}'));
+    }
+    // The answer must really put a character across a token boundary, or the test proves nothing.
+    assert!(
+        cuts > 0,
+        "no token boundary falls inside a character: {whole:?}"
+    );
 }
 
 #[test]
