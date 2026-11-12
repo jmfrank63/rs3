@@ -525,6 +525,12 @@ mod tests {
                 start: Record::Cancelled,
             },
             Command::CancelGoal { id: 2 },
+            Command::StartTurn {
+                session: 1,
+                turn: 0,
+                prompt: "hi".into(),
+                start: Some(started()),
+            },
             seal(3, &[1, 2, 3]),
             confirm(3, 2),
         ] {
@@ -543,6 +549,20 @@ mod tests {
             let json = serde_json::to_string(&resp).unwrap();
             assert_eq!(serde_json::from_str::<Response>(&json).unwrap(), resp);
         }
+    }
+
+    #[test]
+    fn a_start_turn_without_a_start_still_decodes() {
+        let old = r#"{"StartTurn":{"session":1,"turn":0,"prompt":"hi"}}"#;
+        assert_eq!(
+            serde_json::from_str::<Command>(old).unwrap(),
+            Command::StartTurn {
+                session: 1,
+                turn: 0,
+                prompt: "hi".into(),
+                start: None,
+            }
+        );
     }
 
     fn started() -> Record {

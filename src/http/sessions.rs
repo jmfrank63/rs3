@@ -66,6 +66,7 @@ async fn start_turn(
     body: web::Bytes,
 ) -> Result<HttpResponse, ApiError> {
     let goals = goals(&state)?;
+    read_barrier(&state).await?;
     let raw = path.into_inner();
     let id = session_id(&raw)?;
     let new: NewTurn = parse_body(&body, "turn")?;
