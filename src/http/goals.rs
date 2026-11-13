@@ -17,6 +17,7 @@ use crate::store::StoreError;
 /// Register the goal routes. The shared `AppState` is registered by `http::configure`.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(create)
+        .service(generated)
         .service(get_goal)
         .service(cancel_goal)
         .service(storage);
@@ -83,11 +84,20 @@ async fn create(state: web::Data<AppState>, body: web::Bytes) -> Result<HttpResp
                 seed: g.seed,
                 prompt: g.prompt,
             };
-            web::block(move || goals.create(spec)).await
+            web::block(move || {
+                let start = goals
+                    .start_record(&spec)
+                    .map_err(StoreError::InvalidInput)?;
+                Ok::<_, ApiError>(goals.create_from(spec.priority, budget, &start)?)
+            })
+            .await
         }
         NewGoal::Script(g) => {
             let source = state.store.get(&g.script)?;
-            web::block(move || goals.create_script(g.priority, g.script, source)).await
+            web::block(move || {
+                Ok::<_, ApiError>(goals.create_script(g.priority, g.script, source)?)
+            })
+            .await
         }
     }
     .map_err(blocking_failed)??;
@@ -116,10 +126,20 @@ async fn goal_status(
         "output": status.output,
         "error": status.error,
     });
+    if let Some(reason) = status.reason {
+        body["reason"] = reason.into();
+    }
     if state.cluster.is_some() {
         body["node"] = status.node.into();
     }
     Ok(HttpResponse::Ok().json(body))
+}
+
+/// `GET /goals/generated` answers 200 `{"generated":n}`: the tokens this node sampled since it started.
+#[get("/goals/generated")]
+async fn generated(state: web::Data<AppState>) -> Result<HttpResponse, ApiError> {
+    let n = goals(&state)?.generated_tokens();
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "generated": n })))
 }
 
 /// `GET /goals/{id}` answers 200 `{status, output, error}` (plus `node`, the owner or null, in a
@@ -301,6 +321,27 @@ mod tests {
         let goal = wait_for(&f.state, id, "done").await;
         assert_eq!(tokens(&goal), 21);
         assert_eq!(goal["error"], Value::Null);
+    }
+
+    #[actix_web::test]
+    async fn generated_reports_the_tokens_this_node_sampled() {
+        let f = fixture(1_000_000, Some(2));
+        let id = create(&f.state, &goal_body(5)).await;
+        wait_for(&f.state, id, "done").await;
+        let resp = call(&f.state, atest::TestRequest::get().uri("/goals/generated")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = atest::read_body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"generated": 5}));
+    }
+
+    #[actix_web::test]
+    async fn generated_answers_503_without_a_database() {
+        let resp = call(
+            &test_state(),
+            atest::TestRequest::get().uri("/goals/generated"),
+        )
+        .await;
+        assert_json_error(resp, StatusCode::SERVICE_UNAVAILABLE, "goals_unavailable").await;
     }
 
     #[actix_web::test]

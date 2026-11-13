@@ -6,8 +6,6 @@ use std::time::{Duration, Instant};
 
 use crate::common::{Server, TempDir};
 
-const WAIT: Duration = Duration::from_secs(60);
-
 /// Clusters run one at a time: several 5-node clusters at once starve each other.
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -20,6 +18,8 @@ pub struct Cluster {
     /// The directory of every node's database and fragment files.
     pub dir: TempDir,
     env: Vec<(String, String)>,
+    /// Extra environment of single nodes (by index), appended after `env` so it overrides.
+    node_env: Vec<(usize, Vec<(String, String)>)>,
     /// Nodes paused with SIGSTOP; `leader` skips them.
     stopped: Vec<usize>,
     /// Held for the cluster's lifetime; dropped last, after the nodes stop.
@@ -33,6 +33,16 @@ impl Cluster {
 
     /// Like `start`, with extra environment variables for every node.
     pub fn start_with(name: &str, n: usize, env: &[(&str, &str)]) -> Self {
+        Self::start_with_nodes(name, n, env, vec![])
+    }
+
+    /// Like `start_with`, and some nodes (by index) get environment variables of their own.
+    pub fn start_with_nodes(
+        name: &str,
+        n: usize,
+        env: &[(&str, &str)],
+        node_env: Vec<(usize, Vec<(String, String)>)>,
+    ) -> Self {
         let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = TempDir::new(name);
         let listeners: Vec<TcpListener> = (0..n)
@@ -54,6 +64,7 @@ impl Cluster {
             ports,
             peers,
             dir,
+            node_env,
             stopped: Vec::new(),
             _serial: serial,
             env: env
@@ -80,6 +91,9 @@ impl Cluster {
             ("CLUSTER.SHRINK_AFTER", "5"),
         ];
         env.extend(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        for (_, own) in self.node_env.iter().filter(|(n, _)| *n == i) {
+            env.extend(own.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        }
         Server::start_on(self.ports[i], &self.dir.0, Some(&db), &env)
     }
 
@@ -222,28 +236,4 @@ pub fn wait_until<T>(what: &str, deadline: Duration, mut f: impl FnMut() -> Opti
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-}
-
-pub fn goal_body(seed: u64) -> String {
-    format!(r#"{{"priority":0,"budget":900,"seed":{seed},"prompt":"p"}}"#)
-}
-
-pub fn output(goal: &serde_json::Value) -> String {
-    goal["output"].as_str().unwrap().to_owned()
-}
-
-/// The output of a goal run to the end on a single-node server.
-pub fn single_node_output(seed: u64) -> String {
-    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = TempDir::new(&format!("cluster-reference-{call}"));
-    let server = Server::start(&dir.0, Some(&dir.0.join("rs3.db")), &[]);
-    let created: serde_json::Value =
-        serde_json::from_str(&server.request("POST", "/goals", &goal_body(seed))).unwrap();
-    let path = format!("/goals/{}", created["id"]);
-    wait_until("the reference goal", WAIT, || {
-        let goal: serde_json::Value =
-            serde_json::from_str(&server.request("GET", &path, "")).unwrap();
-        (goal["status"] == "done").then(|| output(&goal))
-    })
 }

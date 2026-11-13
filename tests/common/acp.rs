@@ -192,6 +192,17 @@ impl Acp {
 
     /// Run a prompt of text blocks to the end: the response and the chunk texts.
     pub fn prompt(&mut self, id: u64, session: &str, texts: &[&str]) -> (Value, Vec<String>) {
+        let (response, kinds) = self.prompt_kinds(id, session, texts);
+        (response, kinds.into_iter().map(|(_, text)| text).collect())
+    }
+
+    /// Like `prompt`, but each chunk as (sessionUpdate kind, text).
+    pub fn prompt_kinds(
+        &mut self,
+        id: u64,
+        session: &str,
+        texts: &[&str],
+    ) -> (Value, Vec<(String, String)>) {
         let blocks: Vec<Value> = texts
             .iter()
             .map(|t| json!({"type": "text", "text": t}))
@@ -201,16 +212,15 @@ impl Acp {
             "session/prompt",
             json!({"sessionId": session, "prompt": blocks}),
         );
-        let chunks = updates
+        let kinds = updates
             .iter()
             .map(|u| {
-                u["params"]["update"]["content"]["text"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned()
+                let update = &u["params"]["update"];
+                let kind = update["sessionUpdate"].as_str().unwrap().to_owned();
+                (kind, update["content"]["text"].as_str().unwrap().to_owned())
             })
             .collect();
-        (response, chunks)
+        (response, kinds)
     }
 
     /// Close stdin and wait for the child to exit.

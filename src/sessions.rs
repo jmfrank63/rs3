@@ -3,8 +3,9 @@
 //!
 //! A session is a row holding the JSON list of its turns. Starting turn `n` is decided in one
 //! write transaction, so a resent turn finds its goal and never creates a second one. A turn's
-//! seed comes from its session and number only, and its goal sees only its own prompt, so a turn
-//! produces the same output wherever and however often it is started.
+//! seed comes from its session and number only, and a generation goal's prompt tokens are fixed in the start record, built from the earlier turns'
+//! answers when the turn is proposed, so a turn is replayed the same wherever and however often it
+//! is started.
 use redb::{ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +26,7 @@ pub struct Turn {
 }
 
 /// What starting a turn did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome {
     /// A goal was created for the turn.
     New(u64),
@@ -37,6 +38,8 @@ pub enum TurnOutcome {
     NotFound,
     /// A `/run` prompt names a key that holds no script; nothing was written.
     UnknownScript,
+    /// The turn's prompt and budget do not fit the model's context; nothing was written.
+    TooLong(String),
 }
 
 fn decode(bytes: &[u8]) -> Result<Vec<Turn>, JournalError> {
@@ -48,7 +51,7 @@ fn encode(turns: &[Turn]) -> Result<Vec<u8>, JournalError> {
 }
 
 /// The seed of turn `turn` of `session`.
-fn seed(session: u64, turn: u64) -> u64 {
+pub(crate) fn seed(session: u64, turn: u64) -> u64 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&session.to_le_bytes());
     hasher.update(&turn.to_le_bytes());
@@ -96,20 +99,28 @@ pub(crate) fn read_in(
     row.map(|bytes| decode(bytes.value())).transpose()
 }
 
-/// The first record of a turn's goal: the stored script for `/run <key>`, else generation of
-/// `prompt`. `None` when the key holds no script.
+/// The script key of a `/run <key>` prompt; `None` for any other prompt.
+pub(crate) fn script_key(prompt: &str) -> Option<&str> {
+    prompt
+        .strip_prefix("/run")
+        .filter(|rest| rest.is_empty() || rest.starts_with(' '))
+        .map(str::trim)
+}
+
+/// The first record of a turn's goal: `start` if given, else the stored script for `/run <key>`,
+/// else generation of `prompt`. `None` when the key holds no script.
 fn start_record(
     txn: &redb::WriteTransaction,
+    start: Option<Record>,
     seed: u64,
     prompt: &str,
 ) -> Result<Option<Record>, JournalError> {
-    let Some(rest) = prompt
-        .strip_prefix("/run")
-        .filter(|rest| rest.is_empty() || rest.starts_with(' '))
-    else {
+    if start.is_some() {
+        return Ok(start);
+    }
+    let Some(name) = script_key(prompt) else {
         return Ok(Some(goals::inference_start(seed, prompt)));
     };
-    let name = rest.trim();
     let source = Store::get_in(txn, name).map_err(|e| JournalError::Storage(e.to_string()))?;
     Ok(source.map(|source| Record::ScriptStart {
         name: name.to_owned(),
@@ -117,13 +128,15 @@ fn start_record(
     }))
 }
 
-/// Start turn `turn` of `session` with `prompt` in `txn`. Only `New` wrote anything.
+/// Start turn `turn` of `session` with `prompt` in `txn`, its goal beginning with `start` when
+/// given. Only `New` wrote anything.
 pub(crate) fn start_turn_in(
     txn: &redb::WriteTransaction,
     journal: &Journal,
     session: u64,
     turn: u64,
     prompt: String,
+    start: Option<Record>,
 ) -> Result<TurnOutcome, JournalError> {
     let mut table = txn.open_table(SESSIONS).map_err(storage)?;
     let row = table.get(session).map_err(storage)?;
@@ -142,7 +155,7 @@ pub(crate) fn start_turn_in(
     if turn > len {
         return Ok(TurnOutcome::Conflict);
     }
-    let Some(start) = start_record(txn, seed(session, turn), &prompt)? else {
+    let Some(start) = start_record(txn, start, seed(session, turn), &prompt)? else {
         return Ok(TurnOutcome::UnknownScript);
     };
     let goal = goals::create_in(txn, journal, 0, TURN_BUDGET, &start)?;

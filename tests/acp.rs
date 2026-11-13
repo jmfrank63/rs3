@@ -12,8 +12,8 @@ mod proxy;
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
@@ -81,7 +81,7 @@ mod tests {
             assert_eq!(update["content"]["type"], "text");
             chunks.push(update["content"]["text"].as_str().unwrap().to_owned());
         };
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert!(chunks.len() >= 2, "{chunks:?}");
         assert!(chunks.iter().all(|c| !c.is_empty()));
         let done = goal(&server, 1);
@@ -99,7 +99,7 @@ mod tests {
         let second = acp.new_session(2);
         assert_ne!(first, second);
         let (response, chunks) = acp.prompt(3, &second, &["x"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert!(!chunks.is_empty());
     }
 
@@ -113,7 +113,7 @@ mod tests {
             "session/prompt",
             json!({"sessionId": session, "prompt": blocks}),
         );
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert!(updates.len() >= 2);
         goal(&server, 1)["output"].as_str().unwrap().to_owned()
     }
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(updates, expected);
         assert_eq!(server.request_status("GET", "/goals/3", "").0, 404);
         let (response, chunks) = acp.prompt(2, &session, &["p3"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert_eq!(chunks.concat(), out(3));
         let turns = server.request("GET", &format!("/sessions/{session}"), "");
         let turns: Value = serde_json::from_str(&turns).unwrap();
@@ -267,7 +267,7 @@ mod tests {
         assert!(replayed.starts_with(&head), "{replayed}");
         assert!(acp.recv_within(Duration::from_millis(300)).is_none());
         let (response, chunks) = acp.prompt(2, &session, &["next"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let expected = format!("{}{}", &output(1)[replayed.len()..], output(2));
         assert_eq!(chunks.concat(), expected);
         assert_eq!(session_of(&server, 1)["turns"].as_array().unwrap().len(), 2);
@@ -289,7 +289,7 @@ mod tests {
         let (response, _) = loaded(&mut acp, 1, &session);
         assert_eq!(response["result"], Value::Null, "{response}");
         let (response, chunks) = acp.prompt(2, &session, &["next"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert_eq!(
             chunks.concat(),
             goal(&server, 2)["output"].as_str().unwrap()
@@ -322,7 +322,7 @@ mod tests {
         let (refused, mut updates) = acp.read_until(3);
         assert_eq!(refused["error"]["code"], -32002, "{refused}");
         let (response, rest) = acp.read_until(2);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         updates.extend(rest);
         let mut all = vec![first];
         all.extend(updates);
@@ -409,11 +409,11 @@ mod tests {
         response["error"]["code"].as_i64().unwrap()
     }
 
-    /// A normal turn on a fresh session ends in end_turn with the goal output as chunks.
+    /// A normal turn on a fresh session ends in max_tokens with the goal output as chunks.
     fn assert_normal_turn(acp: &mut Acp, server: &Server, id: u64, goal_id: u64) {
         let session = acp.new_session(id);
         let (response, chunks) = acp.prompt(id + 1, &session, &["again"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert_eq!(
             chunks.concat(),
             goal(server, goal_id)["output"].as_str().unwrap()
@@ -566,7 +566,7 @@ mod tests {
             }
             chunks.push(message["params"]["update"]["content"]["text"].clone());
         };
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let text: String = chunks.iter().map(|c| c.as_str().unwrap()).collect();
         assert_eq!(text, goal(&server, 1)["output"].as_str().unwrap());
     }
@@ -632,7 +632,7 @@ mod tests {
         let session = acp.new_session(1);
         for id in [2, 3] {
             let (response, _) = acp.prompt(id, &session, &["same"]);
-            assert_eq!(response["result"]["stopReason"], "end_turn");
+            assert_eq!(response["result"]["stopReason"], "max_tokens");
         }
         let turns = session_of(&server, 1)["turns"].clone();
         assert_eq!(
@@ -664,7 +664,7 @@ mod tests {
             "{refused}"
         );
         let (response, rest) = acp.read_until(2);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         updates.extend(rest);
         let mut chunks = vec![first];
         chunks.extend(updates);
@@ -685,7 +685,7 @@ mod tests {
         let session = acp.new_session(1);
         for id in 2..6 {
             let (response, _) = acp.prompt(id, &session, &["x"]);
-            assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+            assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         }
     }
 
@@ -710,7 +710,7 @@ mod tests {
         let mut acp = Acp::start(&dir.0, &urls);
         let session = acp.new_session(1);
         let (response, chunks) = acp.prompt(2, &session, &["x"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert_eq!(
             chunks.concat(),
             goal(&server, 1)["output"].as_str().unwrap()
@@ -789,7 +789,7 @@ mod tests {
         let session = acp.new_session(1);
         proxy.drop_next(1);
         let (response, _) = acp.prompt(2, &session, &["x"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         assert_eq!(proxy.dropped(), 1);
         let (status, _) = server.request_status("GET", "/goals/2", "");
         assert_eq!(status, 404);
@@ -808,7 +808,7 @@ mod tests {
         assert!(proxy.dropped() >= 1);
         proxy.drop_next(0);
         let (response, _) = acp.prompt(3, &session, &["x"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(response["result"]["stopReason"], "max_tokens");
         let turns = session_of(&server, 1)["turns"].clone();
         assert_eq!(turns, json!([{"prompt": "x", "goal": 1}]));
     }
@@ -855,7 +855,7 @@ mod tests {
         assert!(chunks.is_empty(), "{chunks:?}");
         let server = Server::start_on(port, &dir.0, Some(&db), &rate);
         let (response, chunks) = acp.prompt(4, &session, &["y"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         received.extend(chunks);
         let (first, second) = (goal(&server, 1), goal(&server, 2));
         let expected = format!(
@@ -894,7 +894,7 @@ mod tests {
         let (mut acp, session, server) = unfinished_turn_on_a_restarted_node(&dir, "20");
         server.request("DELETE", "/goals/1", "");
         let (response, chunks) = acp.prompt(3, &session, &["y"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let own = goal(&server, 2);
         assert_eq!(own["status"], "done", "{own}");
         assert!(chunks.concat().ends_with(own["output"].as_str().unwrap()));
@@ -924,7 +924,7 @@ mod tests {
         let session = acp.new_session(1);
         for (id, goal_id) in [(2, 1), (3, 2)] {
             let (response, chunks) = acp.prompt(id, &session, &["same"]);
-            assert_eq!(response["result"]["stopReason"], "end_turn");
+            assert_eq!(response["result"]["stopReason"], "max_tokens");
             let output = goal(&server, goal_id)["output"]
                 .as_str()
                 .unwrap()
@@ -959,7 +959,7 @@ mod tests {
         let text = format!("{}{}", chunk_text(&first), joined(&rest));
         assert_eq!(text, cancelled["output"].as_str().unwrap());
         let (response, chunks) = acp.prompt(3, &session, &["next"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert_eq!(
             chunks.concat(),
             goal(&server, 2)["output"].as_str().unwrap()
@@ -990,7 +990,7 @@ mod tests {
         let session = acp.new_session(1);
         cancel_note(&mut acp, &session);
         let (response, _) = acp.prompt(2, &session, &["hi"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert!(acp.finish().success());
     }
 
@@ -1003,7 +1003,7 @@ mod tests {
         assert!(acp.recv_within(Duration::from_millis(300)).is_none());
         let session = acp.new_session(1);
         let (response, _) = acp.prompt(2, &session, &["hi"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert!(acp.finish().success());
     }
 
@@ -1018,15 +1018,15 @@ mod tests {
         assert!(acp.finish().success());
     }
 
-    /// A stand-in node on which session 1 has goal 1, which reports `status` with no output once
-    /// `open` is set. Returns its port.
-    fn fake_node(status: &'static str, open: &Arc<AtomicBool>) -> u16 {
+    /// Serve HTTP on a free port: `answer` gets each request head and returns the JSON body to
+    /// reply with, or None to leave the request unanswered.
+    fn spawn_node(answer: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let open = Arc::clone(open);
+        let answer = Arc::new(answer);
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
-                let open = Arc::clone(&open);
+                let answer = Arc::clone(&answer);
                 std::thread::spawn(move || {
                     let mut data = Vec::new();
                     let mut buf = [0u8; 4096];
@@ -1037,29 +1037,7 @@ mod tests {
                         }
                     }
                     let head = String::from_utf8_lossy(&data).into_owned();
-                    let body = if head.starts_with("POST /sessions/2/") {
-                        "{\"goal\":2}".to_owned()
-                    } else if head.starts_with("POST /sessions/") {
-                        "{\"goal\":1}".to_owned()
-                    } else if head.starts_with("GET /sessions/") {
-                        "{\"turns\":[{\"goal\":1,\"prompt\":\"p\"}]}".to_owned()
-                    } else if head.starts_with("GET /goals/2") {
-                        "{\"status\":\"done\",\"output\":\"\"}".to_owned()
-                    } else if head.starts_with("POST /sessions") {
-                        "{\"id\":1}".to_owned()
-                    } else {
-                        let deadline = Instant::now() + Duration::from_secs(10);
-                        while !open.load(Ordering::SeqCst) && Instant::now() < deadline {
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        let (output, error) = match status {
-                            "failed" => ("partial", "\"boom\""),
-                            _ => ("", "null"),
-                        };
-                        format!(
-                            "{{\"status\":\"{status}\",\"output\":\"{output}\",\"error\":{error}}}"
-                        )
-                    };
+                    let Some(body) = answer(&head) else { return };
                     let reply = format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -1069,6 +1047,191 @@ mod tests {
             }
         });
         port
+    }
+
+    /// A stand-in node on which session 1 has goal 1, which reports `status` with no output once
+    /// `open` is set. Returns its port.
+    fn fake_node(status: &'static str, open: &Arc<AtomicBool>) -> u16 {
+        let open = Arc::clone(open);
+        spawn_node(move |head| {
+            Some(if head.starts_with("POST /sessions/2/") {
+                "{\"goal\":2}".to_owned()
+            } else if head.starts_with("POST /sessions/") {
+                "{\"goal\":1}".to_owned()
+            } else if head.starts_with("GET /sessions/") {
+                "{\"turns\":[{\"goal\":1,\"prompt\":\"p\"}]}".to_owned()
+            } else if head.starts_with("GET /goals/2") {
+                "{\"status\":\"done\",\"output\":\"\"}".to_owned()
+            } else if head.starts_with("POST /sessions") {
+                "{\"id\":1}".to_owned()
+            } else {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !open.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let (output, error) = match status {
+                    "failed" => ("partial", "\"boom\""),
+                    _ => ("", "null"),
+                };
+                format!("{{\"status\":\"{status}\",\"output\":\"{output}\",\"error\":{error}}}")
+            })
+        })
+    }
+
+    /// A stand-in node with session 1 whose first turn is goal 1 (later turns are goal 2, done
+    /// and empty). Each poll of goal 1 answers the next `(status, output)` of `script`, the last
+    /// one repeating. A `hang` entry is left unanswered until `release` is set.
+    fn scripted_node(script: Vec<(&'static str, &'static str)>, release: &Arc<AtomicBool>) -> u16 {
+        scripted_node_after(script, release, 0)
+    }
+
+    /// Like `scripted_node`, for a session that already has `posted` turns: a new turn is goal 2.
+    fn scripted_node_after(
+        script: Vec<(&'static str, &'static str)>,
+        release: &Arc<AtomicBool>,
+        posted: u64,
+    ) -> u16 {
+        let (release, next, turns) = (Arc::clone(release), Mutex::new(0), Mutex::new(posted));
+        spawn_node(move |head| {
+            if head.starts_with("POST /sessions/") {
+                let mut turns = turns.lock().unwrap();
+                *turns += 1;
+                return Some(format!("{{\"goal\":{}}}", (*turns).min(2)));
+            }
+            if head.starts_with("GET /sessions/") {
+                return Some("{\"turns\":[{\"goal\":1,\"prompt\":\"p\"}]}".to_owned());
+            }
+            if head.starts_with("POST /sessions") {
+                return Some("{\"id\":1}".to_owned());
+            }
+            if !head.contains("/goals/1") {
+                return Some("{\"status\":\"done\",\"output\":\"\"}".to_owned());
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let mut next = next.lock().unwrap();
+                let (status, output) = script[(*next).min(script.len() - 1)];
+                if status != "hang" || release.load(Ordering::SeqCst) {
+                    *next += 1;
+                    if status != "hang" {
+                        let reason = "\"reason\":\"eos\"";
+                        return Some(format!(
+                            "{{\"status\":\"{status}\",\"output\":\"{output}\",{reason}}}"
+                        ));
+                    }
+                } else if Instant::now() >= deadline {
+                    return None;
+                } else {
+                    drop(next);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        })
+    }
+
+    /// The (kind, text) updates of one prompt against a scripted node, which must answer done.
+    fn kinds_of(script: Vec<(&'static str, &'static str)>) -> Vec<(String, String)> {
+        let dir = TempDir::new("acp-think");
+        let port = scripted_node(script, &Arc::new(AtomicBool::new(true)));
+        let mut acp = Acp::start_with(&dir.0, &[url(port)], SHORT);
+        let session = acp.new_session(1);
+        let (response, kinds) = acp.prompt_kinds(2, &session, &["p"]);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        kinds
+    }
+
+    fn per_kind(kinds: &[(String, String)], kind: &str) -> String {
+        let of_kind = kinds.iter().filter(|(k, _)| k == kind);
+        of_kind.map(|(_, text)| text.as_str()).collect()
+    }
+
+    #[test]
+    fn think_text_streams_as_thought_chunks_and_a_split_tag_is_held_back_until_whole() {
+        let kinds = kinds_of(vec![
+            ("running", "a<th"),
+            ("running", "a<think>x</thi"),
+            ("done", "a<think>x</think>y"),
+        ]);
+        let expected = [
+            ("agent_message_chunk", "a"),
+            ("agent_thought_chunk", "x"),
+            ("agent_message_chunk", "y"),
+        ];
+        let expected: Vec<(String, String)> = expected
+            .iter()
+            .map(|(k, t)| ((*k).to_owned(), (*t).to_owned()))
+            .collect();
+        assert_eq!(kinds, expected);
+        assert!(!kinds.iter().any(|(_, text)| text.contains(['<', '>'])));
+    }
+
+    #[test]
+    fn a_dangling_partial_tag_is_flushed_as_text_when_the_goal_is_done() {
+        let kinds = kinds_of(vec![("running", "ab<th"), ("done", "ab<th")]);
+        assert_eq!(per_kind(&kinds, "agent_message_chunk"), "ab<th");
+        assert_eq!(per_kind(&kinds, "agent_thought_chunk"), "");
+    }
+
+    #[test]
+    fn an_empty_think_block_sends_no_thought_chunk_and_no_empty_chunk() {
+        let kinds = kinds_of(vec![("done", "<think>\\n\\n</think>\\n\\nhi")]);
+        assert_eq!(per_kind(&kinds, "agent_thought_chunk"), "");
+        assert_eq!(per_kind(&kinds, "agent_message_chunk").trim(), "hi");
+        assert!(kinds.iter().all(|(_, text)| !text.is_empty()), "{kinds:?}");
+    }
+
+    #[test]
+    fn a_prompt_timed_out_inside_a_think_block_resumes_without_losing_or_repeating_text() {
+        let dir = TempDir::new("acp-think-resume");
+        let release = Arc::new(AtomicBool::new(false));
+        let script = vec![
+            ("running", "<think>x</th"),
+            ("hang", ""),
+            ("done", "<think>x</think>y"),
+        ];
+        let port = scripted_node(script, &release);
+        let mut acp = Acp::start_with(&dir.0, &[url(port)], SHORT);
+        let session = acp.new_session(1);
+        let (response, mut kinds) = acp.prompt_kinds(2, &session, &["p"]);
+        assert_cluster_unavailable(&response);
+        release.store(true, Ordering::SeqCst);
+        let (response, more) = acp.prompt_kinds(3, &session, &["q"]);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        kinds.extend(more);
+        assert_eq!(per_kind(&kinds, "agent_thought_chunk"), "x");
+        assert_eq!(per_kind(&kinds, "agent_message_chunk"), "y");
+    }
+
+    #[test]
+    fn a_loaded_done_goal_replays_thought_and_message_kinds() {
+        let dir = TempDir::new("acp-load-think");
+        let script = vec![("done", "<think>x</think>y")];
+        let port = scripted_node_after(script, &Arc::new(AtomicBool::new(true)), 1);
+        let mut acp = Acp::start_with(&dir.0, &[url(port)], SHORT);
+        let (response, updates) = loaded(&mut acp, 1, "1");
+        assert_eq!(response["result"], Value::Null, "{response}");
+        let expected = [
+            pair("user_message_chunk", "p"),
+            pair("agent_thought_chunk", "x"),
+            pair("agent_message_chunk", "y"),
+        ];
+        assert_eq!(updates, expected);
+    }
+
+    #[test]
+    fn a_loaded_running_goal_inside_a_think_block_is_finished_without_repeats() {
+        let dir = TempDir::new("acp-load-think-running");
+        let script = vec![("running", "<think>x</th"), ("done", "<think>x</think>y")];
+        let port = scripted_node_after(script, &Arc::new(AtomicBool::new(true)), 1);
+        let mut acp = Acp::start_with(&dir.0, &[url(port)], SHORT);
+        let (response, mut kinds) = loaded(&mut acp, 1, "1");
+        assert_eq!(response["result"], Value::Null, "{response}");
+        assert_eq!(per_kind(&kinds, "agent_message_chunk"), "");
+        let (response, more) = acp.prompt_kinds(2, "1", &["q"]);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        kinds.extend(more);
+        assert_eq!(per_kind(&kinds, "agent_thought_chunk"), "x");
+        assert_eq!(per_kind(&kinds, "agent_message_chunk"), "y");
     }
 
     /// Read until the responses to `ids` have all arrived. Returns the responses by id
@@ -1136,7 +1299,7 @@ mod tests {
         let (responses, chunks) = read_both(&mut acp, [3, 4]);
         for id in [3, 4] {
             let response = response_for(&responses, id);
-            assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+            assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         }
         let (a_first, a_last) = positions(&chunks, &a);
         let (b_first, b_last) = positions(&chunks, &b);
@@ -1181,7 +1344,7 @@ mod tests {
         );
         assert_eq!(
             response_for(&responses, 4)["result"]["stopReason"],
-            "end_turn"
+            "max_tokens"
         );
         let a_goal = goal(&server, goal_of_session(&server, 1));
         let b_goal = goal(&server, goal_of_session(&server, 2));
@@ -1272,7 +1435,7 @@ mod tests {
         assert_eq!(response["error"]["message"], "js_error", "{response}");
         assert_eq!(response["error"]["data"]["error"], "js_error", "{response}");
         let (response, _) = acp.prompt(3, &session, &["next"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert!(acp.finish().success());
     }
 
@@ -1295,7 +1458,7 @@ mod tests {
             json!({"turns": []})
         );
         let (response, _) = acp.prompt(3, &session, &["next"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         assert!(acp.finish().success());
     }
 
@@ -1348,7 +1511,7 @@ mod tests {
         post_turn(&server, &session, 0, "other");
         wait_done(&server, 1);
         let (response, chunks) = acp.prompt(2, &session, &["mine"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let out = |id| goal(&server, id)["output"].as_str().unwrap().to_owned();
         assert_eq!(chunks.concat(), format!("{}{}", out(1), out(2)));
         let turns = session_of(&server, 1);
@@ -1373,7 +1536,7 @@ mod tests {
         wait_done(&server, 1);
         wait_done(&server, 2);
         let (response, chunks) = acp.prompt(2, &session, &["mine"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         let out = |id| goal(&server, id)["output"].as_str().unwrap().to_owned();
         assert_eq!(chunks.concat(), format!("{}{}{}", out(1), out(2), out(3)));
         assert_eq!(session_of(&server, 1)["turns"].as_array().unwrap().len(), 3);
@@ -1394,7 +1557,7 @@ mod tests {
         let mut received = prompt_cut_off_by_a_dead_node(&mut acp, &session, server);
         let server = Server::start_on(port, &dir.0, Some(&db), &rate);
         let (response, chunks) = acp.prompt(3, &session, &["y"]);
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert_eq!(response["result"]["stopReason"], "max_tokens", "{response}");
         received.extend(chunks);
         let out = |id| goal(&server, id)["output"].as_str().unwrap().to_owned();
         assert_eq!(received.concat(), format!("{}{}", out(1), out(2)));

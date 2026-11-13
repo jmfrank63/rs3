@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
+use crate::journal::ThinkingState;
 use crate::journal::{
     Journal, JournalError, Record, ScriptFailure, dump_table, rows_in, seal_in, storage,
 };
@@ -21,7 +22,7 @@ use crate::js::ExecError;
 use crate::js::executor::JsExecutor;
 use crate::js::oplog::{LogStop, OpLog};
 use crate::lease::{self, Fence};
-use crate::model::{FakeModel, Model};
+use crate::model::{Candle, Engine, FakeModel, Generation, Model, TEMPERATURE, TOP_P, final_text};
 use crate::raft::{Node, seal as sealing};
 use crate::sessions::{self, SESSIONS, Turn, TurnOutcome};
 use crate::store::{Command, GoalEvent, Response, Store};
@@ -30,6 +31,34 @@ const GOALS: TableDefinition<u64, (i64, u64)> = TableDefinition::new("goals");
 
 /// Tokens committed per transaction.
 const BATCH: u64 = 8;
+
+/// The most tokens a candle goal's prompt and output may hold together.
+const CONTEXT: u64 = 4096;
+
+/// The start record of a candle generation over `prompt_tokens`; `Err` says the prompt and
+/// `budget` do not fit the context.
+fn candle_start(
+    candle: &Candle,
+    seed: u64,
+    prompt_tokens: Vec<u32>,
+    budget: u64,
+) -> Result<Record, String> {
+    if prompt_tokens.len() as u64 + budget > CONTEXT {
+        return Err(format!(
+            "prompt and budget must fit in {CONTEXT} tokens, got {} and {budget}",
+            prompt_tokens.len()
+        ));
+    }
+    Ok(Record::InferenceStart {
+        engine: "candle".into(),
+        model_hash: candle.model_hash.clone(),
+        tokenizer_hash: candle.tokenizer_hash.clone(),
+        sampler: serde_json::json!({ "seed": seed, "temperature": TEMPERATURE, "top_p": TOP_P })
+            .to_string(),
+        rng_state: Vec::new(),
+        prompt_tokens,
+    })
+}
 
 /// What a client asks for.
 pub struct GoalSpec {
@@ -53,6 +82,8 @@ pub struct GoalStatus {
     pub status: &'static str,
     pub output: Option<String>,
     pub error: Option<&'static str>,
+    /// Why generation ended (`eos` or `budget`); `None` while it has not.
+    pub reason: Option<String>,
     /// The node the goal is assigned to; `None` on a single node or while unassigned.
     pub node: Option<u64>,
 }
@@ -98,6 +129,8 @@ struct Inner {
     token_secs: f64,
     /// What script goals run against; unset until `enable_scripts`.
     scripts: OnceLock<(Store, JsExecutor)>,
+    /// The model goals run on; unset means the fake one.
+    engine: OnceLock<Engine>,
     /// This node's id in a cluster; `None` on a single node.
     me: Option<u64>,
     /// The Raft node goal commands go through; unset until `connect`.
@@ -233,15 +266,17 @@ impl Goals {
         let mut orphans = Vec::new();
         for task in self.0.journal.live_streams()? {
             let owner = lease::owner(&self.0.db, task)?;
-            match owner.and_then(|node| load.get_mut(&node)) {
-                Some(n) => *n += 1,
-                None => orphans.push(task),
+            let declined = lease::declined(&self.0.db, task)?;
+            match owner.filter(|node| !declined.contains(node)) {
+                Some(node) if load.contains_key(&node) => *load.entry(node).or_default() += 1,
+                _ => orphans.push((task, declined)),
             }
         }
         let mut plan = Vec::new();
-        for task in orphans {
-            let Some((&node, _)) = load.iter().min_by_key(|&(&id, &n)| (n, id)) else {
-                break;
+        for (task, declined) in orphans {
+            let pick = load.iter().filter(|(id, _)| !declined.contains(id));
+            let Some((&node, _)) = pick.min_by_key(|&(&id, &n)| (n, id)) else {
+                continue;
             };
             load.insert(node, load[&node] + 1);
             plan.push(Command::Assign {
@@ -329,6 +364,7 @@ impl Goals {
             wake: Condvar::new(),
             token_secs: 1.0 / f64::from(rate.get()),
             scripts: OnceLock::new(),
+            engine: OnceLock::new(),
             me,
             cluster: OnceLock::new(),
             fragments: OnceLock::new(),
@@ -432,10 +468,34 @@ impl Goals {
         let _ = self.0.scripts.set((store, js));
     }
 
+    /// Run goals on `engine` instead of the fake model. Call it once, before the workers start.
+    pub fn set_engine(&self, engine: Engine) {
+        let _ = self.0.engine.set(engine);
+    }
+
     /// Create a goal and queue it. The caller validates the budget.
     pub fn create(&self, spec: GoalSpec) -> Result<u64, JournalError> {
-        let start = inference_start(spec.seed, &spec.prompt);
+        let start = self.start_record(&spec).map_err(JournalError::Storage)?;
         self.insert_goal(spec.priority, spec.budget, &start)
+    }
+
+    /// Create a goal from a start record made by `start_record`.
+    pub fn create_from(
+        &self,
+        priority: i64,
+        budget: u64,
+        start: &Record,
+    ) -> Result<u64, JournalError> {
+        self.insert_goal(priority, budget, start)
+    }
+
+    /// The start record of `spec` on this node's model. `Err` says why the goal cannot be run.
+    pub fn start_record(&self, spec: &GoalSpec) -> Result<Record, String> {
+        let Some(Engine::Candle(candle)) = self.0.engine.get() else {
+            return Ok(inference_start(spec.seed, &spec.prompt));
+        };
+        let prompt_tokens = candle.prompt_tokens(&spec.prompt)?;
+        candle_start(candle, spec.seed, prompt_tokens, spec.budget)
     }
 
     /// Create a goal that runs `source` as the script `name`, and queue it.
@@ -496,6 +556,49 @@ impl Goals {
         Ok(id)
     }
 
+    /// The start record of a new turn on the candle engine: the earlier turns' prompts and final
+    /// answers, then `prompt`, as tokens fixed now because applying a command cannot tokenize.
+    /// `None` for a fake engine, a `/run` prompt, or a turn that is not the session's next.
+    fn turn_start(
+        &self,
+        session: u64,
+        turn: u64,
+        prompt: &str,
+    ) -> Result<Result<Option<Record>, String>, JournalError> {
+        let Some(Engine::Candle(candle)) = self.0.engine.get() else {
+            return Ok(Ok(None));
+        };
+        if sessions::script_key(prompt).is_some() {
+            return Ok(Ok(None));
+        }
+        let Some(turns) = self.session(session)? else {
+            return Ok(Ok(None));
+        };
+        if turns.len() as u64 != turn {
+            return Ok(Ok(None));
+        }
+        let mut history = Vec::new();
+        for earlier in &turns {
+            let output = self
+                .status(earlier.goal)?
+                .and_then(|status| status.output)
+                .ok_or_else(|| {
+                    JournalError::Storage(format!("goal {} has no output", earlier.goal))
+                })?;
+            history.push((earlier.prompt.clone(), final_text(&output).to_owned()));
+        }
+        let tokens = candle
+            .chat_tokens(&history, prompt)
+            .map_err(JournalError::Storage)?;
+        Ok(candle_start(
+            candle,
+            sessions::seed(session, turn),
+            tokens,
+            sessions::TURN_BUDGET,
+        )
+        .map(Some))
+    }
+
     /// Start turn `turn` of `session`. Only a new turn creates (and queues) a goal; a refusal
     /// or a resent turn writes nothing.
     pub fn start_turn(
@@ -504,11 +607,15 @@ impl Goals {
         turn: u64,
         prompt: String,
     ) -> Result<TurnOutcome, JournalError> {
+        let start = match self.turn_start(session, turn, &prompt)? {
+            Ok(start) => start,
+            Err(why) => return Ok(TurnOutcome::TooLong(why)),
+        };
         if self.0.me.is_some() {
-            return self.propose_turn(session, turn, prompt);
+            return self.propose_turn(session, turn, prompt, start);
         }
         let txn = self.0.db.begin_write().map_err(storage)?;
-        let outcome = sessions::start_turn_in(&txn, &self.0.journal, session, turn, prompt)?;
+        let outcome = sessions::start_turn_in(&txn, &self.0.journal, session, turn, prompt, start)?;
         if let TurnOutcome::New(id) = outcome {
             txn.commit().map_err(storage)?;
             self.enqueue(Goal {
@@ -527,11 +634,13 @@ impl Goals {
         session: u64,
         turn: u64,
         prompt: String,
+        start: Option<Record>,
     ) -> Result<TurnOutcome, JournalError> {
         match self.propose(Command::StartTurn {
             session,
             turn,
             prompt,
+            start,
         })? {
             Response::TurnStarted(goal) => Ok(TurnOutcome::Existing(goal)),
             Response::Refused(code) => match code.as_str() {
@@ -577,6 +686,7 @@ impl Goals {
                     status: "failed",
                     output: None,
                     error: Some("journal_corrupt"),
+                    reason: None,
                     node,
                 }));
             }
@@ -584,12 +694,14 @@ impl Goals {
         };
         let progress = records.len() > 1;
         let cancelled = matches!(records.last(), Some(Record::Cancelled));
-        let (status, error, output) = match records.last() {
-            Some(Record::ScriptEnd { outcome: Ok(value) }) => ("done", None, Some(value.clone())),
-            Some(Record::ScriptEnd { outcome: Err(f) }) => ("failed", Some(f.code()), None),
+        let (status, error, output, reason) = match records.last() {
+            Some(Record::ScriptEnd { outcome: Ok(value) }) => {
+                ("done", None, Some(value.clone()), None)
+            }
+            Some(Record::ScriptEnd { outcome: Err(f) }) => ("failed", Some(f.code()), None, None),
             _ if matches!(records.first(), Some(Record::ScriptStart { .. })) => {
                 let (status, error) = flags(cancelled, running, failed, false, progress);
-                (status, error, None)
+                (status, error, None, None)
             }
             _ => {
                 let Some(state) = Journal::rebuild(id, records)? else {
@@ -597,15 +709,28 @@ impl Goals {
                 };
                 let (status, error) =
                     flags(cancelled, running, failed, state.ended.is_some(), progress);
-                (status, error, Some(FakeModel.render(&state.tokens)))
+                let output = self.render(&state);
+                (status, error, output, state.ended.filter(|_| !cancelled))
             }
         };
         Ok(Some(GoalStatus {
             status,
             output,
             error,
+            reason,
             node,
         }))
+    }
+
+    /// The text of a generation's committed tokens, or `None` when this node lacks its model.
+    fn render(&self, state: &ThinkingState) -> Option<String> {
+        if state.engine != "candle" {
+            return Some(FakeModel.render(&state.tokens));
+        }
+        match self.0.engine.get() {
+            Some(Engine::Candle(c)) => Some(c.render(&state.tokens, state.ended.is_some())),
+            _ => None,
+        }
     }
 
     /// End goal `id` durably. The cancel takes over the goal's lease and writes
@@ -625,10 +750,19 @@ impl Goals {
         self.status(id)
     }
 
-    /// Commit the next batch of `goal` in one transaction, after the time the
-    /// model needs for it, under `fence`. Returns whether the goal has ended;
-    /// a stale fence is refused as `Fenced` and commits nothing.
+    /// Commit the next batch of `goal` in one transaction, under `fence`. Returns whether the
+    /// goal has ended; a stale fence is refused as `Fenced` and commits nothing.
     pub fn step(&self, goal: &Goal, fence: &Fence) -> Result<bool, JournalError> {
+        self.step_with(goal, fence, &mut None)
+    }
+
+    /// `step`, keeping a candle goal's decoding state in `generation` between calls of one drive.
+    fn step_with<'a>(
+        &'a self,
+        goal: &Goal,
+        fence: &Fence,
+        generation: &mut Option<Generation<'a>>,
+    ) -> Result<bool, JournalError> {
         let state = self
             .0
             .journal
@@ -637,9 +771,27 @@ impl Goals {
         if state.ended.is_some() {
             return Ok(true);
         }
+        if state.engine != "candle" {
+            return self.step_fake(goal, fence, state);
+        }
+        let result = self.step_candle(goal, fence, &state, generation);
+        if result.is_err() {
+            // Whatever failed, the committed stream is the truth: rebuild from it on retry.
+            *generation = None;
+        }
+        result
+    }
+
+    /// The next batch of a fake-model goal, after the time the model needs for it.
+    fn step_fake(
+        &self,
+        goal: &Goal,
+        fence: &Fence,
+        state: ThinkingState,
+    ) -> Result<bool, JournalError> {
         let done = state.tokens.len() as u64;
         let count = BATCH.min(goal.budget.saturating_sub(done));
-        let mut rng = state.rng_state;
+        let mut rng = state.rng_state.clone();
         let mut tokens = Vec::new();
         for _ in 0..count {
             let (token, next) = FakeModel.step(&rng);
@@ -649,34 +801,71 @@ impl Goals {
         self.0.generated.fetch_add(count, Ordering::Relaxed);
         let finished = done + count >= goal.budget;
         std::thread::sleep(Duration::from_secs_f64(count as f64 * self.0.token_secs));
-        let record = Record::Tokens {
-            tokens,
-            rng_state: rng,
+        let end = finished.then_some("budget");
+        self.commit(goal, fence, &state, tokens, rng, end)
+    }
+
+    /// The next batch of a candle goal: sample up to `BATCH` tokens, stopping at eos or the budget.
+    fn step_candle<'a>(
+        &'a self,
+        goal: &Goal,
+        fence: &Fence,
+        state: &ThinkingState,
+        generation: &mut Option<Generation<'a>>,
+    ) -> Result<bool, JournalError> {
+        let Some(Engine::Candle(candle)) = self.0.engine.get() else {
+            return Err(JournalError::Storage("this node has no model".into()));
         };
-        if self.0.me.is_some() {
-            let mut records = vec![record];
-            if finished {
-                records.push(Record::InferenceEnd {
-                    reason: "budget".into(),
-                });
+        let live = match generation {
+            Some(live) => live,
+            None => {
+                let seed = serde_json::from_str::<serde_json::Value>(&state.sampler)
+                    .ok()
+                    .and_then(|v| v["seed"].as_u64())
+                    .ok_or_else(|| JournalError::Storage("unreadable sampler".into()))?;
+                let made = Generation::new(candle, seed, &state.prompt_tokens, &state.tokens)
+                    .map_err(JournalError::Storage)?;
+                generation.insert(made)
             }
+        };
+        let done = state.tokens.len() as u64;
+        let count = BATCH.min(goal.budget.saturating_sub(done));
+        let mut tokens = Vec::new();
+        let mut end = None;
+        while (tokens.len() as u64) < count && end.is_none() {
+            let token = live.next_token().map_err(JournalError::Storage)?;
+            self.0.generated.fetch_add(1, Ordering::Relaxed);
+            tokens.push(token);
+            end = candle.is_eos(token).then_some("eos");
+        }
+        let end = end.or((done + tokens.len() as u64 >= goal.budget).then_some("budget"));
+        self.commit(goal, fence, state, tokens, Vec::new(), end)
+    }
+
+    /// Commit `tokens`, and the end of the goal when `end` says why it ended, in one write.
+    fn commit(
+        &self,
+        goal: &Goal,
+        fence: &Fence,
+        state: &ThinkingState,
+        tokens: Vec<u32>,
+        rng_state: Vec<u8>,
+        end: Option<&str>,
+    ) -> Result<bool, JournalError> {
+        let mut records = vec![Record::Tokens { tokens, rng_state }];
+        records.extend(end.map(|reason| Record::InferenceEnd {
+            reason: reason.into(),
+        }));
+        if self.0.me.is_some() {
             return self.append(goal.id, fence, state.next_seq, records);
         }
         let txn = self.0.db.begin_write().map_err(storage)?;
         lease::check_in(&txn, fence)?;
-        self.0
-            .journal
-            .append_in(&txn, goal.id, state.next_seq, &record)?;
-        if finished {
-            let end = Record::InferenceEnd {
-                reason: "budget".into(),
-            };
-            self.0
-                .journal
-                .append_in(&txn, goal.id, state.next_seq + 1, &end)?;
+        for (seq, record) in (state.next_seq..).zip(&records) {
+            self.0.journal.append_in(&txn, goal.id, seq, record)?;
         }
         txn.commit().map_err(storage)?;
-        Ok(finished)
+        Ok(end.is_some())
     }
 
     /// Append `records` through Raft under `fence`; returns whether the goal had ended or now has.
@@ -886,7 +1075,8 @@ impl Goals {
                 }
             });
         }
-        while !self.retry(|| self.step(goal, &fence))? {}
+        let mut generation = None;
+        while !self.retry(|| self.step_with(goal, &fence, &mut generation))? {}
         Ok(())
     }
 
@@ -904,8 +1094,27 @@ impl Goals {
         if let Some(Record::ScriptStart { name, source }) = records.first() {
             return self.run_script(goal, fence, name, source, &records);
         }
-        while !self.step(goal, &fence)? {}
+        let mut generation = None;
+        while !self.step_with(goal, &fence, &mut generation)? {}
         Ok(())
+    }
+
+    /// Whether this node can run goal `id`: a candle goal needs this node's candle model and
+    /// tokenizer to be the ones it started on.
+    fn runnable(&self, id: u64) -> Result<bool, JournalError> {
+        Ok(match self.0.journal.read(id)?.first() {
+            Some(Record::InferenceStart {
+                engine,
+                model_hash,
+                tokenizer_hash,
+                ..
+            }) if engine == "candle" => matches!(
+                self.0.engine.get(),
+                Some(Engine::Candle(c))
+                    if c.model_hash == *model_hash && c.tokenizer_hash == *tokenizer_hash
+            ),
+            _ => true,
+        })
     }
 
     /// Claim `goal`, then step it until it ends. A worker whose lease was taken
@@ -913,16 +1122,32 @@ impl Goals {
     /// failure is logged once and kept in memory only, so the goal resumes on
     /// the next start.
     pub fn run(&self, goal: Goal) {
-        let requeue = match self.drive(&goal) {
-            Err(e) if !matches!(e, JournalError::Fenced { .. }) => Err(e),
-            _ => self.0.journal.read(goal.id).and_then(|records| {
-                // Queue it again only while it is live and still assigned here.
-                if records.last().is_some_and(|last| !last.ends_stream()) {
-                    self.mine(goal.id)
-                } else {
-                    Ok(false)
+        let requeue = match self.runnable(goal.id) {
+            Ok(true) => match self.drive(&goal) {
+                Err(e) if !matches!(e, JournalError::Fenced { .. }) => Err(e),
+                _ => self.0.journal.read(goal.id).and_then(|records| {
+                    // Queue it again only while it is live and still assigned here.
+                    if records.last().is_some_and(|last| !last.ends_stream()) {
+                        self.mine(goal.id)
+                    } else {
+                        Ok(false)
+                    }
+                }),
+            },
+            // Not claimed or queued: tell the cluster this node cannot run it, so the plan
+            // moves it to a node with the model. A refused decline changes nothing.
+            Ok(false) => {
+                if let Some(me) = self.0.me {
+                    let _ = self.retry(|| {
+                        self.propose(Command::Decline {
+                            task: goal.id,
+                            node: me,
+                        })
+                    });
                 }
-            }),
+                Ok(false)
+            }
+            Err(e) => Err(e),
         };
         let mut sched = self.sched();
         sched.running.remove(&goal.id);
@@ -1038,6 +1263,64 @@ mod tests {
         assert_eq!(plan, vec![(4, 2)]);
     }
 
+    fn decline(db: &Database, task: u64, node: u64) {
+        let txn = db.begin_write().unwrap();
+        lease::decline_in(&txn, task, node).unwrap();
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn plan_moves_a_goal_off_a_live_owner_that_declined_it() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        for seed in 0..3 {
+            goals.create(spec(5, seed)).unwrap();
+        }
+        for (task, node) in [(1, 1), (2, 1), (3, 2)] {
+            assign_to(&db, task, node);
+        }
+        assert!(goals.plan_assignments(&[1, 2]).unwrap().is_empty());
+        decline(&db, 1, 1);
+        // Goal 1 no longer counts against node 1, so node 1 holds one goal and node 2 one:
+        // the lowest id of the tie, node 1, has declined, so the goal goes to node 2.
+        let plan = goals.plan_assignments(&[1, 2]).unwrap();
+        assert_eq!(
+            plan,
+            vec![Command::Assign {
+                task: 1,
+                node: 2,
+                expect_token: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn plan_is_empty_when_every_live_node_declined() {
+        let dir = TempDir::new();
+        let db = open(&dir.path().join("db")).unwrap();
+        let goals = Goals::open(db.clone(), FAST).unwrap();
+        goals.create(spec(5, 0)).unwrap();
+        assign_to(&db, 1, 1);
+        decline(&db, 1, 1);
+        decline(&db, 1, 2);
+        assert!(goals.plan_assignments(&[1, 2]).unwrap().is_empty());
+        // A node that has not declined it takes it.
+        assert_eq!(
+            picks_at(goals.plan_assignments(&[1, 2, 3]).unwrap()),
+            vec![(1, 3)]
+        );
+    }
+
+    fn picks_at(plan: Vec<Command>) -> Vec<(u64, u64)> {
+        plan.into_iter()
+            .map(|c| match c {
+                Command::Assign { task, node, .. } => (task, node),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
     fn goals_at(path: &Path) -> Goals {
         Goals::open(open(path).unwrap(), FAST).unwrap()
     }
@@ -1147,6 +1430,7 @@ mod tests {
                 status: "queued",
                 output: Some(String::new()),
                 error: None,
+                reason: None,
                 node: None
             }
         );
@@ -1469,6 +1753,7 @@ mod tests {
             status: "failed",
             output: None,
             error: Some("journal_corrupt"),
+            reason: None,
             node: None,
         };
         assert_eq!(status(&goals, bad), failed);
@@ -1632,6 +1917,7 @@ mod tests {
                 status: "failed",
                 output: None,
                 error: Some("journal_corrupt"),
+                reason: None,
                 node: None
             }
         );
@@ -1658,6 +1944,7 @@ mod tests {
                 status: "failed",
                 output: Some(String::new()),
                 error: Some("storage_failure"),
+                reason: None,
                 node: None
             }
         );
@@ -1761,6 +2048,7 @@ mod tests {
             status,
             output: output.map(str::to_owned),
             error,
+            reason: None,
             node: None,
         }
     }
@@ -2151,5 +2439,46 @@ mod tests {
             .unwrap();
         txn.commit().unwrap();
         assert!(goals.cancel(1).is_err());
+    }
+
+    fn candle_start() -> Record {
+        Record::InferenceStart {
+            engine: "candle".into(),
+            model_hash: "m".into(),
+            tokenizer_hash: "t".into(),
+            sampler: r#"{"seed":1}"#.into(),
+            rng_state: Vec::new(),
+            prompt_tokens: vec![1, 2],
+        }
+    }
+
+    #[test]
+    fn a_finished_fake_goal_reports_why_it_ended() {
+        let goals = goals_at(&TempDir::new().path().join("db"));
+        let id = goals.create(spec(3, 1)).unwrap();
+        assert_eq!(status(&goals, id).reason, None);
+        drain(&goals);
+        assert_eq!(status(&goals, id).reason.as_deref(), Some("budget"));
+    }
+
+    #[test]
+    fn a_candle_goal_on_a_node_without_its_model_is_left_alone() {
+        let dir = TempDir::new();
+        let goals = goals_at(&dir.path().join("db"));
+        let id = goals.create_from(0, 5, &candle_start()).unwrap();
+        drain(&goals);
+        // Nothing was claimed, committed or ended, and it is not queued again to spin.
+        assert_eq!(
+            status(&goals, id),
+            GoalStatus {
+                status: "queued",
+                output: None,
+                error: None,
+                reason: None,
+                node: None
+            }
+        );
+        assert_eq!(goals.records(id).unwrap().len(), 1);
+        assert_eq!(goals.next_goal(), None);
     }
 }

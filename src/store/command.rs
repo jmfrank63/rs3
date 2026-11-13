@@ -28,6 +28,9 @@ pub enum Command {
         session: u64,
         turn: u64,
         prompt: String,
+        /// The goal's start record, fixed by the proposer; `None` derives it from the prompt.
+        #[serde(default)]
+        start: Option<Record>,
     },
     /// End a live goal durably.
     CancelGoal { id: u64 },
@@ -39,6 +42,8 @@ pub enum Command {
         node: u64,
         expect_token: u64,
     },
+    /// The owner `node` of `task` cannot run it; the plan hands it to another node.
+    Decline { task: u64, node: u64 },
     /// Append `records` from `seq` on under fence `token`, all or nothing.
     Append {
         task: u64,
@@ -105,6 +110,7 @@ pub enum Response {
     Assigned {
         token: u64,
     },
+    Declined,
     Appended,
     /// A script op's `Remove` found no key; only the op's record was written.
     Missing,
@@ -197,19 +203,27 @@ pub(crate) fn apply_in(
             session,
             turn,
             prompt,
-        } => sessions::start_turn_in(txn, journal_of, *session, *turn, prompt.clone())
-            .map(|outcome| {
-                let answer = match outcome {
-                    TurnOutcome::New(goal) | TurnOutcome::Existing(goal) => {
-                        Response::TurnStarted(goal)
-                    }
-                    TurnOutcome::Conflict => Response::Refused("turn_conflict".into()),
-                    TurnOutcome::NotFound => Response::Refused("not_found".into()),
-                    TurnOutcome::UnknownScript => Response::Refused("unknown_script".into()),
-                };
-                (answer, None)
-            })
-            .map_err(journal),
+            start,
+        } => sessions::start_turn_in(
+            txn,
+            journal_of,
+            *session,
+            *turn,
+            prompt.clone(),
+            start.clone(),
+        )
+        .map(|outcome| {
+            let answer = match outcome {
+                TurnOutcome::New(goal) | TurnOutcome::Existing(goal) => Response::TurnStarted(goal),
+                TurnOutcome::Conflict => Response::Refused("turn_conflict".into()),
+                TurnOutcome::NotFound => Response::Refused("not_found".into()),
+                TurnOutcome::UnknownScript => Response::Refused("unknown_script".into()),
+                // Length is checked by the proposer, before the command exists.
+                TurnOutcome::TooLong(_) => Response::Refused("too_long".into()),
+            };
+            (answer, None)
+        })
+        .map_err(journal),
         Command::CancelGoal { id } => goals::cancel_in(txn, journal_of, *id)
             .map(|done| {
                 (
@@ -222,9 +236,10 @@ pub(crate) fn apply_in(
                 )
             })
             .map_err(journal),
-        Command::Claim { .. } | Command::Assign { .. } | Command::Append { .. } => {
-            lease_in(journal_of, txn, cmd).map(|answer| (answer, None))
-        }
+        Command::Claim { .. }
+        | Command::Assign { .. }
+        | Command::Decline { .. }
+        | Command::Append { .. } => lease_in(journal_of, txn, cmd).map(|answer| (answer, None)),
         Command::Seal {
             stream,
             members,
@@ -436,6 +451,15 @@ fn script_op_in(
     }
 }
 
+/// Record that `node` declines `task`, which only its owner may do.
+fn decline_in(txn: &WriteTransaction, task: u64, node: u64) -> Result<Response, StoreError> {
+    if lease::owner_in(txn, task).map_err(journal)? != Some(node) {
+        return Ok(Response::Refused("not_owner".into()));
+    }
+    lease::decline_in(txn, task, node).map_err(journal)?;
+    Ok(Response::Declined)
+}
+
 /// Carry out a lease command in `txn`.
 fn lease_in(
     journal_of: &Journal,
@@ -462,6 +486,7 @@ fn lease_in(
             let fence = lease::claim_in(txn, *task, Some(*node)).map_err(journal)?;
             Ok(Response::Assigned { token: fence.token })
         }
+        Command::Decline { task, node } => decline_in(txn, *task, *node),
         Command::Append {
             task,
             token,
@@ -500,6 +525,12 @@ mod tests {
                 start: Record::Cancelled,
             },
             Command::CancelGoal { id: 2 },
+            Command::StartTurn {
+                session: 1,
+                turn: 0,
+                prompt: "hi".into(),
+                start: Some(started()),
+            },
             seal(3, &[1, 2, 3]),
             confirm(3, 2),
         ] {
@@ -518,6 +549,20 @@ mod tests {
             let json = serde_json::to_string(&resp).unwrap();
             assert_eq!(serde_json::from_str::<Response>(&json).unwrap(), resp);
         }
+    }
+
+    #[test]
+    fn a_start_turn_without_a_start_still_decodes() {
+        let old = r#"{"StartTurn":{"session":1,"turn":0,"prompt":"hi"}}"#;
+        assert_eq!(
+            serde_json::from_str::<Command>(old).unwrap(),
+            Command::StartTurn {
+                session: 1,
+                turn: 0,
+                prompt: "hi".into(),
+                start: None,
+            }
+        );
     }
 
     fn started() -> Record {
@@ -617,6 +662,24 @@ mod tests {
                 self.journal.append(1, 1, &Record::Cancelled).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn only_the_owner_can_decline_and_a_decline_keeps_the_token() {
+        let node = Node::new();
+        let assign = |expect_token| Command::Assign {
+            task: 1,
+            node: 2,
+            expect_token,
+        };
+        assert_eq!(node.apply(&assign(0)), Response::Assigned { token: 1 });
+        let by = |node| Command::Decline { task: 1, node };
+        assert_eq!(node.apply(&by(3)), Response::Refused("not_owner".into()));
+        assert_eq!(lease::declined(&node.db, 1).unwrap(), Vec::<u64>::new());
+        assert_eq!(node.apply(&by(2)), Response::Declined);
+        assert_eq!(lease::declined(&node.db, 1).unwrap(), vec![2]);
+        assert_eq!(lease::token(&node.db, 1).unwrap(), 1);
+        assert_eq!(lease::owner(&node.db, 1).unwrap(), Some(2));
     }
 
     #[test]

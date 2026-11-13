@@ -5,12 +5,16 @@
 mod cluster;
 #[cfg(test)]
 mod common;
+#[cfg(test)]
+#[path = "common/reference.rs"]
+mod reference;
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use crate::cluster::{Cluster, goal_body, output, single_node_output, wait_until};
+    use crate::cluster::{Cluster, wait_until};
+    use crate::reference::{goal_body, output, single_node_output};
 
     const WAIT: Duration = Duration::from_secs(60);
     const SLOW: &[(&str, &str)] = &[("MODEL.TOKENS_PER_SECOND", "60")];
