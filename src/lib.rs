@@ -12,6 +12,7 @@ pub mod js;
 pub mod lease;
 pub mod model;
 pub mod raft;
+pub mod sandbox;
 pub mod seal;
 pub mod sessions;
 pub mod state;
