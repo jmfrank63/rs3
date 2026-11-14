@@ -4,6 +4,7 @@
 
 pub mod acp;
 pub mod checker;
+pub mod code;
 pub mod config;
 pub mod goals;
 pub mod http;
