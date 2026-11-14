@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
+use crate::code;
 use crate::journal::ThinkingState;
 use crate::journal::{
     Journal, JournalError, Record, ScriptFailure, dump_table, rows_in, seal_in, storage,
@@ -26,11 +27,15 @@ use crate::model::{Candle, Engine, FakeModel, Generation, Model, TEMPERATURE, TO
 use crate::raft::{Node, seal as sealing};
 use crate::sessions::{self, SESSIONS, Turn, TurnOutcome};
 use crate::store::{Command, GoalEvent, Response, Store};
+use crate::{checker, sandbox};
 
 const GOALS: TableDefinition<u64, (i64, u64)> = TableDefinition::new("goals");
 
 /// Tokens committed per transaction.
 const BATCH: u64 = 8;
+
+/// How long a coding goal's tests may run.
+const SANDBOX_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The most tokens a candle goal's prompt and output may hold together.
 const CONTEXT: u64 = 4096;
@@ -68,6 +73,15 @@ pub struct GoalSpec {
     pub prompt: String,
 }
 
+/// What a client asks for when it wants a coding goal.
+pub struct CodeSpec {
+    pub task: String,
+    pub spec: String,
+    pub max_iterations: u32,
+    pub budget: u64,
+    pub seed: u64,
+}
+
 /// A goal that is queued or running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Goal {
@@ -86,6 +100,8 @@ pub struct GoalStatus {
     pub reason: Option<String>,
     /// The node the goal is assigned to; `None` on a single node or while unassigned.
     pub node: Option<u64>,
+    /// For a coding goal: its `outcome` and `iterations`, derived from committed records only.
+    pub code: Option<serde_json::Value>,
 }
 
 /// How long a worker waits before it tries a cluster command again.
@@ -498,6 +514,23 @@ impl Goals {
         candle_start(candle, spec.seed, prompt_tokens, spec.budget)
     }
 
+    /// The start record of a coding goal on this node's replies. `Err` says why it cannot run.
+    pub fn code_start(&self, spec: CodeSpec) -> Result<Record, String> {
+        let Some(Engine::Replay { hash, .. }) = self.0.engine.get() else {
+            return Err("coding goals need MODEL.REPLIES".into());
+        };
+        Ok(Record::CodeStart {
+            task: spec.task,
+            spec: spec.spec,
+            max_iterations: spec.max_iterations,
+            budget: spec.budget,
+            seed: spec.seed,
+            engine: "replay".into(),
+            model_hash: hash.clone(),
+            checker_hash: checker::hash(),
+        })
+    }
+
     /// Create a goal that runs `source` as the script `name`, and queue it.
     pub fn create_script(
         &self,
@@ -688,13 +721,20 @@ impl Goals {
                     error: Some("journal_corrupt"),
                     reason: None,
                     node,
+                    code: None,
                 }));
             }
             Err(e) => return Err(e),
         };
         let progress = records.len() > 1;
         let cancelled = matches!(records.last(), Some(Record::Cancelled));
+        let code = code::view(&records);
         let (status, error, output, reason) = match records.last() {
+            Some(Record::CodeEnd { .. }) => ("done", None, None, None),
+            _ if code.is_some() => {
+                let (status, error) = flags(cancelled, running, failed, false, progress);
+                (status, error, None, None)
+            }
             Some(Record::ScriptEnd { outcome: Ok(value) }) => {
                 ("done", None, Some(value.clone()), None)
             }
@@ -719,6 +759,7 @@ impl Goals {
             error,
             reason,
             node,
+            code,
         }))
     }
 
@@ -763,10 +804,11 @@ impl Goals {
         fence: &Fence,
         generation: &mut Option<Generation<'a>>,
     ) -> Result<bool, JournalError> {
-        let state = self
-            .0
-            .journal
-            .restore(goal.id)?
+        let records = self.0.journal.read(goal.id)?;
+        if matches!(records.first(), Some(Record::CodeStart { .. })) {
+            return self.step_code(goal, fence, &records);
+        }
+        let state = Journal::rebuild(goal.id, records)?
             .ok_or_else(|| JournalError::Storage(format!("goal {} has no stream", goal.id)))?;
         if state.ended.is_some() {
             return Ok(true);
@@ -780,6 +822,42 @@ impl Goals {
             *generation = None;
         }
         result
+    }
+
+    /// The next step of a coding goal, derived from its committed records and committed in one
+    /// write: a model call, a batch of its reply, a check with its run, or the end.
+    fn step_code(
+        &self,
+        goal: &Goal,
+        fence: &Fence,
+        records: &[Record],
+    ) -> Result<bool, JournalError> {
+        let Some(Engine::Replay { replies, .. }) = self.0.engine.get() else {
+            return Err(JournalError::Storage("this node has no replies".into()));
+        };
+        let state =
+            code::fold(records).ok_or_else(|| JournalError::Storage("not a code goal".into()))?;
+        let next = match (state.step(replies, BATCH as usize), &state.next) {
+            (Some(next), _) => next,
+            (None, code::Next::Check(files)) => self.check_and_run(files)?,
+            (None, _) => return Ok(true),
+        };
+        self.commit_records(goal.id, fence, records.len() as u64, next)
+    }
+
+    /// The type check of `files`, and when it is clean the run of the JavaScript it emitted.
+    fn check_and_run(&self, files: &[(String, String)]) -> Result<Vec<Record>, JournalError> {
+        let found = checker::check(files).map_err(|e| JournalError::Storage(e.to_string()))?;
+        let run = found.diagnostics.is_empty().then(|| {
+            let js = found.js.clone().unwrap_or_default();
+            Record::Run(sandbox::run(&js, 0, SANDBOX_TIMEOUT))
+        });
+        let mut records = vec![Record::Check {
+            diagnostics: found.diagnostics,
+            js: found.js,
+        }];
+        records.extend(run);
+        Ok(records)
     }
 
     /// The next batch of a fake-model goal, after the time the model needs for it.
@@ -856,16 +934,28 @@ impl Goals {
         records.extend(end.map(|reason| Record::InferenceEnd {
             reason: reason.into(),
         }));
+        self.commit_records(goal.id, fence, state.next_seq, records)
+    }
+
+    /// Commit `records` from `seq` on in one write under `fence`; returns whether the stream has
+    /// ended.
+    fn commit_records(
+        &self,
+        id: u64,
+        fence: &Fence,
+        seq: u64,
+        records: Vec<Record>,
+    ) -> Result<bool, JournalError> {
         if self.0.me.is_some() {
-            return self.append(goal.id, fence, state.next_seq, records);
+            return self.append(id, fence, seq, records);
         }
         let txn = self.0.db.begin_write().map_err(storage)?;
         lease::check_in(&txn, fence)?;
-        for (seq, record) in (state.next_seq..).zip(&records) {
-            self.0.journal.append_in(&txn, goal.id, seq, record)?;
+        for (seq, record) in (seq..).zip(&records) {
+            self.0.journal.append_in(&txn, id, seq, record)?;
         }
         txn.commit().map_err(storage)?;
-        Ok(end.is_some())
+        Ok(records.last().is_some_and(Record::ends_stream))
     }
 
     /// Append `records` through Raft under `fence`; returns whether the goal had ended or now has.
@@ -1112,6 +1202,10 @@ impl Goals {
                 self.0.engine.get(),
                 Some(Engine::Candle(c))
                     if c.model_hash == *model_hash && c.tokenizer_hash == *tokenizer_hash
+            ),
+            Some(Record::CodeStart { model_hash, .. }) => matches!(
+                self.0.engine.get(),
+                Some(Engine::Replay { hash, .. }) if hash == model_hash
             ),
             _ => true,
         })
@@ -1431,7 +1525,8 @@ mod tests {
                 output: Some(String::new()),
                 error: None,
                 reason: None,
-                node: None
+                node: None,
+                code: None
             }
         );
         assert_eq!(
@@ -1755,6 +1850,7 @@ mod tests {
             error: Some("journal_corrupt"),
             reason: None,
             node: None,
+            code: None,
         };
         assert_eq!(status(&goals, bad), failed);
         wait_for("good done", || status(&goals, good).status == "done");
@@ -1873,6 +1969,38 @@ mod tests {
     }
 
     #[test]
+    fn an_ended_or_cancelled_coding_goal_is_stepped_no_further() {
+        let dir = TempDir::new();
+        let goals = goals_at(&dir.path().join("db"));
+        goals.set_engine(Engine::Replay {
+            replies: Arc::new(vec![]),
+            hash: "h".into(),
+        });
+        let code = || CodeSpec {
+            task: "t".into(),
+            spec: String::new(),
+            max_iterations: 2,
+            budget: 10,
+            seed: 0,
+        };
+        let new = || {
+            let start = goals.code_start(code()).unwrap();
+            let id = goals.create_from(0, 10, &start).unwrap();
+            (id, goals.next_goal().unwrap())
+        };
+        let (ended, goal) = new();
+        run(&goals, goal.clone());
+        let (cancelled, other) = new();
+        goals.cancel(cancelled).unwrap();
+        for (id, goal) in [(ended, goal), (cancelled, other)] {
+            let before = status(&goals, id);
+            let fence = lease::claim(&goals.0.db, id).unwrap();
+            assert_eq!(step(&goals, &goal, &fence), Ok(true));
+            assert_eq!(status(&goals, id), before);
+        }
+    }
+
+    #[test]
     fn a_stale_fence_commits_nothing_even_on_the_final_batch() {
         let dir = TempDir::new();
         let db = open(&dir.path().join("db")).unwrap();
@@ -1918,7 +2046,8 @@ mod tests {
                 output: None,
                 error: Some("journal_corrupt"),
                 reason: None,
-                node: None
+                node: None,
+                code: None
             }
         );
         drop((goals, db));
@@ -1945,7 +2074,8 @@ mod tests {
                 output: Some(String::new()),
                 error: Some("storage_failure"),
                 reason: None,
-                node: None
+                node: None,
+                code: None
             }
         );
         assert_eq!(goals.next_goal(), None);
@@ -2050,6 +2180,7 @@ mod tests {
             error,
             reason: None,
             node: None,
+            code: None,
         }
     }
 
@@ -2475,7 +2606,8 @@ mod tests {
                 output: None,
                 error: None,
                 reason: None,
-                node: None
+                node: None,
+                code: None
             }
         );
         assert_eq!(goals.records(id).unwrap().len(), 1);

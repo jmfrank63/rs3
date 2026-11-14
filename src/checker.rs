@@ -46,6 +46,11 @@ pub struct CheckOutput {
     pub js: Option<String>,
 }
 
+/// The hash of the checker module a coding goal's results depend on.
+pub fn hash() -> String {
+    blake3::hash(WASM).to_hex().to_string()
+}
+
 /// Modification stamps are never reused: the checker's parse cache is keyed on them.
 static STAMP: AtomicU64 = AtomicU64::new(1);
 
@@ -104,12 +109,17 @@ impl MemFs {
     }
 
     /// Bring the files to exactly `wanted`; unchanged files keep their stamp, which is the
-    /// checker's parse-cache key, and every write gets a fresh one.
+    /// checker's parse-cache key, and every write gets a fresh one. The JavaScript emitted for a
+    /// source that is still wanted stays: the checker does not emit it again while it is unchanged.
     fn sync(&mut self, wanted: &BTreeMap<String, String>) {
+        let emitted_for_wanted = |k: &str| {
+            k.strip_suffix(".js")
+                .is_some_and(|stem| wanted.contains_key(&format!("{stem}.ts")))
+        };
         let stale: Vec<String> = self
             .files
             .keys()
-            .filter(|k| !wanted.contains_key(*k))
+            .filter(|k| !wanted.contains_key(*k) && !emitted_for_wanted(k))
             .cloned()
             .collect();
         stale.iter().for_each(|k| self.remove(k));
@@ -422,6 +432,31 @@ pub fn check(files: &[(String, String)]) -> Result<CheckOutput, CheckerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checking_the_same_files_again_emits_the_same_js() {
+        let files = one("/a.ts", "const x: number = 1;\n");
+        let first = check(&files).unwrap();
+        assert!(first.js.is_some());
+        assert_eq!(check(&files).unwrap(), first);
+    }
+
+    #[test]
+    fn the_js_of_a_removed_source_is_not_emitted_with_the_next_project() {
+        check(&one("/old.ts", "const old1 = 1;\n")).unwrap();
+        let js = check(&one("/new.ts", "const new1 = 2;\n"))
+            .unwrap()
+            .js
+            .unwrap();
+        assert!(js.contains("new1") && !js.contains("old1"), "{js}");
+    }
+
+    #[test]
+    fn the_hash_is_a_stable_blake3_hex_digest() {
+        assert_eq!(hash(), hash());
+        assert_eq!(hash().len(), 64);
+        assert!(hash().chars().all(|c| c.is_ascii_hexdigit()));
+    }
 
     fn one(name: &str, text: &str) -> Vec<(String, String)> {
         vec![(name.to_string(), text.to_string())]

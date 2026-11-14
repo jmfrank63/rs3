@@ -2,6 +2,8 @@
 //! prompts, reply extraction and the feedback the model gets back.
 
 use crate::checker::Diagnostic;
+use crate::journal::Record;
+use crate::model::replay_batch;
 use crate::sandbox::RunOutput;
 use serde_json::Value;
 
@@ -219,6 +221,274 @@ pub fn sandbox_feedback(run: &RunOutput) -> String {
     }
     lines.push(FIX_AGAIN.into());
     lines.join("\n")
+}
+
+/// Whether the tests ran and every one passed.
+fn passes(run: &RunOutput) -> bool {
+    run.status == "passed" && !run.tests.is_empty()
+}
+
+/// What the loop does next, derived from the committed records alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Next {
+    /// Ask the model: the exact prompt of this iteration's attempt.
+    Call {
+        iteration: u32,
+        attempt: u32,
+        prompt: String,
+    },
+    /// A model call is open: commit more of its reply.
+    Generate,
+    /// Type-check the reply's files and, when they are clean, run them.
+    Check(Vec<(String, String)>),
+    /// Write the end record.
+    End(Outcome),
+    /// The stream has ended.
+    Done,
+}
+
+/// One pass of the loop as a client sees it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Iteration {
+    pub prompt: String,
+    pub attempts: u32,
+    /// The last attempt's reply bytes.
+    pub reply: Vec<u8>,
+    pub files: Vec<(String, String)>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub tests: Vec<crate::sandbox::TestResult>,
+    pub logs: Vec<String>,
+    /// What the model is told next; `None` when nothing went wrong.
+    pub feedback: Option<String>,
+}
+
+/// The loop's state, folded from a coding stream.
+#[derive(Debug, Clone)]
+pub struct Loop {
+    task: String,
+    spec: String,
+    max_iterations: u32,
+    budget: u64,
+    pub iterations: Vec<Iteration>,
+    /// Takes what a stream with no call begun would write to its current iteration.
+    stray: Iteration,
+    /// Model calls begun so far; the k-th call gets the k-th canned reply.
+    pub calls: usize,
+    /// Tokens of the open call.
+    pub open: usize,
+    spent: u64,
+    pub next: Next,
+}
+
+impl Loop {
+    fn last(&mut self) -> &mut Iteration {
+        self.iterations.last_mut().unwrap_or(&mut self.stray)
+    }
+
+    fn feedback(&self) -> Vec<String> {
+        let notes = self.iterations.iter().filter_map(|i| i.feedback.clone());
+        notes.collect()
+    }
+
+    fn call(&self, iteration: u32, attempt: u32) -> Next {
+        let prompt = prompt(&self.task, &self.spec, &self.feedback(), attempt > 0);
+        Next::Call {
+            iteration,
+            attempt,
+            prompt,
+        }
+    }
+
+    /// Whether the tokens spent have used up `max_iterations` budgets.
+    fn spent_out(&self) -> bool {
+        self.spent >= u64::from(self.max_iterations) * self.budget
+    }
+
+    /// After a failed iteration: the next iteration, or the end.
+    fn advance(&mut self, feedback: String) {
+        self.last().feedback = Some(feedback);
+        let done = self.iterations.len() as u32;
+        self.next = if done >= self.max_iterations {
+            Next::End(Outcome::MaxIterations)
+        } else if self.spent_out() {
+            Next::End(Outcome::RunDeadline)
+        } else {
+            self.call(done + 1, 0)
+        };
+    }
+
+    fn reply_ended(&mut self) {
+        let attempt = self.last().attempts - 1;
+        let iteration = self.iterations.len() as u32;
+        let reply = String::from_utf8_lossy(&self.last().reply).into_owned();
+        match extract(&reply) {
+            Ok(files) => {
+                self.last().files = files.clone();
+                self.next = Next::Check(files);
+            }
+            Err(Reject::Malformed(_)) if attempt > 0 => {
+                self.next = Next::End(Outcome::LlmMalformed)
+            }
+            Err(Reject::Malformed(_)) if self.spent_out() => {
+                self.next = Next::End(Outcome::RunDeadline);
+            }
+            Err(Reject::Malformed(_)) => self.next = self.call(iteration, attempt + 1),
+            Err(violation) => self.advance(violation.feedback()),
+        }
+    }
+
+    fn checked(&mut self, diagnostics: &[Diagnostic]) {
+        if !diagnostics.is_empty() {
+            self.last().diagnostics = diagnostics.to_vec();
+            self.advance(diagnostics_feedback(diagnostics));
+        }
+    }
+
+    fn ran(&mut self, run: &RunOutput) {
+        let iteration = self.last();
+        iteration.tests = run.tests.clone();
+        iteration.logs = run.logs.clone();
+        if passes(run) {
+            self.next = Next::End(Outcome::Success);
+        } else {
+            self.advance(sandbox_feedback(run));
+        }
+    }
+
+    fn apply(&mut self, record: &Record) {
+        match record {
+            Record::ReplyStart {
+                iteration,
+                attempt,
+                prompt,
+                ..
+            } => {
+                if *attempt == 0 {
+                    self.iterations.push(Iteration::default());
+                    debug_assert_eq!(self.iterations.len() as u32, *iteration);
+                }
+                let last = self.last();
+                last.prompt.clone_from(prompt);
+                last.attempts = attempt + 1;
+                last.reply.clear();
+                self.calls += 1;
+                self.open = 0;
+                self.next = Next::Generate;
+            }
+            Record::Tokens { tokens, .. } => {
+                self.last().reply.extend(tokens.iter().map(|t| *t as u8));
+                self.open += tokens.len();
+                self.spent += tokens.len() as u64;
+            }
+            Record::ReplyEnd { .. } => self.reply_ended(),
+            Record::Check { diagnostics, .. } => self.checked(diagnostics),
+            Record::Run(run) => self.ran(run),
+            Record::CodeEnd { .. } | Record::Cancelled => self.next = Next::Done,
+            _ => {}
+        }
+    }
+}
+
+impl Loop {
+    /// The records of the next step that needs no checker or sandbox: a model call, a batch of
+    /// its reply (cut at the budget), or the end. `None` for a check or a finished stream.
+    pub fn step(&self, replies: &[String], batch: usize) -> Option<Vec<Record>> {
+        let end = |outcome: Outcome| {
+            Some(vec![Record::CodeEnd {
+                outcome: outcome.as_str().into(),
+            }])
+        };
+        match &self.next {
+            Next::Call { .. } if self.calls >= replies.len() => end(Outcome::LlmError),
+            Next::Call {
+                iteration,
+                attempt,
+                prompt,
+            } => Some(vec![Record::ReplyStart {
+                iteration: *iteration,
+                attempt: *attempt,
+                prompt: prompt.clone(),
+                prompt_tokens: Vec::new(),
+            }]),
+            Next::Generate => Some(self.reply_batch(&replies[self.calls - 1], batch)),
+            Next::End(outcome) => end(*outcome),
+            Next::Check(_) | Next::Done => None,
+        }
+    }
+
+    fn reply_batch(&self, reply: &str, batch: usize) -> Vec<Record> {
+        let room = (self.budget as usize).saturating_sub(self.open);
+        let (tokens, whole) = replay_batch(reply, self.open, room.min(batch));
+        let ends = whole || tokens.len() == room;
+        let mut records = vec![Record::Tokens {
+            tokens,
+            rng_state: Vec::new(),
+        }];
+        records.extend(ends.then(|| Record::ReplyEnd {
+            reason: if whole { "eos" } else { "budget" }.into(),
+        }));
+        records
+    }
+}
+
+/// Fold the records of a coding stream, or `None` when it does not start with `CodeStart`.
+pub fn fold(records: &[Record]) -> Option<Loop> {
+    let Some(Record::CodeStart {
+        task,
+        spec,
+        max_iterations,
+        budget,
+        ..
+    }) = records.first()
+    else {
+        return None;
+    };
+    let mut state = Loop {
+        task: task.clone(),
+        spec: spec.clone(),
+        max_iterations: *max_iterations,
+        budget: *budget,
+        iterations: Vec::new(),
+        stray: Iteration::default(),
+        calls: 0,
+        open: 0,
+        spent: 0,
+        next: Next::Done,
+    };
+    state.next = state.call(1, 0);
+    for record in &records[1..] {
+        state.apply(record);
+    }
+    Some(state)
+}
+
+/// The iterations and outcome a client sees, from committed records only.
+pub fn view(records: &[Record]) -> Option<Value> {
+    let state = fold(records)?;
+    let outcome = match records.last() {
+        Some(Record::CodeEnd { outcome }) => Value::from(outcome.as_str()),
+        _ => Value::Null,
+    };
+    let iterations: Vec<Value> = state.iterations.iter().map(iteration_json).collect();
+    Some(serde_json::json!({ "outcome": outcome, "iterations": iterations }))
+}
+
+fn iteration_json(i: &Iteration) -> Value {
+    let files: serde_json::Map<String, Value> = i
+        .files
+        .iter()
+        .map(|(name, text)| (name.clone(), Value::from(text.as_str())))
+        .collect();
+    serde_json::json!({
+        "prompt": i.prompt,
+        "attempts": i.attempts,
+        "reply": String::from_utf8_lossy(&i.reply),
+        "files": files,
+        "diagnostics": i.diagnostics,
+        "tests": i.tests,
+        "logs": i.logs,
+        "feedback": i.feedback,
+    })
 }
 
 #[cfg(test)]

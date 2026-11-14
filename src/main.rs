@@ -66,9 +66,10 @@ async fn start_cluster(
 fn load_engine(settings: &Settings) -> Result<Option<Engine>, String> {
     let model = &settings.model;
     if let Some(path) = &model.replies {
-        return Engine::replay(path)
-            .map(Some)
-            .map_err(|e| format!("invalid configuration: MODEL.REPLIES: {e}"));
+        let refused = |e: String| format!("invalid configuration: MODEL.REPLIES: {e}");
+        // Coding goals type-check every reply: a checker that cannot load stops the node here.
+        rs3::checker::check(&[]).map_err(|e| refused(e.to_string()))?;
+        return Engine::replay(path).map(Some).map_err(refused);
     }
     let (Some(path), Some(tokenizer)) = (&model.path, &model.tokenizer) else {
         return Ok(None);
