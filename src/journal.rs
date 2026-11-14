@@ -21,6 +21,9 @@ use std::sync::Arc;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
+use crate::checker::Diagnostic;
+use crate::sandbox::RunOutput;
+
 pub(crate) const RECORDS: TableDefinition<(u64, u64), &[u8]> =
     TableDefinition::new("journal_records");
 const HEADS: TableDefinition<u64, &[u8]> = TableDefinition::new("journal_heads");
@@ -93,20 +96,52 @@ pub enum Record {
     ScriptEnd {
         outcome: Result<String, ScriptFailure>,
     },
+    /// First record of a coding-loop stream: the task and everything that pins its replay.
+    CodeStart {
+        task: String,
+        spec: String,
+        max_iterations: u32,
+        budget: u64,
+        seed: u64,
+        engine: String,
+        model_hash: String,
+        checker_hash: String,
+    },
+    /// A model call begins: the exact prompt for this iteration's attempt.
+    ReplyStart {
+        iteration: u32,
+        attempt: u32,
+        prompt: String,
+        prompt_tokens: Vec<u32>,
+    },
+    /// The model call is finished (`eos` or `budget`); its tokens are the `Tokens` records before.
+    ReplyEnd { reason: String },
+    /// What the type checker found in the reply's files, and the JavaScript it emitted.
+    Check {
+        diagnostics: Vec<Diagnostic>,
+        js: Option<String>,
+    },
+    /// What the sandbox saw when it ran the emitted JavaScript.
+    Run(RunOutput),
+    /// The coding loop is finished. Nothing can be appended after this record.
+    CodeEnd { outcome: String },
 }
 
 impl Record {
     fn starts_stream(&self) -> bool {
         matches!(
             self,
-            Record::InferenceStart { .. } | Record::ScriptStart { .. }
+            Record::InferenceStart { .. } | Record::ScriptStart { .. } | Record::CodeStart { .. }
         )
     }
 
     pub fn ends_stream(&self) -> bool {
         matches!(
             self,
-            Record::InferenceEnd { .. } | Record::ScriptEnd { .. } | Record::Cancelled
+            Record::InferenceEnd { .. }
+                | Record::ScriptEnd { .. }
+                | Record::CodeEnd { .. }
+                | Record::Cancelled
         )
     }
 }
@@ -978,6 +1013,57 @@ mod tests {
         drop((journal, db));
         let journal = Journal::new(open(&path).unwrap()).unwrap();
         assert_eq!(journal.read(9).unwrap(), expected);
+    }
+
+    #[test]
+    fn code_stream_round_trips_and_nothing_follows_its_end() {
+        let (_dir, _db, journal) = journal();
+        let records = vec![
+            Record::CodeStart {
+                task: "t".into(),
+                spec: "s".into(),
+                max_iterations: 3,
+                budget: 100,
+                seed: 7,
+                engine: "replay".into(),
+                model_hash: "m".into(),
+                checker_hash: "c".into(),
+            },
+            Record::ReplyStart {
+                iteration: 1,
+                attempt: 0,
+                prompt: "p".into(),
+                prompt_tokens: vec![1, 2],
+            },
+            tokens(&[104, 105], 1),
+            Record::ReplyEnd {
+                reason: "eos".into(),
+            },
+            Record::Check {
+                diagnostics: vec![Diagnostic {
+                    file: "a.ts".into(),
+                    line: 1,
+                    column: 2,
+                    code: 2322,
+                    message: "bad".into(),
+                }],
+                js: Some("x".into()),
+            },
+            Record::Run(RunOutput {
+                status: "passed".into(),
+                tests: vec![],
+                logs: vec!["l".into()],
+                error: None,
+            }),
+            Record::CodeEnd {
+                outcome: "success".into(),
+            },
+        ];
+        for (seq, record) in records.iter().enumerate() {
+            journal.append(4, seq as u64, record).unwrap();
+        }
+        assert_eq!(journal.read(4).unwrap(), records);
+        assert!(journal.append(4, 7, &tokens(&[1], 2)).is_err());
     }
 
     #[test]

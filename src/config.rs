@@ -6,7 +6,7 @@
 //! any other dotenv problem (a line that does not parse, an unreadable file) is
 //! a configuration error. Only the keys `SERVER.HOST`, `SERVER.PORT`,
 //! `STORAGE.PATH`, `SCHEDULER.WORKERS`, `MODEL.TOKENS_PER_SECOND`, `MODEL.PATH`,
-//! `MODEL.TOKENIZER`, `MODEL.THREADS` (default 4) and the `CLUSTER.*` keys
+//! `MODEL.TOKENIZER`, `MODEL.THREADS` (default 4), `MODEL.REPLIES` and the `CLUSTER.*` keys
 //! (case-insensitive) are used. `MODEL.PATH` and `MODEL.TOKENIZER` go together. Both server keys are required: there are no
 //! defaults, and missing or invalid values are an error. Without `STORAGE.PATH`
 //! the store keeps its data in memory only. `SCHEDULER.WORKERS` (default 2) and
@@ -20,7 +20,7 @@ use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 
 /// The only configuration keys read from the dotenv file and the environment.
-const CONFIG_KEYS: [&str; 12] = [
+const CONFIG_KEYS: [&str; 13] = [
     "server.host",
     "server.port",
     "storage.path",
@@ -29,6 +29,7 @@ const CONFIG_KEYS: [&str; 12] = [
     "model.path",
     "model.tokenizer",
     "model.threads",
+    "model.replies",
     "cluster.node_id",
     "cluster.peers",
     "cluster.snapshot_every",
@@ -73,6 +74,8 @@ pub struct ModelSettings {
     pub tokenizer: Option<PathBuf>,
     /// Threads the real model computes on.
     pub threads: NonZeroUsize,
+    /// A JSON file holding a list of strings that stand in for the model's replies, in order.
+    pub replies: Option<PathBuf>,
 }
 
 impl Default for ModelSettings {
@@ -82,6 +85,7 @@ impl Default for ModelSettings {
             path: None,
             tokenizer: None,
             threads: NonZeroUsize::MIN.saturating_add(3),
+            replies: None,
         }
     }
 }
@@ -288,6 +292,11 @@ impl Settings {
         if raw.model.path.is_some() != raw.model.tokenizer.is_some() {
             return Err(invalid(
                 "MODEL.PATH and MODEL.TOKENIZER must be set together",
+            ));
+        }
+        if raw.model.replies.is_some() && raw.model.path.is_some() {
+            return Err(invalid(
+                "MODEL.REPLIES cannot be set together with MODEL.PATH",
             ));
         }
         let cluster = raw.cluster.parse()?;
@@ -529,6 +538,23 @@ mod tests {
         }
         let e = with(&[("MODEL.PATH", "/m")]).unwrap_err().to_string();
         assert!(e.contains("MODEL.TOKENIZER"), "unexpected error: {e}");
+    }
+
+    #[test]
+    fn model_replies_is_read_in_any_case_and_excludes_a_model() {
+        let base = [("SERVER.HOST", "h"), ("SERVER.PORT", "1")];
+        let with = |extra: &[(&str, &str)]| Settings::from_map(vars(&[&base[..], extra].concat()));
+        let s = with(&[("Model.Replies", "/r.json")]).unwrap();
+        assert_eq!(s.model.replies, Some(PathBuf::from("/r.json")));
+        assert_eq!(with(&[]).unwrap().model.replies, None);
+        let e = with(&[
+            ("MODEL.REPLIES", "/r.json"),
+            ("MODEL.PATH", "/m"),
+            ("MODEL.TOKENIZER", "/t"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("MODEL.REPLIES"), "unexpected error: {e}");
     }
 
     #[test]
