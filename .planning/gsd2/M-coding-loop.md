@@ -47,8 +47,10 @@ nothing that was committed. Plain text goals and every existing test are unchang
   | Type errors | 4.9 | 1.0 |
   | New filename each run | 7.2 | 5.2 |
 
-  - The native build leaks about 280 KB per run, so the checker runs only as wasm, never linked natively.
-  - Symbol ids are never reused, and `SymbolId` is 32-bit. How fast ids are used up is being measured.
+  - The native build leaks 0.31 to 0.42 MB per run, so the checker runs only as wasm, never linked natively.
+  - The 32-bit symbol index space only grows, by 512 to 1536 per run. It lasts about 2.8 million runs, and a
+    128 MB instance fills after about 23,000 runs, so recycling after 50 runs is far inside both limits. Details and
+    the fork commit are in `M-coding-loop-ts-rust-handoff.md`.
   - The prototype recycles its instance after 50 runs and after any trap.
 - **Sandbox:** the prototype runs guests in QuickJS-wasm with an injected `test`, `expect` and `assert` harness
   (`src/sandbox/harness.ts`). rs3 already runs scripts in fresh deno_core V8 runtimes, with a timeout and no store
