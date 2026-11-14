@@ -83,6 +83,7 @@ fn load_engine(settings: &Settings) -> Result<Option<Engine>, String> {
 /// server failure to report, without the `error: ` prefix.
 async fn run() -> Result<(), String> {
     let settings = Settings::load().map_err(|e| format!("invalid configuration: {e}"))?;
+    rs3::checker::configure(settings.checker.recycle_after.get());
     let (store, goals, cluster_db) =
         open_storage(&settings).map_err(|e| format!("cannot open storage: {e}"))?;
     // V8 is initialised once on the main thread before any other thread (JS pool, actix workers) spawns.

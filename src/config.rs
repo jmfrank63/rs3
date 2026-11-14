@@ -6,7 +6,8 @@
 //! any other dotenv problem (a line that does not parse, an unreadable file) is
 //! a configuration error. Only the keys `SERVER.HOST`, `SERVER.PORT`,
 //! `STORAGE.PATH`, `SCHEDULER.WORKERS`, `MODEL.TOKENS_PER_SECOND`, `MODEL.PATH`,
-//! `MODEL.TOKENIZER`, `MODEL.THREADS` (default 4), `MODEL.REPLIES` and the `CLUSTER.*` keys
+//! `MODEL.TOKENIZER`, `MODEL.THREADS` (default 4), `MODEL.REPLIES`, `CHECKER.RECYCLE_AFTER`
+//! (default 50, a positive integer) and the `CLUSTER.*` keys
 //! (case-insensitive) are used. `MODEL.PATH` and `MODEL.TOKENIZER` go together. Both server keys are required: there are no
 //! defaults, and missing or invalid values are an error. Without `STORAGE.PATH`
 //! the store keeps its data in memory only. `SCHEDULER.WORKERS` (default 2) and
@@ -20,7 +21,7 @@ use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 
 /// The only configuration keys read from the dotenv file and the environment.
-const CONFIG_KEYS: [&str; 13] = [
+const CONFIG_KEYS: [&str; 14] = [
     "server.host",
     "server.port",
     "storage.path",
@@ -30,6 +31,7 @@ const CONFIG_KEYS: [&str; 13] = [
     "model.tokenizer",
     "model.threads",
     "model.replies",
+    "checker.recycle_after",
     "cluster.node_id",
     "cluster.peers",
     "cluster.snapshot_every",
@@ -86,6 +88,22 @@ impl Default for ModelSettings {
             tokenizer: None,
             threads: NonZeroUsize::MIN.saturating_add(3),
             replies: None,
+        }
+    }
+}
+
+/// How the TypeScript checker is hosted.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CheckerSettings {
+    /// Runs one checker instance serves before it is replaced by a fresh one.
+    pub recycle_after: NonZeroU32,
+}
+
+impl Default for CheckerSettings {
+    fn default() -> Self {
+        Self {
+            recycle_after: NonZeroU32::MIN.saturating_add(49),
         }
     }
 }
@@ -184,6 +202,7 @@ pub struct Settings {
     pub storage: StorageSettings,
     pub scheduler: SchedulerSettings,
     pub model: ModelSettings,
+    pub checker: CheckerSettings,
     /// `None` runs a single node exactly as before.
     pub cluster: Option<ClusterSettings>,
 }
@@ -197,6 +216,8 @@ struct RawSettings {
     scheduler: SchedulerSettings,
     #[serde(default)]
     model: ModelSettings,
+    #[serde(default)]
+    checker: CheckerSettings,
     #[serde(default)]
     cluster: RawCluster,
 }
@@ -308,6 +329,7 @@ impl Settings {
             storage: raw.storage,
             scheduler: raw.scheduler,
             model: raw.model,
+            checker: raw.checker,
             cluster,
         })
     }
@@ -472,6 +494,7 @@ mod tests {
                 storage: StorageSettings::default(),
                 scheduler: SchedulerSettings::default(),
                 model: ModelSettings::default(),
+                checker: CheckerSettings::default(),
                 cluster: None,
             }
         );
@@ -503,6 +526,8 @@ mod tests {
             ("SCHEDULER.WORKERS", "many"),
             ("MODEL.TOKENS_PER_SECOND", "0"),
             ("MODEL.TOKENS_PER_SECOND", "fast"),
+            ("CHECKER.RECYCLE_AFTER", "0"),
+            ("CHECKER.RECYCLE_AFTER", "many"),
         ] {
             let r = Settings::from_map(vars(&[
                 ("SERVER.HOST", "h"),
@@ -511,6 +536,30 @@ mod tests {
             ]));
             assert!(r.is_err(), "{key}={value} accepted: {r:?}");
         }
+    }
+
+    #[test]
+    fn checker_recycle_after_defaults_to_50_and_is_read_in_any_case() {
+        let base = [("SERVER.HOST", "h"), ("SERVER.PORT", "1")];
+        let with = |extra: &[(&str, &str)]| Settings::from_map(vars(&[&base[..], extra].concat()));
+        assert_eq!(with(&[]).unwrap().checker.recycle_after.get(), 50);
+        let merged = merge_dotenv_env(
+            None::<Vec<dotenvy::Result<(String, String)>>>,
+            env(&[
+                ("SERVER.HOST", "h"),
+                ("SERVER.PORT", "1"),
+                ("Checker.RECYCLE_after", "3"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::from_map(merged)
+                .unwrap()
+                .checker
+                .recycle_after
+                .get(),
+            3
+        );
     }
 
     #[test]

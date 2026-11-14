@@ -1,18 +1,25 @@
 //! The TypeScript checker: `ts_rust.wasm` (the Rust port of tsc, see `checker/PROVENANCE.md`) hosted
 //! in wasmtime. One instance is held for the process so unchanged files are not re-parsed; any
 //! error drops it and the next check starts from a fresh instance of the same compiled module.
+//! The instance is also replaced after `CHECKER.RECYCLE_AFTER` runs, and a trapped check is retried
+//! once on a fresh instance before it is reported as a `(program)` diagnostic.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use serde::{Deserialize, Serialize};
-use wasmtime::{Caller, Engine, Extern, Linker, Memory, Module, Store, TypedFunc, Val};
+use wasmtime::{
+    Caller, Engine, Extern, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
+    TypedFunc, Val,
+};
 
 const WASM: &[u8] = include_bytes!("../checker/ts_rust.wasm");
 const GUEST_GLOBALS: &str = include_str!("../checker/guest-globals.d.ts");
 const TSCONFIG: &str = include_str!("../checker/tsconfig.json");
 const ROOT: &str = "/app";
+/// Linear memory one instance may grow to; going past it traps the check.
+const MEMORY_LIMIT: usize = 512 << 20;
 
 /// Which stage of hosting the checker failed, so a broken module is reported, not hidden.
 #[derive(Debug, thiserror::Error)]
@@ -170,6 +177,7 @@ fn fs_call(fs: &mut MemFs, op: u32, request: &[u8]) -> Reply {
 struct Host {
     fs: MemFs,
     staged: Vec<u8>,
+    limits: StoreLimits,
 }
 
 fn trap(message: &str) -> wasmtime::Error {
@@ -234,10 +242,18 @@ struct Held {
     output: TypedFunc<(), u32>,
     output_len: TypedFunc<(), u32>,
     memory: Memory,
+    runs: u32,
 }
 
 static MODULE: OnceLock<Result<(Engine, Module), String>> = OnceLock::new();
 static HELD: Mutex<Option<Held>> = Mutex::new(None);
+static RECYCLE_AFTER: OnceLock<u32> = OnceLock::new();
+
+/// How many checks one instance serves before a fresh one replaces it (default 50); the first
+/// call wins.
+pub fn configure(recycle_after: u32) {
+    let _ = RECYCLE_AFTER.set(recycle_after);
+}
 
 fn module() -> Result<&'static (Engine, Module), CheckerError> {
     MODULE
@@ -285,8 +301,10 @@ fn instantiate() -> Result<Held, CheckerError> {
     let host = Host {
         fs: MemFs::default(),
         staged: Vec::new(),
+        limits: StoreLimitsBuilder::new().memory_size(MEMORY_LIMIT).build(),
     };
     let mut store = Store::new(engine, host);
+    store.limiter(|host| &mut host.limits);
     let instance = linker.instantiate(&mut store, module).map_err(fail)?;
     let memory = instance
         .get_memory(&mut store, "memory")
@@ -306,6 +324,7 @@ fn instantiate() -> Result<Held, CheckerError> {
             .map_err(fail)?,
         store,
         memory,
+        runs: 0,
     })
 }
 
@@ -411,22 +430,52 @@ fn parse(output: &[u8]) -> Result<Vec<Diagnostic>, CheckerError> {
     Ok(diagnostics)
 }
 
-/// Type-check `files` (path, text) as one project and emit their JavaScript. An error drops the
-/// held instance, so the next call starts fresh.
-pub fn check(files: &[(String, String)]) -> Result<CheckOutput, CheckerError> {
-    let project = project(files)?;
-    let mut slot = HELD.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut held = match slot.take() {
+/// Run the project on `held`, or on a fresh instance when there is none.
+fn attempt(
+    held: Option<Held>,
+    project: &BTreeMap<String, String>,
+) -> Result<(Held, Vec<u8>), CheckerError> {
+    let mut held = match held {
         Some(held) => held,
         None => instantiate()?,
     };
-    let output = parse(&run(&mut held, &project)?)?;
+    let output = run(&mut held, project)?;
+    Ok((held, output))
+}
+
+/// What a check that traps on a fresh instance too reports.
+fn trapped_check() -> CheckOutput {
+    CheckOutput {
+        diagnostics: vec![Diagnostic {
+            file: "(program)".into(),
+            line: -1,
+            column: -1,
+            code: 0,
+            message: "checker trapped".into(),
+        }],
+        js: None,
+    }
+}
+
+/// Type-check `files` (path, text) as one project and emit their JavaScript. An error drops the
+/// held instance, so the next call starts fresh; a trap is retried once on a fresh instance.
+pub fn check(files: &[(String, String)]) -> Result<CheckOutput, CheckerError> {
+    let project = project(files)?;
+    let mut slot = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+    let recycle_after = *RECYCLE_AFTER.get().unwrap_or(&50);
+    let held = slot.take().filter(|held| held.runs < recycle_after);
+    let (mut held, output) = match attempt(held, &project) {
+        Err(CheckerError::Trap(_)) => match attempt(None, &project) {
+            Err(CheckerError::Trap(_)) => return Ok(trapped_check()),
+            other => other?,
+        },
+        other => other?,
+    };
+    held.runs += 1;
+    let diagnostics = parse(&output)?;
     let js = emitted(&held.store.data().fs);
     *slot = Some(held);
-    Ok(CheckOutput {
-        diagnostics: output,
-        js,
-    })
+    Ok(CheckOutput { diagnostics, js })
 }
 
 #[cfg(test)]
@@ -561,18 +610,39 @@ mod tests {
     }
 
     #[test]
-    fn a_crashing_check_reports_an_error_and_the_next_check_still_works() {
+    fn a_crashing_check_is_a_program_diagnostic_and_the_next_check_still_works() {
         let src = format!("const x = {}1{};\n", "(".repeat(20_000), ")".repeat(20_000));
-        assert!(matches!(
-            check(&one("/guest.ts", &src)),
-            Err(CheckerError::Trap(_))
-        ));
+        let first = check(&one("/guest.ts", &src)).unwrap();
+        assert_eq!(
+            first.diagnostics,
+            vec![Diagnostic {
+                file: "(program)".into(),
+                line: -1,
+                column: -1,
+                code: 0,
+                message: "checker trapped".into(),
+            }]
+        );
+        assert_eq!(first.js, None);
+        assert_eq!(check(&one("/guest.ts", &src)).unwrap(), first);
         assert_eq!(
             check(&one("/guest.ts", "const y = 1;\n"))
                 .unwrap()
                 .diagnostics,
             vec![]
         );
+    }
+
+    #[test]
+    fn diagnostics_are_the_same_after_the_checker_was_recycled() {
+        let a = one("/a.ts", "export const a: number = \"x\";\n");
+        let first = check(&a).unwrap();
+        assert_eq!(first.diagnostics.len(), 1);
+        for i in 0..60 {
+            let b = one("/b.ts", &format!("export const b{i}: number = {i};\n"));
+            assert_eq!(check(&b).unwrap().diagnostics, vec![]);
+        }
+        assert_eq!(check(&a).unwrap(), first);
     }
 
     #[test]
