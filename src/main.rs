@@ -86,7 +86,9 @@ async fn run() -> Result<(), String> {
     rs3::checker::configure(
         settings.checker.recycle_after.get(),
         settings.checker.cache.clone(),
-    );
+        settings.checker.path.clone(),
+    )
+    .map_err(|e| format!("invalid configuration: CHECKER.PATH: {e}"))?;
     let (store, goals, cluster_db) =
         open_storage(&settings).map_err(|e| format!("cannot open storage: {e}"))?;
     // V8 is initialised once on the main thread before any other thread (JS pool, actix workers) spawns.

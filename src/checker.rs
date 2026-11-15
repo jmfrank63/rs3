@@ -54,9 +54,19 @@ pub struct CheckOutput {
     pub js: Option<String>,
 }
 
-/// The hash of the checker module a coding goal's results depend on.
+/// The hash of the checker a coding goal's results depend on: the module, the guest globals and
+/// the tsconfig, each length-prefixed so no two splits of the same bytes collide.
 pub fn hash() -> String {
-    blake3::hash(WASM).to_hex().to_string()
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        let mut hasher = blake3::Hasher::new();
+        for part in [wasm(), GUEST_GLOBALS.as_bytes(), TSCONFIG.as_bytes()] {
+            hasher.update(&(part.len() as u64).to_le_bytes());
+            hasher.update(part);
+        }
+        hasher.finalize().to_hex().to_string()
+    })
+    .clone()
 }
 
 /// Modification stamps are never reused: the checker's parse cache is keyed on them.
@@ -250,17 +260,31 @@ static MODULE: OnceLock<Result<(Engine, Module), String>> = OnceLock::new();
 static HELD: Mutex<Option<Held>> = Mutex::new(None);
 static RECYCLE_AFTER: OnceLock<u32> = OnceLock::new();
 static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static MODULE_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
 static INSTANCES: AtomicU64 = AtomicU64::new(0);
 static CHECKS: AtomicU64 = AtomicU64::new(0);
 
-/// How many checks one instance serves before a fresh one replaces it (default 50), and where
-/// the compiled module is cached (default: wasmtime's per-user cache directory); the first call
-/// wins.
-pub fn configure(recycle_after: u32, cache: Option<PathBuf>) {
+/// The checker module in use: the file `CHECKER.PATH` names, else the embedded one.
+fn wasm() -> &'static [u8] {
+    MODULE_BYTES.get().map_or(WASM, Vec::as_slice)
+}
+
+/// How many checks one instance serves before a fresh one replaces it (default 50), where the
+/// compiled module is cached (default: wasmtime's per-user cache directory) and which module file
+/// replaces the embedded one; the first call wins. An unreadable module file is an error.
+pub fn configure(
+    recycle_after: u32,
+    cache: Option<PathBuf>,
+    path: Option<PathBuf>,
+) -> std::io::Result<()> {
+    if let Some(path) = path {
+        let _ = MODULE_BYTES.set(std::fs::read(path)?);
+    }
     let _ = RECYCLE_AFTER.set(recycle_after);
     if let Some(dir) = cache {
         let _ = CACHE_DIR.set(dir);
     }
+    Ok(())
 }
 
 /// Checker instances this process has created and checks it has run.
@@ -289,7 +313,7 @@ fn module() -> Result<&'static (Engine, Module), CheckerError> {
     MODULE
         .get_or_init(|| {
             let engine = engine();
-            let module = Module::new(&engine, WASM).map_err(|e| format!("{e:#}"))?;
+            let module = Module::new(&engine, wasm()).map_err(|e| format!("{e:#}"))?;
             Ok((engine, module))
         })
         .as_ref()

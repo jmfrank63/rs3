@@ -1396,3 +1396,81 @@ mod cluster_model {
         }
     }
 }
+
+#[cfg(test)]
+mod cluster_code {
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+
+    use crate::cluster::{Cluster, wait_until};
+    use crate::common::{Server, TempDir};
+
+    const PASSING: &str = "function add(a: number, b: number): number { return a + b; }\n\
+        test(\"adds\", () => { expect(add(1, 2)).toEqual(3); });";
+    const TYPE_ERROR: &str = "const n: number = \"s\";\n\
+        test(\"t\", () => { expect(1).toEqual(1); });";
+
+    fn reply(source: &str) -> String {
+        json!({"explanation": "x", "files": {"a.ts": source}}).to_string()
+    }
+
+    fn body() -> String {
+        json!({"kind": "code", "task": "write add", "spec": "add two numbers", "max_iterations": 3})
+            .to_string()
+    }
+
+    /// The embedded checker module with a custom section appended: still valid wasm, other bytes.
+    fn other_checker(dir: &TempDir) -> std::path::PathBuf {
+        let mut bytes =
+            std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/checker/ts_rust.wasm")).unwrap();
+        bytes.extend_from_slice(&[0x00, 0x03, 0x01, b'x', 0x2a]);
+        let path = dir.0.join("other.wasm");
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn without_node(mut goal: Value) -> Value {
+        goal.as_object_mut().unwrap().remove("node");
+        goal
+    }
+
+    #[test]
+    fn a_node_with_another_checker_declines_the_goal_and_it_finishes_elsewhere() {
+        let dir = TempDir::new("cluster-checker-files");
+        let replies = dir.0.join("r.json");
+        std::fs::write(
+            &replies,
+            serde_json::to_string(&[reply(TYPE_ERROR), reply(PASSING)]).unwrap(),
+        )
+        .unwrap();
+        let env = [("MODEL.REPLIES", replies.to_str().unwrap())];
+        let reference = {
+            let one = TempDir::new("cluster-checker-ref");
+            let server = Server::start(&one.0, Some(&one.0.join("rs3.redb")), &env);
+            let (status, text) = server.request_status("POST", "/goals", &body());
+            assert_eq!(status, 201, "{text}");
+            wait_until("the reference goal", Duration::from_secs(60), || {
+                let got: Value =
+                    serde_json::from_str(&server.request("GET", "/goals/1", "")).ok()?;
+                (got["status"] == "done").then_some(got)
+            })
+        };
+        let own = vec![(
+            "CHECKER.PATH".to_owned(),
+            other_checker(&dir).to_str().unwrap().to_owned(),
+        )];
+        let cluster = Cluster::start_with_nodes("cluster-checker", 3, &env, vec![(0, own)]);
+        let id = cluster.create_goal(1, &body());
+        let got = wait_until("the goal to finish", Duration::from_secs(60), || {
+            let got = cluster.goal(1, id);
+            (got["status"] == "done").then_some(got)
+        });
+        assert_eq!(got["outcome"], "success", "{got}");
+        assert_ne!(got["node"], 1, "the node on another checker ran it: {got}");
+        let generated: Value =
+            serde_json::from_str(&cluster.request(0, "GET", "/goals/generated", "")).unwrap();
+        assert_eq!(generated["generated"].as_u64(), Some(0), "{generated}");
+        assert_eq!(without_node(got), without_node(reference));
+    }
+}

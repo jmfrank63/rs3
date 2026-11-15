@@ -1228,10 +1228,17 @@ impl Goals {
                 Some(Engine::Candle(c))
                     if c.model_hash == *model_hash && c.tokenizer_hash == *tokenizer_hash
             ),
-            Some(Record::CodeStart { model_hash, .. }) => matches!(
-                self.0.engine.get(),
-                Some(Engine::Replay { hash, .. }) if hash == model_hash
-            ),
+            Some(Record::CodeStart {
+                model_hash,
+                checker_hash,
+                ..
+            }) => {
+                *checker_hash == checker::hash()
+                    && matches!(
+                        self.0.engine.get(),
+                        Some(Engine::Replay { hash, .. }) if hash == model_hash
+                    )
+            }
             _ => true,
         })
     }

@@ -4,11 +4,12 @@ mod common;
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
 
-    use crate::common::{Server, TempDir};
+    use crate::common::{Server, TempDir, free_port, rs3};
 
     const PASSING: &str = "function add(a: number, b: number): number { return a + b; }\n\
         test(\"adds\", () => { expect(add(1, 2)).toEqual(3); });";
@@ -76,6 +77,40 @@ mod tests {
 
     fn text(v: &Value) -> String {
         v.as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn an_unreadable_checker_path_stops_the_node() {
+        let dir = TempDir::new("code-checker-missing");
+        let missing = dir.0.join("missing.wasm");
+        let mut child = rs3(free_port(), &dir.0, None)
+            .env("CHECKER.PATH", &missing)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("node still running with an unreadable CHECKER.PATH");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(!status.success());
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert!(
+            stderr.contains("invalid configuration: CHECKER.PATH"),
+            "{stderr}"
+        );
     }
 
     #[test]
