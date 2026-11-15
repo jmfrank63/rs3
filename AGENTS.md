@@ -36,7 +36,8 @@ loops, pipes, redirects, semicolons or parentheses, which GSD refuses to run. Ki
 remove the code it shows to be unnecessary. An agent's foreground command is capped at 10 minutes, so split a
 long run with `--file`. The maintainer runs the full gate
 (`bash scripts/quality.sh full <base>`) at the end of each slice. `--in-place` edits source files while it runs,
-so never run anything else in this checkout at the same time.
+so never run anything else in this checkout at the same time. Never wrap it in `timeout` or kill it: a
+run that is cut off leaves a mutant in the source. If one is left, `git checkout` that file before anything else.
 
 ## Machine and commands
 
