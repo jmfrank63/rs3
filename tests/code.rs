@@ -547,6 +547,10 @@ mod tests {
 
         let again = start_with(&dir, &dir.0.join("r.json"));
         assert_eq!(finished(&again, id), reference);
+        // The committed check is not run again: only the startup check and iteration 2's.
+        let stats: Value =
+            serde_json::from_str(&again.request("GET", "/goals/checker", "")).unwrap();
+        assert_eq!(stats["checks"], 2, "{stats}");
     }
 
     #[test]
