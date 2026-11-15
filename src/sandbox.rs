@@ -105,19 +105,37 @@ const PRELUDE: &str = r#"(function (g) {
     used += line.length + 1;
     logs.push(line);
   }
+  var NativeDate = g.Date, s = __seed >>> 0;
+  function FixedDate() {
+    return arguments.length === 0 ? new NativeDate(0) : new (Function.prototype.bind.apply(NativeDate, [null].concat([].slice.call(arguments))))();
+  }
+  FixedDate.prototype = NativeDate.prototype;
+  FixedDate.UTC = NativeDate.UTC;
+  FixedDate.parse = NativeDate.parse;
+  Object.defineProperty(FixedDate, "now", { value: function () { return 0; }, writable: false, configurable: false });
+  Object.defineProperty(NativeDate.prototype, "constructor", { value: FixedDate, writable: true, configurable: true });
+  lock("Date", FixedDate);
+  function rand() {
+    s = (s + 0x6D2B79F5) >>> 0;
+    var t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  Object.defineProperty(Math, "random", { value: rand, writable: false, enumerable: false, configurable: false });
   var c = {};
   ["log", "info", "warn", "error", "debug"].forEach(function (l) { c[l] = log; });
   lock("console", c);
   return function () { return JSON.stringify({ tests: records, logs: logs }); };
 })(globalThis)"#;
 
-/// Run `js` on a fresh runtime, aborting it after `timeout`. `seed` is accepted now so callers
-/// need not change when determinism lands; nothing reads it yet.
-pub fn run(js: &str, _seed: u64, timeout: Duration) -> RunOutput {
+/// Run `js` on a fresh runtime, aborting it after `timeout`. The run is the same on every node:
+/// the clock stays at the epoch (`Date.now()` and `new Date()` are 0) and `Math.random` is a
+/// generator seeded from the low 32 bits of `seed`.
+pub fn run(js: &str, seed: u64, timeout: Duration) -> RunOutput {
     let js = js.to_owned();
     std::thread::Builder::new()
         .name("sandbox".into())
-        .spawn(move || run_here(&js, timeout))
+        .spawn(move || run_here(&js, seed, timeout))
         .and_then(|h| {
             h.join()
                 .map_err(|_| std::io::Error::other("sandbox panicked"))
@@ -134,7 +152,7 @@ fn failure(status: &str, error: String) -> RunOutput {
     }
 }
 
-fn run_here(js: &str, timeout: Duration) -> RunOutput {
+fn run_here(js: &str, seed: u64, timeout: Duration) -> RunOutput {
     // deno_core aborts when V8 posts a delayed task and no tokio runtime is entered.
     let Ok(tokio_rt) = tokio::runtime::Builder::new_current_thread().build() else {
         return failure("error", "cannot start the sandbox executor".into());
@@ -157,7 +175,7 @@ fn run_here(js: &str, timeout: Duration) -> RunOutput {
         }
         expired
     });
-    let mut out = execute(&mut rt, js);
+    let mut out = execute(&mut rt, js, seed);
     drop(done);
     if watchdog.join().unwrap_or(false) {
         out = failure(
@@ -171,8 +189,12 @@ fn run_here(js: &str, timeout: Duration) -> RunOutput {
     out
 }
 
-fn execute(rt: &mut JsRuntime, js: &str) -> RunOutput {
-    let report = match rt.execute_script("harness.js", PRELUDE) {
+fn execute(rt: &mut JsRuntime, js: &str, seed: u64) -> RunOutput {
+    let prelude = format!(
+        "(function (__seed) {{ return {PRELUDE}; }})({})",
+        seed as u32
+    );
+    let report = match rt.execute_script("harness.js", prelude) {
         Ok(g) => g,
         Err(e) => return failure("error", format!("harness setup failed: {e}")),
     };
@@ -214,6 +236,10 @@ mod tests {
 
     fn run_js(js: &str) -> RunOutput {
         run(js, 0, T)
+    }
+
+    fn logs_of(js: &str, seed: u64) -> Vec<String> {
+        run(js, seed, T).logs
     }
 
     #[test]
@@ -387,5 +413,34 @@ mod tests {
         let out = run("1", 0, Duration::from_secs(30));
         assert_eq!(out.status, "passed");
         assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_clock_is_fixed_at_the_epoch() {
+        let src = "console.log(Date.now(), String(new Date().getTime()), new Date(5).getTime(), \
+                   typeof performance === 'undefined' ? 0 : performance.now());";
+        let first = logs_of(src, 1);
+        assert_eq!(first, ["0 0 5 0"]);
+        assert_eq!(logs_of(src, 2), first);
+    }
+
+    #[test]
+    fn math_random_follows_the_seed() {
+        let src = "console.log(Math.random(), Math.random(), Math.random());";
+        let a = logs_of(src, 7);
+        assert_eq!(logs_of(src, 7), a);
+        assert_ne!(logs_of(src, 8), a);
+        assert!(
+            a[0].split(' ')
+                .all(|n| n.parse::<f64>().is_ok_and(|x| (0.0..1.0).contains(&x)))
+        );
+    }
+
+    #[test]
+    fn a_guest_cannot_replace_the_clock_or_the_random_source() {
+        let src = "try { Date.now = () => 9; } catch (e) {} \
+                   try { Math.random = () => 0.5; } catch (e) {} \
+                   console.log(Date.now(), Math.random() === 0.5);";
+        assert_eq!(logs_of(src, 3), ["0 false"]);
     }
 }

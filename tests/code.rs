@@ -29,12 +29,14 @@ mod tests {
     }
 
     fn start_with(dir: &TempDir, file: &std::path::Path) -> Server {
+        start_env(dir, file, &[])
+    }
+
+    fn start_env(dir: &TempDir, file: &std::path::Path, extra: &[(&str, &str)]) -> Server {
         let db = dir.0.join("rs3.redb");
-        Server::start(
-            &dir.0,
-            Some(&db),
-            &[("MODEL.REPLIES", file.to_str().unwrap())],
-        )
+        let mut env = vec![("MODEL.REPLIES", file.to_str().unwrap())];
+        env.extend_from_slice(extra);
+        Server::start(&dir.0, Some(&db), &env)
     }
 
     fn create(server: &Server, body: &Value) -> u64 {
@@ -94,6 +96,106 @@ mod tests {
         assert_eq!(iterations[1]["tests"][0]["passed"], true);
         assert_eq!(iterations[1]["reply"], reply(PASSING));
         assert_eq!(iterations[1]["files"]["a.ts"], PASSING);
+    }
+
+    const CLOCK_AND_DICE: &str =
+        "console.log(Date.now(), String(new Date().getTime()), Math.random());";
+
+    fn logs_on_fresh_node(name: &str, seed: u64) -> Value {
+        let dir = TempDir::new(name);
+        let server = start(&dir, "r.json", &[reply(CLOCK_AND_DICE)]);
+        let mut body = code("log", 1);
+        body["seed"] = json!(seed);
+        let goal = finished(&server, create(&server, &body));
+        goal["iterations"][0]["logs"].clone()
+    }
+
+    #[test]
+    fn a_guest_sees_the_same_clock_and_dice_on_every_node() {
+        let first = logs_on_fresh_node("code-det-a", 5);
+        assert!(text(&first[0]).starts_with("0 0 0."), "{first}");
+        assert_eq!(logs_on_fresh_node("code-det-b", 5), first);
+        assert_ne!(logs_on_fresh_node("code-det-c", 6), first);
+    }
+
+    const THROWER: &str = "test(\"one\", () => {});\nthrow new Error(\"boom\");";
+
+    /// One goal on a fresh node; returns its iterations.
+    fn iterations_on_fresh_node(name: &str, replies: &[String], max: u32, recycle: &str) -> Value {
+        let dir = TempDir::new(name);
+        let file = dir.0.join("r.json");
+        std::fs::write(&file, serde_json::to_string(replies).unwrap()).unwrap();
+        let server = start_env(&dir, &file, &[("CHECKER.RECYCLE_AFTER", recycle)]);
+        let mut body = code("t", max);
+        body["seed"] = json!(7);
+        body["budget"] = json!(3000);
+        let id = create(&server, &body);
+        let goal = finished(&server, id);
+        assert_eq!(get(&server, id)["status"], "done");
+        goal["iterations"].clone()
+    }
+
+    #[test]
+    fn guests_give_identical_results_on_two_fresh_nodes() {
+        let guests = [SPIN, THROWER, CLOCK_AND_DICE];
+        for guest in guests {
+            let a = iterations_on_fresh_node("code-two-a", &[reply(guest)], 1, "50");
+            let b = iterations_on_fresh_node("code-two-b", &[reply(guest)], 1, "50");
+            assert_eq!(a, b, "{guest}");
+            if guest == SPIN {
+                assert!(a[0]["tests"].as_array().unwrap().is_empty(), "{a}");
+                assert!(a[0]["logs"].as_array().unwrap().is_empty(), "{a}");
+                assert!(text(&a[0]["feedback"]).contains("deadline"), "{a}");
+            }
+        }
+    }
+
+    #[test]
+    fn checks_are_identical_across_recycling() {
+        let others = [FAILING_TEST, FAILING_TEST];
+        let mut replies = vec![];
+        for i in 0..9 {
+            replies.push(reply(if i % 3 == 0 {
+                TYPE_ERROR
+            } else {
+                others[i % 2]
+            }));
+        }
+        let recycled = iterations_on_fresh_node("code-rec-a", &replies, 9, "2");
+        let default = iterations_on_fresh_node("code-rec-b", &replies, 9, "50");
+        let diags = |its: &Value| -> Vec<Value> {
+            its.as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["diagnostics"].clone())
+                .collect()
+        };
+        let d = diags(&recycled);
+        assert_eq!(d.len(), 9);
+        assert!(!d[0].as_array().unwrap().is_empty());
+        assert_eq!(d[0], d[3]);
+        assert_eq!(d[0], d[6]);
+        assert_eq!(d, diags(&default));
+    }
+
+    #[test]
+    fn a_trapping_reply_is_reported_and_the_next_reply_still_checks() {
+        let trap = format!(
+            "const x = {}1{};\ntest(\"t\", () => {{}});",
+            "(".repeat(1_200),
+            ")".repeat(1_200)
+        );
+        let replies = [reply(&trap), reply(PASSING)];
+        let its = iterations_on_fresh_node("code-trap-a", &replies, 3, "50");
+        assert_eq!(its[0]["diagnostics"][0]["file"], "(program)", "{its}");
+        assert!(
+            text(&its[0]["feedback"]).contains("checker trapped"),
+            "{its}"
+        );
+        assert!(its[0]["tests"].as_array().unwrap().is_empty());
+        let fresh = iterations_on_fresh_node("code-trap-b", &[reply(PASSING)], 3, "50");
+        assert_eq!(its[1]["diagnostics"], fresh[0]["diagnostics"]);
+        assert_eq!(its[1]["tests"][0]["passed"], true, "{its}");
     }
 
     #[test]

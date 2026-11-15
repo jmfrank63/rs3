@@ -157,6 +157,15 @@ struct Inner {
     generated: AtomicU64,
 }
 
+/// The seed of one iteration's sandbox run: the goal's seed and the iteration, hashed.
+fn run_seed(goal_seed: u64, iteration: u32) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&goal_seed.to_le_bytes());
+    hasher.update(&iteration.to_le_bytes());
+    let hash = hasher.finalize();
+    u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap_or_default())
+}
+
 /// The start record of a fake-model generation from `seed` and `prompt`.
 pub(crate) fn inference_start(seed: u64, prompt: &str) -> Record {
     Record::InferenceStart {
@@ -839,18 +848,28 @@ impl Goals {
             code::fold(records).ok_or_else(|| JournalError::Storage("not a code goal".into()))?;
         let next = match (state.step(replies, BATCH as usize), &state.next) {
             (Some(next), _) => next,
-            (None, code::Next::Check(files)) => self.check_and_run(files)?,
+            (None, code::Next::Check(files)) => {
+                let goal_seed = match records.first() {
+                    Some(Record::CodeStart { seed, .. }) => *seed,
+                    _ => 0,
+                };
+                self.check_and_run(files, run_seed(goal_seed, state.iterations.len() as u32))?
+            }
             (None, _) => return Ok(true),
         };
         self.commit_records(goal.id, fence, records.len() as u64, next)
     }
 
     /// The type check of `files`, and when it is clean the run of the JavaScript it emitted.
-    fn check_and_run(&self, files: &[(String, String)]) -> Result<Vec<Record>, JournalError> {
+    fn check_and_run(
+        &self,
+        files: &[(String, String)],
+        seed: u64,
+    ) -> Result<Vec<Record>, JournalError> {
         let found = checker::check(files).map_err(|e| JournalError::Storage(e.to_string()))?;
         let run = found.diagnostics.is_empty().then(|| {
             let js = found.js.clone().unwrap_or_default();
-            Record::Run(sandbox::run(&js, 0, SANDBOX_TIMEOUT))
+            Record::Run(sandbox::run(&js, seed, SANDBOX_TIMEOUT))
         });
         let mut records = vec![Record::Check {
             diagnostics: found.diagnostics,
