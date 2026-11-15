@@ -241,8 +241,10 @@ pub enum Next {
     },
     /// A model call is open: commit more of its reply.
     Generate,
-    /// Type-check the reply's files and, when they are clean, run them.
+    /// Type-check the reply's files.
     Check(Vec<(String, String)>),
+    /// Run the JavaScript of a clean check.
+    Run(String),
     /// Write the end record.
     End(Outcome),
     /// The stream has ended.
@@ -328,8 +330,10 @@ impl Loop {
         }
     }
 
-    fn checked(&mut self, diagnostics: &[Diagnostic]) {
-        if !diagnostics.is_empty() {
+    fn checked(&mut self, diagnostics: &[Diagnostic], js: &Option<String>) {
+        if diagnostics.is_empty() {
+            self.next = Next::Run(js.clone().unwrap_or_default());
+        } else {
             self.last().diagnostics = diagnostics.to_vec();
             self.advance(diagnostics_feedback(diagnostics));
         }
@@ -371,7 +375,7 @@ impl Loop {
                 self.open += tokens.len();
             }
             Record::ReplyEnd { .. } => self.reply_ended(),
-            Record::Check { diagnostics, .. } => self.checked(diagnostics),
+            Record::Check { diagnostics, js } => self.checked(diagnostics, js),
             Record::Run(run) => self.ran(run),
             Record::CodeEnd { .. } | Record::Cancelled => self.next = Next::Done,
             _ => {}
@@ -402,7 +406,7 @@ impl Loop {
             }]),
             Next::Generate => Some(self.reply_batch(&replies[self.calls - 1], batch)),
             Next::End(outcome) => end(*outcome),
-            Next::Check(_) | Next::Done => None,
+            Next::Check(_) | Next::Run(_) | Next::Done => None,
         }
     }
 

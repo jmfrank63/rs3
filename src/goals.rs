@@ -840,7 +840,7 @@ impl Goals {
     }
 
     /// The next step of a coding goal, derived from its committed records and committed in one
-    /// write: a model call, a batch of its reply, a check with its run, or the end.
+    /// write: a model call, a batch of its reply, a check, a run, or the end.
     fn step_code(
         &self,
         goal: &Goal,
@@ -855,34 +855,34 @@ impl Goals {
         let next = match (state.step(replies, BATCH as usize), &state.next) {
             (Some(next), _) => next,
             (None, code::Next::Check(files)) => {
+                let found =
+                    checker::check(files).map_err(|e| JournalError::Storage(e.to_string()))?;
+                vec![Record::Check {
+                    diagnostics: found.diagnostics,
+                    js: found.js,
+                }]
+            }
+            (None, code::Next::Run(js)) => {
                 let goal_seed = match records.first() {
                     Some(Record::CodeStart { seed, .. }) => *seed,
                     _ => 0,
                 };
-                self.check_and_run(files, run_seed(goal_seed, state.iterations.len() as u32))?
+                let seed = run_seed(goal_seed, state.iterations.len() as u32);
+                vec![Record::Run(sandbox::run(js, seed, SANDBOX_TIMEOUT))]
             }
             (None, _) => return Ok(true),
         };
-        self.commit_records(goal.id, fence, records.len() as u64, next)
-    }
-
-    /// The type check of `files`, and when it is clean the run of the JavaScript it emitted.
-    fn check_and_run(
-        &self,
-        files: &[(String, String)],
-        seed: u64,
-    ) -> Result<Vec<Record>, JournalError> {
-        let found = checker::check(files).map_err(|e| JournalError::Storage(e.to_string()))?;
-        let run = found.diagnostics.is_empty().then(|| {
-            let js = found.js.clone().unwrap_or_default();
-            Record::Run(sandbox::run(&js, seed, SANDBOX_TIMEOUT))
-        });
-        let mut records = vec![Record::Check {
-            diagnostics: found.diagnostics,
-            js: found.js,
-        }];
-        records.extend(run);
-        Ok(records)
+        let count: u64 = next
+            .iter()
+            .map(|r| match r {
+                Record::Tokens { tokens, .. } => tokens.len() as u64,
+                _ => 0,
+            })
+            .sum();
+        std::thread::sleep(Duration::from_secs_f64(count as f64 * self.0.token_secs));
+        let more = self.commit_records(goal.id, fence, records.len() as u64, next)?;
+        self.0.generated.fetch_add(count, Ordering::Relaxed);
+        Ok(more)
     }
 
     /// The next batch of a fake-model goal, after the time the model needs for it.

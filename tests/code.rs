@@ -340,6 +340,104 @@ mod tests {
     }
 
     #[test]
+    fn a_coding_goal_killed_between_its_check_and_its_run_finishes_identically() {
+        let replies = [reply(SPIN), reply(PASSING)];
+        let clean_dir = TempDir::new("code-between-clean");
+        let clean = start(&clean_dir, "r.json", &replies);
+        let clean_id = create(&clean, &code("add", 2));
+        let reference = finished(&clean, clean_id);
+        assert_eq!(reference["outcome"], "success", "{reference}");
+        assert_eq!(reference["iterations"][0]["tests"], json!([]));
+
+        let dir = TempDir::new("code-between-crash");
+        let server = start(&dir, "r.json", &replies);
+        let id = create(&server, &code("add", 2));
+        wait_until(&server, id, |g| {
+            g["iterations"][0]["files"]
+                .as_object()
+                .is_some_and(|f| !f.is_empty())
+        });
+        // The check takes about a second; the spinning run then lasts the whole sandbox timeout.
+        std::thread::sleep(Duration::from_millis(2500));
+        drop(server);
+        let db = dir.0.join("rs3.redb");
+        let journal = rs3::journal::Journal::new(rs3::storage::open(&db).unwrap()).unwrap();
+        let records = journal.read(id).unwrap();
+        assert!(
+            matches!(records.last(), Some(rs3::journal::Record::Check { diagnostics, .. }) if diagnostics.is_empty()),
+            "the check was not committed alone: {:?}",
+            records.last()
+        );
+        drop(journal);
+
+        let again = start_with(&dir, &dir.0.join("r.json"));
+        assert_eq!(finished(&again, id), reference);
+    }
+
+    #[test]
+    fn a_coding_goal_killed_mid_reply_finishes_identically_and_samples_only_uncommitted_tokens() {
+        use rs3::journal::Record;
+        let replies = [reply(TYPE_ERROR), reply(PASSING)];
+        let slow = [("MODEL.TOKENS_PER_SECOND", "200")];
+        let clean_dir = TempDir::new("code-mid-clean");
+        let file = clean_dir.0.join("r.json");
+        std::fs::write(&file, serde_json::to_string(&replies).unwrap()).unwrap();
+        let clean = start_env(&clean_dir, &file, &slow);
+        let clean_id = create(&clean, &code("add", 2));
+        let reference = finished(&clean, clean_id);
+        assert_eq!(reference["outcome"], "success", "{reference}");
+
+        let dir = TempDir::new("code-mid-crash");
+        let file = dir.0.join("r.json");
+        std::fs::write(&file, serde_json::to_string(&replies).unwrap()).unwrap();
+        let server = start_env(&dir, &file, &slow);
+        let id = create(&server, &code("add", 2));
+        wait_until(&server, id, |g| {
+            g["status"] != "done"
+                && g["iterations"][1]["reply"]
+                    .as_str()
+                    .is_some_and(|r| !r.is_empty() && r.len() < replies[1].len())
+        });
+        drop(server);
+        let db = dir.0.join("rs3.redb");
+        let journal = rs3::journal::Journal::new(rs3::storage::open(&db).unwrap()).unwrap();
+        let records = journal.read(id).unwrap();
+        drop(journal);
+        assert!(
+            !records.iter().any(|r| matches!(r, Record::CodeEnd { .. })),
+            "the goal had already ended"
+        );
+        let last_start = records
+            .iter()
+            .rposition(|r| matches!(r, Record::ReplyStart { .. }))
+            .unwrap();
+        assert!(
+            records[last_start + 1..]
+                .iter()
+                .all(|r| matches!(r, Record::Tokens { .. })),
+            "the second reply was not cut mid-way: {:?}",
+            records.last()
+        );
+        let committed: usize = records
+            .iter()
+            .map(|r| match r {
+                Record::Tokens { tokens, .. } => tokens.len(),
+                _ => 0,
+            })
+            .sum();
+
+        let again = start_env(&dir, &file, &slow);
+        assert_eq!(finished(&again, id), reference);
+        let generated: Value =
+            serde_json::from_str(&again.request("GET", "/goals/generated", "")).unwrap();
+        assert_eq!(
+            generated["generated"].as_u64(),
+            Some((replies[0].len() + replies[1].len() - committed) as u64),
+            "{generated}"
+        );
+    }
+
+    #[test]
     fn a_malformed_reply_that_used_the_whole_budget_still_gets_its_corrective_retry() {
         let junk = "x".repeat(400);
         let run = |name: &str, replies: &[String]| {
