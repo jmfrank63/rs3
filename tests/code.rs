@@ -118,6 +118,39 @@ mod tests {
         assert_ne!(logs_on_fresh_node("code-det-c", 6), first);
     }
 
+    const HOST_DEPENDENT: &str = "console.log(new Date(2020, 0, 1, 12).toString(), \
+        new Date(0).getHours(), new Date(0).getTimezoneOffset(), new Date(0).toLocaleString(), \
+        (1234.5).toLocaleString(), typeof Intl === 'undefined' ? 'none' : \
+        new Intl.DateTimeFormat().resolvedOptions().timeZone + new Intl.DateTimeFormat().resolvedOptions().locale);";
+
+    fn logs_with_env(name: &str, env: &[(&str, &str)]) -> Value {
+        let dir = TempDir::new(name);
+        let file = dir.0.join("r.json");
+        std::fs::write(
+            &file,
+            serde_json::to_string(&[reply(HOST_DEPENDENT)]).unwrap(),
+        )
+        .unwrap();
+        let server = start_env(&dir, &file, env);
+        let goal = finished(&server, create(&server, &code("log", 1)));
+        goal["iterations"][0]["logs"].clone()
+    }
+
+    #[test]
+    fn dates_and_locale_do_not_depend_on_the_node_environment() {
+        let a = logs_with_env(
+            "code-tz-a",
+            &[
+                ("TZ", "Pacific/Kiritimati"),
+                ("LANG", "de_DE.UTF-8"),
+                ("LC_ALL", "de_DE.UTF-8"),
+            ],
+        );
+        let b = logs_with_env("code-tz-b", &[("TZ", "America/Los_Angeles"), ("LANG", "C")]);
+        assert!(!a.as_array().unwrap().is_empty(), "{a}");
+        assert_eq!(a, b);
+    }
+
     const THROWER: &str = "test(\"one\", () => {});\nthrow new Error(\"boom\");";
 
     /// One goal on a fresh node; returns its iterations.

@@ -199,7 +199,30 @@ const NO_TESTS: &str =
 /// What the model is told when the tests did not all pass: failed tests, guest logs, then the
 /// sandbox error, in the order of the prototype's `formatSandboxFeedback`.
 pub fn sandbox_feedback(run: &RunOutput) -> String {
-    "xyzzy".into() /* ~ changed by cargo-mutants ~ */
+    let crashed = run.status == "error" || run.status == "timeout";
+    if run.tests.is_empty() && !crashed {
+        return format!("{NO_TESTS}, and return the FULL file(s) again");
+    }
+    let mut lines = Vec::new();
+    for t in run.tests.iter().filter(|t| !t.passed) {
+        lines.push(match &t.error {
+            Some(e) => format!("FAILED test \"{}\": {e}", t.name),
+            None => format!("FAILED test \"{}\"", t.name),
+        });
+    }
+    lines.extend(run.logs.iter().map(|l| format!("guest {l}")));
+    if crashed {
+        lines.push(match &run.error {
+            Some(e) => format!("sandbox {}: {e}", run.status),
+            None => format!("sandbox {}", run.status),
+        });
+        // An rs3 addition: the prototype only says a run with no tests found none.
+        if run.tests.is_empty() {
+            lines.push(NO_TESTS.into());
+        }
+    }
+    lines.push(FIX_AGAIN.into());
+    lines.join("\n")
 }
 
 /// Whether the tests ran and every one passed.

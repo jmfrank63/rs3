@@ -34,7 +34,7 @@ struct Report {
 /// Defines the locked `test`, `expect`, `assert` and `console`, and evaluates to a function that
 /// returns the private records as JSON. Console retention is capped at 8192 bytes.
 const PRELUDE: &str = r#"(function (g) {
-  var records = [], logs = [], used = 0, CAP = 8192;
+  var records = [], logs = [], used = 0, kept = 0, CAP = 8192;
   function isNaNValue(v) { return typeof v === "number" && v !== v; }
   function deepEqual(a, b) {
     if (isNaNValue(a) || isNaNValue(b)) return false;
@@ -96,26 +96,68 @@ const PRELUDE: &str = r#"(function (g) {
   lock("expect", expectFn);
   lock("assert", assertFn);
   function show(v) { try { var j = JSON.stringify(v); return j === undefined ? String(v) : j; } catch (e) { return String(v); } }
+  function width(ch) { var c = ch.codePointAt(0); return c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; }
+  // The longest prefix of t that fits in n UTF-8 bytes, cut between characters.
+  function cut(t, n) {
+    var out = "", bytes = 0;
+    for (var ch of t) {
+      var w = width(ch);
+      if (bytes + w > n) break;
+      out += ch; bytes += w;
+    }
+    kept = bytes;
+    return out;
+  }
   function logger(level) {
     return function () {
       var room = CAP - used;
       if (room <= 0) return;
       var parts = [];
       for (var i = 0; i < arguments.length; i++) parts.push(show(arguments[i]));
-      var line = (level + ": " + parts.join(" ")).slice(0, room - 1);
-      used += line.length + 1;
+      var line = cut(level + ": " + parts.join(" "), room - 1);
+      used += kept + 1;
       logs.push(line);
     };
   }
   var NativeDate = g.Date, s = __seed >>> 0;
-  function FixedDate() {
-    return arguments.length === 0 ? new NativeDate(0) : new (Function.prototype.bind.apply(NativeDate, [null].concat([].slice.call(arguments))))();
+  // The host's zone and locale must not reach the guest: local time is UTC, locale is en-US.
+  var NP = NativeDate.prototype, Z = "GMT+0000 (Coordinated Universal Time)";
+  function utcArgs(a) {
+    if (a.length === 1 && typeof a[0] === "string" && !/(Z|GMT|UTC|[+-]\d\d:?\d\d)\s*(\(.*\))?$|^\d{4}(-\d\d(-\d\d)?)?$/i.test(a[0]))
+      return [a[0] + (/^\d{4}-\d\d-\d\dT[\d:.]+$/.test(a[0]) ? "Z" : " UTC")];
+    if (a.length > 1) { var u = NativeDate.UTC.apply(null, a); return [u]; }
+    return a;
   }
-  FixedDate.prototype = NativeDate.prototype;
+  function FixedDate() {
+    if (arguments.length === 0) return new NativeDate(0);
+    return new (Function.prototype.bind.apply(NativeDate, [null].concat(utcArgs([].slice.call(arguments)))))();
+  }
+  FixedDate.prototype = NP;
   FixedDate.UTC = NativeDate.UTC;
-  FixedDate.parse = NativeDate.parse;
+  FixedDate.parse = function (t) { return NativeDate.parse.apply(null, utcArgs([String(t)])); };
   Object.defineProperty(FixedDate, "now", { value: function () { return 0; }, writable: false, configurable: false });
-  Object.defineProperty(NativeDate.prototype, "constructor", { value: FixedDate, writable: true, configurable: true });
+  Object.defineProperty(NP, "constructor", { value: FixedDate, writable: true, configurable: true });
+  ["FullYear", "Month", "Date", "Day", "Hours", "Minutes", "Seconds", "Milliseconds"].forEach(function (f) {
+    ["get", "set"].forEach(function (k) {
+      if (NP[k + "UTC" + f]) NP[k + f] = NP[k + "UTC" + f];
+    });
+  });
+  NP.getTimezoneOffset = function () { return this.getTime() === this.getTime() ? 0 : NaN; };
+  function dateParts(d) { return d.getTime() === d.getTime() ? NP.toUTCString.call(d).split(" ") : null; }
+  NP.toDateString = function () { var p = dateParts(this); return p ? p[0].slice(0, 3) + " " + p[2] + " " + p[1] + " " + p[3] : "Invalid Date"; };
+  NP.toTimeString = function () { var p = dateParts(this); return p ? p[4] + " " + Z : "Invalid Date"; };
+  NP.toString = function () { var p = dateParts(this); return p ? NP.toDateString.call(this) + " " + p[4] + " " + Z : "Invalid Date"; };
+  ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"].forEach(function (n) {
+    var native = NP[n];
+    NP[n] = function (l, o) { return native.call(this, "en-US", Object.assign({ timeZone: "UTC" }, o)); };
+  });
+  var nls = Number.prototype.toLocaleString;
+  Number.prototype.toLocaleString = function (l, o) { return nls.call(this, "en-US", o); };
+  var tlu = String.prototype.toLocaleUpperCase, tll = String.prototype.toLocaleLowerCase, lc = String.prototype.localeCompare;
+  String.prototype.toLocaleUpperCase = function () { return tlu.call(this, "en-US"); };
+  String.prototype.toLocaleLowerCase = function () { return tll.call(this, "en-US"); };
+  String.prototype.localeCompare = function (t, l, o) { return lc.call(this, t, "en-US", o); };
+  delete g.Intl;
   lock("Date", FixedDate);
   function rand() {
     s = (s + 0x6D2B79F5) >>> 0;
@@ -132,7 +174,11 @@ const PRELUDE: &str = r#"(function (g) {
 
 /// Run `js` on a fresh runtime, aborting it after `timeout`. The run is the same on every node:
 /// the clock stays at the epoch (`Date.now()` and `new Date()` are 0) and `Math.random` is a
-/// generator seeded from the low 32 bits of `seed`.
+/// generator seeded from the low 32 bits of `seed`; local time is UTC and the locale is en-US.
+///
+/// The deadline is wall-clock, so a guest that finishes close to the limit may time out on one
+/// node and pass on another. That does not break restore: a Run is committed once and every node
+/// then reads the committed record; only a not-yet-committed Run is recomputed.
 pub fn run(js: &str, seed: u64, timeout: Duration) -> RunOutput {
     let js = js.to_owned();
     std::thread::Builder::new()
@@ -408,10 +454,29 @@ mod tests {
     #[test]
     fn an_endless_loop_times_out_within_the_deadline() {
         let start = std::time::Instant::now();
-        let out = run("while (true) {}", 0, Duration::from_millis(200));
+        let (sent, got) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(run("while (true) {}", 0, Duration::from_millis(200)));
+        });
+        let out = got
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the endless loop was never stopped");
         assert_eq!(out.status, "timeout");
         assert!(out.error.unwrap().contains("200ms"));
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_log_cap_counts_bytes_and_cuts_on_a_character() {
+        let out = run_js("for (let i = 0; i < 10000; i++) console.log('😀');");
+        let total: usize = out.logs.iter().map(|l| l.len() + 1).sum();
+        assert!(total <= 8192, "{total}");
+        assert!(total > 8000, "{total}");
+        assert!(out.logs.iter().all(|l| !l.contains('\u{FFFD}')));
+        let out = run_js("console.log('😀'.repeat(5000));");
+        assert!(out.logs[0].len() < 8192);
+        assert!(out.logs[0].ends_with('😀'));
+        assert!(!out.logs[0].contains('\u{FFFD}'));
     }
 
     #[test]
@@ -429,6 +494,27 @@ mod tests {
         let first = logs_of(src, 1);
         assert_eq!(first, ["log: 0 \"0\" 5 0"]);
         assert_eq!(logs_of(src, 2), first);
+    }
+
+    #[test]
+    fn local_time_is_utc_and_locale_is_en_us() {
+        let src = "const d = new Date(2020, 0, 1, 12); \
+            console.log(d.toString(), d.toDateString(), d.toTimeString(), d.getHours(), d.getDay(), \
+              d.getTimezoneOffset(), d.toLocaleString(), d.toLocaleDateString(), d.toLocaleTimeString(), \
+              (1234.5).toLocaleString(), typeof Intl, new Date('2020-01-02T03:04:05').getTime(), \
+              new Date('2020-01-02').getTime(), Date.parse('2020-01-02T03:04:05'), \
+              new Date(NaN).toString(), new Date(NaN).getTimezoneOffset(), 'I'.toLocaleLowerCase(), \
+              'i'.toLocaleUpperCase(), 'a'.localeCompare('B'), new Date(0).toLocaleString('de-DE'));";
+        assert_eq!(
+            logs_of(src, 0),
+            [
+                "log: \"Wed Jan 01 2020 12:00:00 GMT+0000 (Coordinated Universal Time)\" \
+              \"Wed Jan 01 2020\" \"12:00:00 GMT+0000 (Coordinated Universal Time)\" 12 3 0 \
+              \"1/1/2020, 12:00:00 PM\" \"1/1/2020\" \"12:00:00 PM\" \"1,234.5\" \"undefined\" \
+              1577934245000 1577923200000 1577934245000 \"Invalid Date\" null \"i\" \"I\" -1 \
+              \"1/1/1970, 12:00:00 AM\""
+            ]
+        );
     }
 
     #[test]

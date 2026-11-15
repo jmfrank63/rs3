@@ -37,7 +37,31 @@ pub struct Server {
 
 impl Server {
     pub fn start(dir: &Path, db: Option<&Path>, env: &[(&str, &str)]) -> Self {
+        // free_port() frees its port before the node binds it, so another process can win it.
+        for _ in 1..5 {
+            let port = free_port();
+            if let Some(server) = Self::try_start(port, dir, db, env) {
+                return server;
+            }
+        }
         Self::start_on(free_port(), dir, db, env)
+    }
+
+    fn try_start(port: u16, dir: &Path, db: Option<&Path>, env: &[(&str, &str)]) -> Option<Self> {
+        let log = dir.join(format!("rs3-{port}.log"));
+        let _ = std::fs::remove_file(&log);
+        let outcome = std::panic::catch_unwind(|| Self::start_on(port, dir, db, env));
+        match outcome {
+            Ok(server) => Some(server),
+            Err(panic) => {
+                let text = std::fs::read_to_string(&log).unwrap_or_default();
+                if text.contains("in use") {
+                    None
+                } else {
+                    std::panic::resume_unwind(panic)
+                }
+            }
+        }
     }
 
     pub fn start_on(port: u16, dir: &Path, db: Option<&Path>, env: &[(&str, &str)]) -> Self {
@@ -51,12 +75,12 @@ impl Server {
             .open(&log)
             .unwrap();
         command.envs(env.iter().copied()).stderr(stderr);
-        Self::spawn(command, port, Duration::from_secs(30))
+        Self::spawn(command, port, Duration::from_secs(30), Some(&log))
     }
 
     /// Spawn `command` and wait up to `deadline` for the startup banner; a node that never
     /// prints it is killed and the test fails.
-    pub fn spawn(mut command: Command, port: u16, deadline: Duration) -> Self {
+    pub fn spawn(mut command: Command, port: u16, deadline: Duration, log: Option<&Path>) -> Self {
         let mut child = command.stdout(Stdio::piped()).spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (sent, banner) = std::sync::mpsc::channel();
@@ -73,7 +97,18 @@ impl Server {
             let _ = child.wait();
             panic!("no startup banner within {deadline:?}");
         };
-        assert!(banner.starts_with("Starting Http server"), "got {banner:?}");
+        let tail = || {
+            let text = log
+                .and_then(|l| std::fs::read_to_string(l).ok())
+                .unwrap_or_default();
+            let from = text.len().saturating_sub(2000);
+            text[text.ceil_char_boundary(from)..].to_owned()
+        };
+        assert!(
+            banner.starts_with("Starting Http server"),
+            "got {banner:?}; node stderr:\n{}",
+            tail()
+        );
         Self { child, port }
     }
 
