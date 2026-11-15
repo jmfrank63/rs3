@@ -42,6 +42,9 @@ so never run anything else in this checkout at the same time.
 
 - Linux x64, Rust 1.99.1 pinned by `rust-toolchain.toml`. Always pass `--locked` once `Cargo.lock` is updated.
 - `scripts/ci-smoke.sh` tests the release binary end to end, and needs `cargo build --release --locked` first.
+- Never kill processes by name: no `pkill`, `killall` or `pgrep | xargs kill`. Other checkouts on this machine run
+  `rs3`, `cargo test` and `cargo-mutants` at the same time, and a kill by name stops their gates. Kill only PIDs you
+  started yourself.
 - Long-running work stays in the foreground. A background task dies with the session and leaves the task incomplete.
 - Do not push, and do not edit `.github/workflows/ci.yml`: `scripts/ci-guards.sh` pins its contents.
 - `.planning/` is the finished v0.2 record. Do not edit it.
