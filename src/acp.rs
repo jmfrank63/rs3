@@ -633,9 +633,9 @@ fn prompt_text(params: &Value) -> String {
         .collect()
 }
 
-/// The (prompt, output, goal while still running) of every turn of session `number`, read goal
+/// The (prompt, goal, goal id, whether it is still running) of every turn of session `number`, read goal
 /// by goal; None when the node does not know the session.
-type Loaded = Vec<(String, String, Option<u64>)>;
+type Loaded = Vec<(String, Value, u64, bool)>;
 
 async fn load_turns(nodes: &Nodes, number: u64) -> Result<Option<Loaded>, CallError> {
     let path = format!("/sessions/{number}");
@@ -653,12 +653,11 @@ async fn load_turns(nodes: &Nodes, number: u64) -> Result<Option<Loaded>, CallEr
             .call(Method::GET, &format!("/goals/{id}"), None)
             .await?;
         let prompt = turn["prompt"].as_str().unwrap_or_default();
-        let output = goal["output"].as_str().unwrap_or_default();
         let ended = matches!(
             goal["status"].as_str(),
             Some("done" | "failed" | "cancelled")
         );
-        turns.push((prompt.to_owned(), output.to_owned(), (!ended).then_some(id)));
+        turns.push((prompt.to_owned(), goal, id, !ended));
     }
     Ok(Some(turns))
 }
@@ -668,17 +667,26 @@ async fn load_turns(nodes: &Nodes, number: u64) -> Result<Option<Loaded>, CallEr
 fn adopt(out: &Out, sessions: &Sessions, id: &Value, number: u64, turns: &Loaded) {
     let session = number.to_string();
     let mut unfinished = None;
-    for (prompt, output, running) in turns {
+    for (prompt, goal, id, running) in turns {
         chunk(out, &session, "user_message_chunk", prompt);
-        let (chunks, used) = split_think(output, false, running.is_none());
-        for (kind, piece) in chunks {
-            chunk(out, &session, kind, piece);
-        }
-        let at = Progress {
-            offset: used,
-            ..Progress::default()
+        let at = if goal["iterations"].is_array() {
+            let (updates, at) = code_updates(goal, *id, Progress::default(), !running);
+            for update in updates {
+                notify(out, &session, update);
+            }
+            at
+        } else {
+            let output = goal["output"].as_str().unwrap_or_default();
+            let (chunks, used) = split_think(output, false, !running);
+            for (kind, piece) in chunks {
+                chunk(out, &session, kind, piece);
+            }
+            Progress {
+                offset: used,
+                ..Progress::default()
+            }
         };
-        unfinished = running.map(|goal| (goal, at)).or(unfinished);
+        unfinished = running.then_some((*id, at)).or(unfinished);
     }
     let next_turn = turns.len() as u64;
     sessions.set(
