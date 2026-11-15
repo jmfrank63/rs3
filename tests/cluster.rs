@@ -1473,4 +1473,111 @@ mod cluster_code {
         assert_eq!(generated["generated"].as_u64(), Some(0), "{generated}");
         assert_eq!(without_node(got), without_node(reference));
     }
+
+    #[test]
+    fn a_coding_goal_survives_losing_its_owner_and_another_node_and_reads_back_sealed() {
+        use rs3::journal::Record;
+        let dir = TempDir::new("cluster-code-failover");
+        let replies = [reply(TYPE_ERROR), reply(PASSING)];
+        let file = dir.0.join("r.json");
+        std::fs::write(&file, serde_json::to_string(&replies).unwrap()).unwrap();
+        let env = [
+            ("MODEL.REPLIES", file.to_str().unwrap()),
+            ("MODEL.TOKENS_PER_SECOND", "100"),
+        ];
+        let wait = Duration::from_secs(120);
+        let (reference, total) = {
+            let one = TempDir::new("cluster-code-failover-ref");
+            let server = Server::start(&one.0, Some(&one.0.join("rs3.redb")), &env);
+            let (status, text) = server.request_status("POST", "/goals", &body());
+            assert_eq!(status, 201, "{text}");
+            let got = wait_until("the reference goal", wait, || {
+                let got: Value =
+                    serde_json::from_str(&server.request("GET", "/goals/1", "")).ok()?;
+                (got["status"] == "done").then_some(got)
+            });
+            let generated: Value =
+                serde_json::from_str(&server.request("GET", "/goals/generated", "")).unwrap();
+            (got, generated["generated"].as_u64().unwrap())
+        };
+        assert_eq!(reference["outcome"], "success", "{reference}");
+
+        let mut cluster = Cluster::start_with("cluster-code-failover", 5, &env);
+        let id = cluster.create_goal(0, &body());
+        let owner = wait_until("the goal mid-loop", wait, || {
+            let got = cluster.goal(0, id);
+            let started = got["status"] != "done"
+                && got["iterations"][0]["reply"]
+                    .as_str()
+                    .is_some_and(|r| !r.is_empty());
+            started.then(|| got["node"].as_u64().map(|n| n as usize - 1))?
+        });
+        let leader = cluster.leader();
+        let other = if leader != owner {
+            leader
+        } else {
+            (owner + 1) % 5
+        };
+        cluster.kill(owner);
+        cluster.kill(other);
+
+        let db = cluster.dir.0.join(format!("node{}.db", owner + 1));
+        let journal = rs3::journal::Journal::new(rs3::storage::open(&db).unwrap()).unwrap();
+        let records = journal.read(id).unwrap();
+        drop(journal);
+        assert!(
+            !records.iter().any(|r| matches!(r, Record::CodeEnd { .. })),
+            "the kill landed after the goal ended"
+        );
+        let committed: u64 = records
+            .iter()
+            .map(|r| match r {
+                Record::Tokens { tokens, .. } => tokens.len() as u64,
+                _ => 0,
+            })
+            .sum();
+        assert!(
+            0 < committed && committed < total,
+            "committed {committed} of {total}"
+        );
+
+        let survivors: Vec<usize> = (0..5).filter(|i| *i != owner && *i != other).collect();
+        let done = wait_until("the goal to finish on a survivor", wait, || {
+            let got = cluster.goal(survivors[0], id);
+            (got["status"] == "done").then_some(got)
+        });
+        let on = done["node"].as_u64().unwrap() as usize - 1;
+        assert!(survivors.contains(&on), "finished on a killed node: {done}");
+        assert_eq!(without_node(done), without_node(reference.clone()));
+
+        let sampled: u64 = survivors
+            .iter()
+            .map(|&node| {
+                let reply = cluster.request(node, "GET", "/goals/generated", "");
+                serde_json::from_str::<Value>(&reply).unwrap()["generated"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .sum();
+        assert!(
+            sampled <= total - committed,
+            "a committed token was sampled again: {sampled} > {} (committed {committed})",
+            total - committed
+        );
+
+        for &node in &survivors {
+            let path = format!("/goals/{id}/storage");
+            wait_until("a fragment on every survivor", wait, || {
+                let (status, reply) = cluster.request_status(node, "GET", &path, "");
+                (status == 200 && reply.contains("\"fragment\"")).then_some(())
+            });
+        }
+        for &node in &survivors {
+            assert_eq!(
+                without_node(cluster.goal(node, id)),
+                without_node(reference.clone()),
+                "node {node}"
+            );
+        }
+    }
 }
