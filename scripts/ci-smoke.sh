@@ -34,6 +34,9 @@
 #   while the leader is kill -9'd after the first chunk: JSON-RPC 2.0 lines only, at least one chunk
 #   after the kill, stopReason max_tokens, one turn in GET /sessions/{id}, and the streamed text equals
 #   that turn's goal output byte for byte.
+#   coding goal (replayed type-error then fix reply): on one node it ends success; on a fresh
+#     3-node cluster the leader is killed after the first iteration commits, and the GET body
+#     after failover equals the single-node body byte for byte (success, 2 iterations).
 # The release binary uses the default JS limits: nesting depth 4 and a 5000 ms timeout. Both are
 # set in code; there is no environment knob, so the timeout check waits about 5 s. This smoke is
 # the only place where the timeout watchdog terminates a script under the protected V8 platform
@@ -526,6 +529,70 @@ cwhen "$SURV" GET "/sessions/${ASESS}"
 AGOAL=$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["turns"][0]["goal"])' "$BODY")
 [[ "$(jf "$(cwait_done "$SURV" "$AGOAL")" output)" == "$(jf "$ACPOUT" text)" ]] || fail "ACP text differs from goal ${AGOAL} output: ${ACPOUT}"
 echo "ci-smoke: ok   ACP turn on 3 nodes: leader node $((LEADER + 1)) killed mid-turn, max_tokens, streamed text equals goal ${AGOAL} output"
+for i in "${!CPIDS[@]}"; do
+  [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
+done
+CPIDS=()
+
+# ---- coding goal on a fresh 3-node cluster, leader killed mid-loop, equals a single-node run ----
+# Replay replies: a type error first, then a correct add with a passing test (as tests/code.rs).
+CODEREPLIES="$DIR/code-replies.json"
+python3 -I - "$CODEREPLIES" <<'PY'
+import json, sys
+def reply(src): return json.dumps({"explanation": "x", "files": {"a.ts": src}})
+bad = 'const n: number = "s";\ntest("t", () => { expect(1).toEqual(1); });'
+good = 'function add(a: number, b: number): number { return a + b; }\ntest("adds", () => { expect(add(1, 2)).toEqual(3); });'
+open(sys.argv[1], "w").write(json.dumps([reply(bad), reply(good)]))
+PY
+CODEGOAL='{"kind":"code","task":"write add","spec":"add two numbers","max_iterations":3}'
+# Slow replay so the kill lands inside the loop.
+CODEENV=(MODEL.REPLIES="$CODEREPLIES" MODEL.TOKENS_PER_SECOND=20)
+
+# Reference: one node, uninterrupted.
+start_server STORAGE.PATH="$DIR/code-ref.db" "${CODEENV[@]}"
+req POST /goals "$CODEGOAL"
+[[ "$CODE" == 201 ]] || fail "coding reference POST /goals -> ${CODE} ${BODY}"
+CRID=$(jf "$BODY" id)
+dl=$((SECONDS + 60))
+while :; do
+  CREF=$(goal "$CRID")
+  [[ "$(jf "$CREF" status)" != done ]] || break
+  (( SECONDS < dl )) || fail "coding reference goal not done after 60s: ${CREF}"
+  sleep 0.2
+done
+[[ "$(jf "$CREF" outcome)" == success ]] || fail "coding reference outcome: ${CREF}"
+stop_server
+echo "ci-smoke: ok   coding goal on one node: success after a type error and a fix"
+
+CDIR="$DIR/code"
+mkdir -p "$CDIR"
+cnodes 3
+for i in "${!CPORTS[@]}"; do cstart "$i" "${CODEENV[@]}"; done
+LEADER=$(cleader)
+cwhen 0 POST /goals "$CODEGOAL"
+[[ "$CODE" == 201 ]] || fail "coding cluster POST /goals -> ${CODE} ${BODY}"
+CCID=$(jf "$BODY" id)
+# Wait until the first iteration is committed and the goal is not done, then kill the leader.
+dl=$((SECONDS + 60))
+while :; do
+  cwhen 0 GET "/goals/$CCID"
+  [[ "$(jf "$BODY" status)" != done ]] || fail "coding goal finished before the leader kill: ${BODY}"
+  [[ "$(jf "$BODY" iterations)" != "[]" ]] && break
+  (( SECONDS < dl )) || fail "coding goal committed no iteration after 60s: ${BODY}"
+  sleep 0.05
+done
+kill -9 "${CPIDS[$LEADER]}"
+wait "${CPIDS[$LEADER]}" 2>/dev/null || true
+CPIDS[$LEADER]=""
+LIVE=$(( (LEADER + 1) % 3 ))
+NEWLEADER=$(cleader "$LEADER")
+CCDONE=$(cwait_done "$LIVE" "$CCID")
+# The cluster body also names the serving node; every other byte must match.
+CCSAME=$(python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); d.pop("node", None); print(json.dumps(d))' "$CCDONE")
+[[ "$CCSAME" == "$(python3 -I -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])))' "$CREF")" ]] || fail "coding goal body after the leader kill differs from the single-node run: ${CCDONE} vs ${CREF}"
+[[ "$(jf "$CCDONE" outcome)" == success ]] || fail "coding cluster outcome: ${CCDONE}"
+[[ "$(python3 -I -c 'import json,sys; print(len(json.loads(sys.argv[1])["iterations"]))' "$CCDONE")" == 2 ]] || fail "coding goal should have 2 iterations: ${CCDONE}"
+echo "ci-smoke: ok   coding goal on 3 nodes: leader node $((LEADER + 1)) killed mid-loop, new leader node $((NEWLEADER + 1)), 2 iterations, success, GET body equals the single-node run"
 for i in "${!CPIDS[@]}"; do
   [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
 done
