@@ -258,6 +258,12 @@ pub struct Iteration {
     pub attempts: u32,
     /// The last attempt's reply bytes.
     pub reply: Vec<u8>,
+    /// Every attempt's reply bytes, in order; the last equals `reply`.
+    pub replies: Vec<Vec<u8>>,
+    /// The check is committed (an empty `diagnostics` then means clean).
+    pub checked: bool,
+    /// The run's `(status, error)` once committed.
+    pub run: Option<(String, Option<String>)>,
     pub files: Vec<(String, String)>,
     pub diagnostics: Vec<Diagnostic>,
     pub tests: Vec<crate::sandbox::TestResult>,
@@ -331,6 +337,7 @@ impl Loop {
     }
 
     fn checked(&mut self, diagnostics: &[Diagnostic], js: &Option<String>) {
+        self.last().checked = true;
         if diagnostics.is_empty() {
             self.next = Next::Run(js.clone().unwrap_or_default());
         } else {
@@ -341,6 +348,7 @@ impl Loop {
 
     fn ran(&mut self, run: &RunOutput) {
         let iteration = self.last();
+        iteration.run = Some((run.status.clone(), run.error.clone()));
         iteration.tests = run.tests.clone();
         iteration.logs = run.logs.clone();
         if passes(run) {
@@ -366,12 +374,18 @@ impl Loop {
                 last.prompt.clone_from(prompt);
                 last.attempts = attempt + 1;
                 last.reply.clear();
+                last.replies.push(Vec::new());
                 self.calls += 1;
                 self.open = 0;
                 self.next = Next::Generate;
             }
             Record::Tokens { tokens, .. } => {
-                self.last().reply.extend(tokens.iter().map(|t| *t as u8));
+                let bytes = tokens.iter().map(|t| *t as u8);
+                let last = self.last();
+                last.reply.extend(bytes.clone());
+                if let Some(current) = last.replies.last_mut() {
+                    current.extend(bytes);
+                }
                 self.open += tokens.len();
             }
             Record::ReplyEnd { .. } => self.reply_ended(),
@@ -481,6 +495,9 @@ fn iteration_json(i: &Iteration) -> Value {
         "tests": i.tests,
         "logs": i.logs,
         "feedback": i.feedback,
+        "replies": i.replies.iter().map(|r| String::from_utf8_lossy(r)).collect::<Vec<_>>(),
+        "checked": i.checked,
+        "run": i.run.as_ref().map(|(status, error)| serde_json::json!({"status": status, "error": error})),
     })
 }
 

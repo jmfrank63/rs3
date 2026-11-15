@@ -133,6 +133,35 @@ mod tests {
         assert_eq!(iterations[1]["files"]["a.ts"], PASSING);
     }
 
+    #[test]
+    fn each_iteration_tells_a_pending_check_and_run_from_an_empty_result() {
+        let dir = TempDir::new("code-checked-run");
+        let server = start(&dir, "r.json", &[reply(TYPE_ERROR), reply(PASSING)]);
+        let goal = finished(&server, create(&server, &code("write add", 3)));
+        let its = goal["iterations"].as_array().unwrap();
+        assert_eq!(its[0]["checked"], true, "{goal}");
+        assert_eq!(its[0]["run"], Value::Null, "{goal}");
+        assert_eq!(its[1]["checked"], true, "{goal}");
+        assert_eq!(its[1]["run"], json!({"status": "passed", "error": null}));
+    }
+
+    #[test]
+    fn a_spinning_guest_reports_a_timeout_run() {
+        let a = iterations_on_fresh_node("code-run-timeout", &[reply(SPIN)], 1, "50");
+        assert_eq!(a[0]["run"]["status"], "timeout", "{a}");
+    }
+
+    #[test]
+    fn every_attempt_reply_is_kept() {
+        let dir = TempDir::new("code-replies");
+        let server = start(&dir, "r.json", &["not json".to_owned(), reply(PASSING)]);
+        let goal = finished(&server, create(&server, &code("write add", 2)));
+        let it = &goal["iterations"][0];
+        assert_eq!(it["attempts"], 2, "{goal}");
+        assert_eq!(it["replies"], json!(["not json", reply(PASSING)]), "{goal}");
+        assert_eq!(it["reply"], reply(PASSING));
+    }
+
     const CLOCK_AND_DICE: &str =
         "console.log(Date.now(), String(new Date().getTime()), Math.random());";
 
