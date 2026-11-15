@@ -333,4 +333,64 @@ mod sessions {
         assert_ne!(output_when_done(&server, id), "ran");
         assert_eq!(count(&server), "0");
     }
+
+    const PASSING: &str = "function add(a: number, b: number): number { return a + b; }\n\
+        test(\"adds\", () => { expect(add(1, 2)).toEqual(3); });";
+
+    fn code_server(dir: &TempDir) -> Server {
+        let replies = dir.0.join("replies.json");
+        let reply = json!({"explanation": "x", "files": {"a.ts": PASSING}}).to_string();
+        std::fs::write(&replies, serde_json::to_string(&[reply]).unwrap()).unwrap();
+        Server::start(
+            &dir.0,
+            Some(&dir.0.join("rs3.db")),
+            &[("MODEL.REPLIES", replies.to_str().unwrap())],
+        )
+    }
+
+    #[test]
+    fn code_turn_starts_a_coding_goal_that_succeeds() {
+        let dir = TempDir::new("sess-code");
+        let server = code_server(&dir);
+        let s = new_session(&server);
+        let id = goal_of(&server, s, 0, "/code add two numbers\nexport function add");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let goal = json_of(&server.request("GET", &format!("/goals/{id}"), ""));
+            if goal["status"] == "done" {
+                assert!(goal["iterations"].is_array(), "{goal}");
+                assert_eq!(goal["outcome"], "success", "{goal}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "never finished: {goal}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            goal_of(&server, s, 0, "/code add two numbers\nexport function add"),
+            id
+        );
+    }
+
+    #[test]
+    fn code_turn_without_a_task_or_on_a_fake_engine_is_422_and_records_nothing() {
+        let dir = TempDir::new("sess-code-bad");
+        let server = code_server(&dir);
+        let s = new_session(&server);
+        for prompt in ["/code", "/code   \nspec"] {
+            let (status, body) = turn(&server, s, 0, prompt);
+            assert_eq!(
+                (status, error_code(&body)),
+                (422, "invalid_input"),
+                "{prompt}"
+            );
+        }
+        let (_, session) = server.request_status("GET", "/sessions/1", "");
+        assert_eq!(json_of(&session), json!({"turns": []}));
+
+        let dir = TempDir::new("sess-code-fake");
+        let fake = start(&dir);
+        let s = new_session(&fake);
+        let (status, body) = turn(&fake, s, 0, "/code add");
+        assert_eq!((status, error_code(&body)), (422, "invalid_input"));
+    }
 }

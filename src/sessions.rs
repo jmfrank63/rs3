@@ -107,6 +107,15 @@ pub(crate) fn script_key(prompt: &str) -> Option<&str> {
         .map(str::trim)
 }
 
+/// The task (first line) and spec (the rest) of a `/code <task>` prompt; `None` for any other.
+pub(crate) fn code_prompt(prompt: &str) -> Option<(&str, &str)> {
+    let rest = prompt
+        .strip_prefix("/code")
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))?;
+    let (task, spec) = rest.split_once('\n').unwrap_or((rest, ""));
+    Some((task.trim(), spec))
+}
+
 /// The first record of a turn's goal: `start` if given, else the stored script for `/run <key>`,
 /// else generation of `prompt`. `None` when the key holds no script.
 fn start_record(

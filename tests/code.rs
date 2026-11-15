@@ -134,6 +134,15 @@ mod tests {
     }
 
     #[test]
+    fn a_goal_without_max_iterations_gets_several_attempts() {
+        let dir = TempDir::new("code-default-iterations");
+        let server = start(&dir, "r.json", &[reply(TYPE_ERROR), reply(PASSING)]);
+        let id = create(&server, &json!({"kind": "code", "task": "write add"}));
+        let goal = finished(&server, id);
+        assert_eq!(goal["outcome"], "success", "{goal}");
+    }
+
+    #[test]
     fn each_iteration_tells_a_pending_check_and_run_from_an_empty_result() {
         let dir = TempDir::new("code-checked-run");
         let server = start(&dir, "r.json", &[reply(TYPE_ERROR), reply(PASSING)]);

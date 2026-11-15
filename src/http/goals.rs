@@ -9,7 +9,9 @@ use serde::Deserialize;
 
 use super::error::ApiError;
 use super::kv::{blocking_failed, read_barrier};
-use crate::goals::{CodeSpec, GoalSpec, GoalStatus, Goals, Holds};
+use crate::goals::{
+    CodeSpec, DEFAULT_CODE_BUDGET, DEFAULT_ITERATIONS, GoalSpec, GoalStatus, Goals, Holds,
+};
 use crate::journal::JournalError;
 use crate::state::AppState;
 use crate::store::StoreError;
@@ -78,11 +80,11 @@ enum CodeKind {
 }
 
 fn default_iterations() -> u32 {
-    5
+    DEFAULT_ITERATIONS
 }
 
 fn default_code_budget() -> u64 {
-    2048
+    DEFAULT_CODE_BUDGET
 }
 
 #[derive(Deserialize)]

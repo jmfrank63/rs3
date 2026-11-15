@@ -73,6 +73,10 @@ pub struct GoalSpec {
     pub prompt: String,
 }
 
+/// Fix attempts and token budget of a coding goal that does not say.
+pub const DEFAULT_ITERATIONS: u32 = 5;
+pub const DEFAULT_CODE_BUDGET: u64 = 2048;
+
 /// What a client asks for when it wants a coding goal.
 pub struct CodeSpec {
     pub task: String,
@@ -613,6 +617,20 @@ impl Goals {
         turn: u64,
         prompt: &str,
     ) -> Result<Result<Option<Record>, String>, JournalError> {
+        if let Some((task, spec)) = sessions::code_prompt(prompt) {
+            if task.is_empty() {
+                return Ok(Err("task must not be empty".into()));
+            }
+            return Ok(self
+                .code_start(CodeSpec {
+                    task: task.into(),
+                    spec: spec.into(),
+                    max_iterations: DEFAULT_ITERATIONS,
+                    budget: DEFAULT_CODE_BUDGET,
+                    seed: sessions::seed(session, turn),
+                })
+                .map(Some));
+        }
         let Some(Engine::Candle(candle)) = self.0.engine.get() else {
             return Ok(Ok(None));
         };
