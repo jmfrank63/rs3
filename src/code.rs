@@ -133,50 +133,7 @@ fn has_word(source: &str, word: &str) -> bool {
 
 /// The reply's files as `(name, content)` pairs: exactly one script-style file within the size limit.
 pub fn extract(reply: &str) -> Result<Vec<(String, String)>, Reject> {
-    let malformed = |m: &str| Reject::Malformed(m.into());
-    let value = parse(reply)?;
-    let Some(object) = value.as_object() else {
-        return Err(malformed("contract is not a JSON object"));
-    };
-    let Some(files) = object.get("files").and_then(Value::as_object) else {
-        return Err(malformed(
-            "contract.files must be an object of {name: content}",
-        ));
-    };
-    if files.len() > 1 {
-        return Err(Reject::Violation(ONE_FILE.into()));
-    }
-    let mut out = Vec::new();
-    for (name, content) in files {
-        let Some(content) = content.as_str() else {
-            return Err(Reject::Malformed(format!(
-                "contract.files.{name} must be a string"
-            )));
-        };
-        out.push((name.clone(), content.to_string()));
-    }
-    if out.is_empty() {
-        return Err(malformed("contract.files must contain at least one file"));
-    }
-    for (_, source) in &out {
-        for token in ["import", "export"] {
-            if has_word(source, token) {
-                return Err(Reject::Violation(format!(
-                    "guest files must be script-style: source contains \"{token}\" (no import/export statements)"
-                )));
-            }
-        }
-        if source.len() > MAX_GUEST_SOURCE_BYTES {
-            return Err(Reject::Violation(format!(
-                "guest source is {} bytes, over the {MAX_GUEST_SOURCE_BYTES} byte limit",
-                source.len()
-            )));
-        }
-    }
-    if out.len() != 1 {
-        return Err(Reject::Violation(ONE_FILE.into()));
-    }
-    Ok(out)
+    Ok(vec![("xyzzy".into(), "xyzzy".into())]) /* ~ changed by cargo-mutants ~ */
 }
 
 /// `file:line:col TSxxxx: message`, one per line, under the type-error heading.
