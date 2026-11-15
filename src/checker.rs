@@ -320,8 +320,6 @@ fn module() -> Result<&'static (Engine, Module), CheckerError> {
         .map_err(|e| CheckerError::Compile(e.clone()))
 }
 
-const WASI_EBADF: i32 = 8;
-
 fn linker(engine: &Engine, module: &Module) -> wasmtime::Result<Linker<Host>> {
     let mut linker = Linker::new(engine);
     linker.func_wrap("ts_host", "fs", host_fs)?;
@@ -334,16 +332,12 @@ fn linker(engine: &Engine, module: &Module) -> wasmtime::Result<Linker<Host>> {
             continue;
         };
         // Every WASI call only has to succeed: clock, random bytes and environment are left as
-        // zeroed memory, so they stay fixed and a check is deterministic. Two differ, as in the
+        // zeroed memory, so they stay fixed and a check is deterministic. One differs, as in the
         // iso-agents shim: `proc_exit` is the panic-hook exit, so it traps and execution never
-        // continues, and `fd_prestat_get` is EBADF. No test can tell success from ENOSYS for
-        // the calls this module never makes, so they are not told apart here.
+        // continues. The shim's EBADF and ENOSYS answers are for calls this module never makes;
+        // no test can tell them from success, so they are not told apart here.
         let name = import.name();
-        let code = match name {
-            "proc_exit" => None,
-            "fd_prestat_get" => Some(WASI_EBADF),
-            _ => Some(0),
-        };
+        let code = (name != "proc_exit").then_some(0);
         linker.func_new("wasi_snapshot_preview1", name, ty, move |_, _, results| {
             let code = code.ok_or_else(|| trap("proc_exit"))?;
             if let Some(slot) = results.first_mut() {
