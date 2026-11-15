@@ -149,7 +149,7 @@ const PRELUDE: &str = r#"(function (g) {
   NP.toString = function () { var p = dateParts(this); return p ? NP.toDateString.call(this) + " " + p[4] + " " + Z : "Invalid Date"; };
   ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"].forEach(function (n) {
     var native = NP[n];
-    NP[n] = function (l, o) { return native.call(this, "en-US", Object.assign({ timeZone: "UTC" }, o)); };
+    NP[n] = function (l, o) { return native.call(this, "en-US", Object.assign({}, o, { timeZone: "UTC" })); };
   });
   var nls = Number.prototype.toLocaleString;
   Number.prototype.toLocaleString = function (l, o) { return nls.call(this, "en-US", o); };

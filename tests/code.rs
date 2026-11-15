@@ -120,6 +120,7 @@ mod tests {
 
     const HOST_DEPENDENT: &str = "console.log(new Date(2020, 0, 1, 12).toString(), \
         new Date(0).getHours(), new Date(0).getTimezoneOffset(), new Date(0).toLocaleString(), \
+        new Date(0).toLocaleString('en-US', { timeZone: undefined }), \
         (1234.5).toLocaleString(), typeof Intl === 'undefined' ? 'none' : \
         new Intl.DateTimeFormat().resolvedOptions().timeZone + new Intl.DateTimeFormat().resolvedOptions().locale);";
 
@@ -305,6 +306,8 @@ mod tests {
         let default = instances_after("code-inst-a", &replies, 3, "50");
         let recycled = instances_after("code-inst-b", &replies, 3, "2");
         assert!(recycled > default, "recycled {recycled}, default {default}");
+        // One check per instance: the startup check and the three replies each get a fresh one.
+        assert_eq!(instances_after("code-inst-e", &replies, 3, "1"), 4);
         let trap = format!(
             "const x = {}1{};\ntest(\"t\", () => {{}});",
             "(".repeat(1_200),

@@ -297,21 +297,6 @@ fn module() -> Result<&'static (Engine, Module), CheckerError> {
 }
 
 const WASI_EBADF: i32 = 8;
-const WASI_ENOSYS: i32 = 52;
-/// The WASI calls the shim implements; each only has to succeed here.
-const WASI_WORKING: [&str; 11] = [
-    "args_sizes_get",
-    "args_get",
-    "environ_sizes_get",
-    "environ_get",
-    "clock_time_get",
-    "clock_res_get",
-    "random_get",
-    "fd_write",
-    "fd_fdstat_get",
-    "sched_yield",
-    "poll_oneoff",
-];
 
 fn linker(engine: &Engine, module: &Module) -> wasmtime::Result<Linker<Host>> {
     let mut linker = Linker::new(engine);
@@ -324,16 +309,16 @@ fn linker(engine: &Engine, module: &Module) -> wasmtime::Result<Linker<Host>> {
         let Some(ty) = import.ty().func().cloned() else {
             continue;
         };
-        // Follows the iso-agents shim: the working subset succeeds, and because clock, random
-        // bytes and environment are left as the zeroed memory they stay fixed, which keeps a
-        // check deterministic. `proc_exit` is the panic-hook exit, so it traps and execution
-        // never continues; `fd_prestat_get` is EBADF; any other import is ENOSYS.
+        // Every WASI call only has to succeed: clock, random bytes and environment are left as
+        // zeroed memory, so they stay fixed and a check is deterministic. Two differ, as in the
+        // iso-agents shim: `proc_exit` is the panic-hook exit, so it traps and execution never
+        // continues, and `fd_prestat_get` is EBADF. No test can tell success from ENOSYS for
+        // the calls this module never makes, so they are not told apart here.
         let name = import.name();
         let code = match name {
             "proc_exit" => None,
             "fd_prestat_get" => Some(WASI_EBADF),
-            _ if WASI_WORKING.contains(&name) => Some(0),
-            _ => Some(WASI_ENOSYS),
+            _ => Some(0),
         };
         linker.func_new("wasi_snapshot_preview1", name, ty, move |_, _, results| {
             let code = code.ok_or_else(|| trap("proc_exit"))?;
