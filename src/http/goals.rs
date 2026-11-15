@@ -18,6 +18,7 @@ use crate::store::StoreError;
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(create)
         .service(generated)
+        .service(checker_stats)
         .service(get_goal)
         .service(cancel_goal)
         .service(storage);
@@ -198,6 +199,14 @@ async fn goal_status(
         body["node"] = status.node.into();
     }
     Ok(HttpResponse::Ok().json(body))
+}
+
+/// `GET /goals/checker` answers 200 `{"instances":n,"checks":m}`: the checker instances this node
+/// has created and the checks it has run since it started.
+#[get("/goals/checker")]
+async fn checker_stats() -> HttpResponse {
+    let (instances, checks) = crate::checker::stats();
+    HttpResponse::Ok().json(serde_json::json!({ "instances": instances, "checks": checks }))
 }
 
 /// `GET /goals/generated` answers 200 `{"generated":n}`: the tokens this node sampled since it started.

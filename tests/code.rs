@@ -211,6 +211,110 @@ mod tests {
         assert_eq!(d, diags(&default));
     }
 
+    /// Start a node on `dir` whose compiled checker lives in `dir/checker-cache`; returns it with
+    /// the time to its banner.
+    fn start_cached(dir: &TempDir, replies: &str) -> (Server, Duration) {
+        let cache = dir.0.join("checker-cache");
+        let began = Instant::now();
+        let server = start_env(
+            dir,
+            &dir.0.join(replies),
+            &[("CHECKER.CACHE", cache.to_str().unwrap())],
+        );
+        (server, began.elapsed())
+    }
+
+    fn diagnostics_of_a_checked_goal(server: &Server) -> Value {
+        let id = create(server, &code("t", 1));
+        finished(server, id)["iterations"][0]["diagnostics"].clone()
+    }
+
+    fn cached_node_dir(name: &str) -> TempDir {
+        let dir = TempDir::new(name);
+        std::fs::write(
+            dir.0.join("r.json"),
+            serde_json::to_string(&[reply(TYPE_ERROR), reply(TYPE_ERROR)]).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut found = vec![];
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(files_under(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_restarted_node_starts_much_faster_and_checks_the_same() {
+        let dir = cached_node_dir("code-cache");
+        let (first, first_start) = start_cached(&dir, "r.json");
+        let before = diagnostics_of_a_checked_goal(&first);
+        assert!(!before.as_array().unwrap().is_empty(), "{before}");
+        drop(first);
+        let (second, second_start) = start_cached(&dir, "r.json");
+        assert!(
+            second_start * 2 < first_start,
+            "first start {first_start:?}, second {second_start:?}"
+        );
+        assert_eq!(diagnostics_of_a_checked_goal(&second), before);
+    }
+
+    #[test]
+    fn a_damaged_cache_never_stops_the_node_or_changes_a_diagnostic() {
+        let dir = cached_node_dir("code-cache-bad");
+        let (first, _) = start_cached(&dir, "r.json");
+        let before = diagnostics_of_a_checked_goal(&first);
+        drop(first);
+        let cached = files_under(&dir.0.join("checker-cache"));
+        assert!(!cached.is_empty(), "nothing was cached");
+        for (i, file) in cached.iter().enumerate() {
+            let garbage: &[u8] = if i % 2 == 0 { b"garbage" } else { b"" };
+            std::fs::write(file, garbage).unwrap();
+        }
+        let (second, _) = start_cached(&dir, "r.json");
+        assert_eq!(diagnostics_of_a_checked_goal(&second), before);
+    }
+
+    /// Checker instances a fresh node has created once its goal over `replies` has finished.
+    fn instances_after(name: &str, replies: &[String], max: u32, recycle: &str) -> u64 {
+        let dir = TempDir::new(name);
+        let file = dir.0.join("r.json");
+        std::fs::write(&file, serde_json::to_string(replies).unwrap()).unwrap();
+        let server = start_env(&dir, &file, &[("CHECKER.RECYCLE_AFTER", recycle)]);
+        let mut body = code("t", max);
+        body["budget"] = json!(3000);
+        let id = create(&server, &body);
+        finished(&server, id);
+        let stats: Value =
+            serde_json::from_str(&server.request("GET", "/goals/checker", "")).unwrap();
+        assert!(stats["checks"].as_u64().unwrap() > 0, "{stats}");
+        stats["instances"].as_u64().unwrap()
+    }
+
+    #[test]
+    fn recycling_and_traps_show_in_the_checker_instances_created() {
+        let replies = [reply(TYPE_ERROR), reply(FAILING_TEST), reply(TYPE_ERROR)];
+        let default = instances_after("code-inst-a", &replies, 3, "50");
+        let recycled = instances_after("code-inst-b", &replies, 3, "2");
+        assert!(recycled > default, "recycled {recycled}, default {default}");
+        let trap = format!(
+            "const x = {}1{};\ntest(\"t\", () => {{}});",
+            "(".repeat(1_200),
+            ")".repeat(1_200)
+        );
+        let trapped = instances_after("code-inst-c", &[reply(&trap)], 1, "50");
+        let clean = instances_after("code-inst-d", &[reply(PASSING)], 1, "50");
+        assert_eq!(trapped, clean + 1);
+    }
+
     #[test]
     fn a_trapping_reply_is_reported_and_the_next_reply_still_checks() {
         let trap = format!(

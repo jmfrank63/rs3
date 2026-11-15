@@ -540,6 +540,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         cluster.start_node(follower).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while cluster.stores[follower].list().len() < writes as usize {
             assert!(
                 std::time::Instant::now() < deadline,

@@ -5,13 +5,14 @@
 //! once on a fresh instance before it is reported as a `(program)` diagnostic.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use wasmtime::{
-    Caller, Engine, Extern, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
-    TypedFunc, Val,
+    Cache, CacheConfig, Caller, Config, Engine, Extern, Linker, Memory, Module, Store, StoreLimits,
+    StoreLimitsBuilder, TypedFunc, Val,
 };
 
 const WASM: &[u8] = include_bytes!("../checker/ts_rust.wasm");
@@ -248,17 +249,46 @@ struct Held {
 static MODULE: OnceLock<Result<(Engine, Module), String>> = OnceLock::new();
 static HELD: Mutex<Option<Held>> = Mutex::new(None);
 static RECYCLE_AFTER: OnceLock<u32> = OnceLock::new();
+static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static INSTANCES: AtomicU64 = AtomicU64::new(0);
+static CHECKS: AtomicU64 = AtomicU64::new(0);
 
-/// How many checks one instance serves before a fresh one replaces it (default 50); the first
-/// call wins.
-pub fn configure(recycle_after: u32) {
+/// How many checks one instance serves before a fresh one replaces it (default 50), and where
+/// the compiled module is cached (default: wasmtime's per-user cache directory); the first call
+/// wins.
+pub fn configure(recycle_after: u32, cache: Option<PathBuf>) {
     let _ = RECYCLE_AFTER.set(recycle_after);
+    if let Some(dir) = cache {
+        let _ = CACHE_DIR.set(dir);
+    }
+}
+
+/// Checker instances this process has created and checks it has run.
+pub fn stats() -> (u64, u64) {
+    (
+        INSTANCES.load(Ordering::Relaxed),
+        CHECKS.load(Ordering::Relaxed),
+    )
+}
+
+/// An engine that keeps compiled code on disk. A cache that cannot be set up, or an entry that is
+/// unreadable, only means the module is compiled again.
+fn engine() -> Engine {
+    let mut cache = CacheConfig::new();
+    if let Some(dir) = CACHE_DIR.get() {
+        cache.with_directory(dir);
+    }
+    let mut config = Config::new();
+    if let Ok(cache) = Cache::new(cache) {
+        config.cache(Some(cache));
+    }
+    Engine::new(&config).unwrap_or_default()
 }
 
 fn module() -> Result<&'static (Engine, Module), CheckerError> {
     MODULE
         .get_or_init(|| {
-            let engine = Engine::default();
+            let engine = engine();
             let module = Module::new(&engine, WASM).map_err(|e| format!("{e:#}"))?;
             Ok((engine, module))
         })
@@ -328,6 +358,7 @@ fn instantiate() -> Result<Held, CheckerError> {
     let mut store = Store::new(engine, host);
     store.limiter(|host| &mut host.limits);
     let instance = linker.instantiate(&mut store, module).map_err(fail)?;
+    INSTANCES.fetch_add(1, Ordering::Relaxed);
     let memory = instance
         .get_memory(&mut store, "memory")
         .ok_or_else(|| CheckerError::Instantiate("no memory export".into()))?;
@@ -494,6 +525,7 @@ pub fn check(files: &[(String, String)]) -> Result<CheckOutput, CheckerError> {
         other => other?,
     };
     held.runs += 1;
+    CHECKS.fetch_add(1, Ordering::Relaxed);
     let diagnostics = parse(&output)?;
     let js = emitted(&held.store.data().fs);
     *slot = Some(held);

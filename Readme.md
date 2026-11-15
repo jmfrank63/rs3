@@ -70,6 +70,10 @@ of the built-in deterministic fake model), `MODEL.PATH`, `MODEL.TOKENIZER` and `
 (default 4). `MODEL.PATH` (a GGUF file) and `MODEL.TOKENIZER` (a `tokenizer.json`) must be set
 together, or startup fails with `MODEL.PATH and MODEL.TOKENIZER must be set together`; without them the
 fake model stays the default. The numeric settings must be positive integers. See Real model below.
+`CHECKER.RECYCLE_AFTER` (default 50) is how many checks one TypeScript checker instance serves
+before a fresh one replaces it. `CHECKER.CACHE` is the directory where the compiled checker is kept
+(default: wasmtime's per-user cache directory), so only the first start on a machine pays the
+seconds of compiling; a missing, damaged or stale cache is compiled again and never stops the node.
 The names are
 case-insensitive (`SERVER.HOST`, `server.host` and `Server.Port` all work), but
 the dot is required: underscore names such as `SERVER_HOST` and `SERVER_PORT`
@@ -213,6 +217,10 @@ A goal is a job that rs3 runs in the background and that survives a crash. It ne
 `STORAGE.PATH`; without it every goals route answers 503
 `{"error":"goals_unavailable","message":"goals need a database; set STORAGE.PATH"}`.
 Up to `SCHEDULER.WORKERS` goals run at once, the highest `priority` first.
+
+**`GET /goals/checker`** answers 200 `{"instances":n,"checks":m}`: the TypeScript checker instances
+this node has created and the checks it has run since it started. Recycling (`CHECKER.RECYCLE_AFTER`)
+and a trapped check each add an instance.
 
 **`POST /goals`** answers 201 `{"id":1}` once the goal is durable. There are two kinds of body:
 

@@ -7,7 +7,7 @@
 //! a configuration error. Only the keys `SERVER.HOST`, `SERVER.PORT`,
 //! `STORAGE.PATH`, `SCHEDULER.WORKERS`, `MODEL.TOKENS_PER_SECOND`, `MODEL.PATH`,
 //! `MODEL.TOKENIZER`, `MODEL.THREADS` (default 4), `MODEL.REPLIES`, `CHECKER.RECYCLE_AFTER`
-//! (default 50, a positive integer) and the `CLUSTER.*` keys
+//! (default 50, a positive integer), `CHECKER.CACHE` and the `CLUSTER.*` keys
 //! (case-insensitive) are used. `MODEL.PATH` and `MODEL.TOKENIZER` go together. Both server keys are required: there are no
 //! defaults, and missing or invalid values are an error. Without `STORAGE.PATH`
 //! the store keeps its data in memory only. `SCHEDULER.WORKERS` (default 2) and
@@ -21,7 +21,7 @@ use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 
 /// The only configuration keys read from the dotenv file and the environment.
-const CONFIG_KEYS: [&str; 14] = [
+const CONFIG_KEYS: [&str; 15] = [
     "server.host",
     "server.port",
     "storage.path",
@@ -32,6 +32,7 @@ const CONFIG_KEYS: [&str; 14] = [
     "model.threads",
     "model.replies",
     "checker.recycle_after",
+    "checker.cache",
     "cluster.node_id",
     "cluster.peers",
     "cluster.snapshot_every",
@@ -98,12 +99,15 @@ impl Default for ModelSettings {
 pub struct CheckerSettings {
     /// Runs one checker instance serves before it is replaced by a fresh one.
     pub recycle_after: NonZeroU32,
+    /// Directory for the compiled checker module; unset means wasmtime's per-user cache directory.
+    pub cache: Option<PathBuf>,
 }
 
 impl Default for CheckerSettings {
     fn default() -> Self {
         Self {
             recycle_after: NonZeroU32::MIN.saturating_add(49),
+            cache: None,
         }
     }
 }
@@ -560,6 +564,15 @@ mod tests {
                 .get(),
             3
         );
+    }
+
+    #[test]
+    fn checker_cache_is_optional_and_read_in_any_case() {
+        let base = [("SERVER.HOST", "h"), ("SERVER.PORT", "1")];
+        let with = |extra: &[(&str, &str)]| Settings::from_map(vars(&[&base[..], extra].concat()));
+        assert_eq!(with(&[]).unwrap().checker.cache, None);
+        let s = with(&[("Checker.Cache", "/c")]).unwrap();
+        assert_eq!(s.checker.cache, Some(PathBuf::from("/c")));
     }
 
     #[test]
