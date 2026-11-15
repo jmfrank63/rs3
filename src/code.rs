@@ -256,10 +256,10 @@ pub enum Next {
 pub struct Iteration {
     pub prompt: String,
     pub attempts: u32,
-    /// The last attempt's reply bytes.
-    pub reply: Vec<u8>,
-    /// Every attempt's reply bytes, in order; the last equals `reply`.
-    pub replies: Vec<Vec<u8>>,
+    /// The last attempt's reply tokens.
+    pub reply: Vec<u32>,
+    /// Every attempt's reply tokens, in order; the last equals `reply`.
+    pub replies: Vec<Vec<u32>>,
     /// The check is committed (an empty `diagnostics` then means clean).
     pub checked: bool,
     /// The run's `(status, error)` once committed.
@@ -278,7 +278,7 @@ pub struct Loop {
     task: String,
     spec: String,
     max_iterations: u32,
-    budget: u64,
+    pub budget: u64,
     pub iterations: Vec<Iteration>,
     /// Takes what a stream with no call begun would write to its current iteration.
     stray: Iteration,
@@ -319,10 +319,10 @@ impl Loop {
         };
     }
 
-    fn reply_ended(&mut self) {
+    fn reply_ended(&mut self, decode: &Decoder) {
         let attempt = self.last().attempts - 1;
         let iteration = self.iterations.len() as u32;
-        let reply = String::from_utf8_lossy(&self.last().reply).into_owned();
+        let reply = decode(&self.last().reply);
         match extract(&reply) {
             Ok(files) => {
                 self.last().files = files.clone();
@@ -358,7 +358,7 @@ impl Loop {
         }
     }
 
-    fn apply(&mut self, record: &Record) {
+    fn apply(&mut self, record: &Record, decode: &Decoder) {
         match record {
             Record::ReplyStart {
                 iteration,
@@ -380,15 +380,14 @@ impl Loop {
                 self.next = Next::Generate;
             }
             Record::Tokens { tokens, .. } => {
-                let bytes = tokens.iter().map(|t| *t as u8);
                 let last = self.last();
-                last.reply.extend(bytes.clone());
+                last.reply.extend(tokens);
                 if let Some(current) = last.replies.last_mut() {
-                    current.extend(bytes);
+                    current.extend(tokens);
                 }
                 self.open += tokens.len();
             }
-            Record::ReplyEnd { .. } => self.reply_ended(),
+            Record::ReplyEnd { .. } => self.reply_ended(decode),
             Record::Check { diagnostics, js } => self.checked(diagnostics, js),
             Record::Run(run) => self.ran(run),
             Record::CodeEnd { .. } | Record::Cancelled => self.next = Next::Done,
@@ -439,8 +438,11 @@ impl Loop {
     }
 }
 
+/// Turns a reply's tokens into its text; the node's engine decides how.
+pub type Decoder<'a> = dyn Fn(&[u32]) -> String + 'a;
+
 /// Fold the records of a coding stream, or `None` when it does not start with `CodeStart`.
-pub fn fold(records: &[Record]) -> Option<Loop> {
+pub fn fold(records: &[Record], decode: &Decoder) -> Option<Loop> {
     let Some(Record::CodeStart {
         task,
         spec,
@@ -464,23 +466,27 @@ pub fn fold(records: &[Record]) -> Option<Loop> {
     };
     state.next = state.call(1, 0);
     for record in &records[1..] {
-        state.apply(record);
+        state.apply(record, decode);
     }
     Some(state)
 }
 
 /// The iterations and outcome a client sees, from committed records only.
-pub fn view(records: &[Record]) -> Option<Value> {
-    let state = fold(records)?;
+pub fn view(records: &[Record], decode: &Decoder) -> Option<Value> {
+    let state = fold(records, decode)?;
     let outcome = match records.last() {
         Some(Record::CodeEnd { outcome }) => Value::from(outcome.as_str()),
         _ => Value::Null,
     };
-    let iterations: Vec<Value> = state.iterations.iter().map(iteration_json).collect();
+    let iterations: Vec<Value> = state
+        .iterations
+        .iter()
+        .map(|i| iteration_json(i, decode))
+        .collect();
     Some(serde_json::json!({ "outcome": outcome, "iterations": iterations }))
 }
 
-fn iteration_json(i: &Iteration) -> Value {
+fn iteration_json(i: &Iteration, decode: &Decoder) -> Value {
     let files: serde_json::Map<String, Value> = i
         .files
         .iter()
@@ -489,13 +495,13 @@ fn iteration_json(i: &Iteration) -> Value {
     serde_json::json!({
         "prompt": i.prompt,
         "attempts": i.attempts,
-        "reply": String::from_utf8_lossy(&i.reply),
+        "reply": decode(&i.reply),
         "files": files,
         "diagnostics": i.diagnostics,
         "tests": i.tests,
         "logs": i.logs,
         "feedback": i.feedback,
-        "replies": i.replies.iter().map(|r| String::from_utf8_lossy(r)).collect::<Vec<_>>(),
+        "replies": i.replies.iter().map(|r| decode(r)).collect::<Vec<_>>(),
         "checked": i.checked,
         "run": i.run.as_ref().map(|(status, error)| serde_json::json!({"status": status, "error": error})),
     })

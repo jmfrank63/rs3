@@ -154,6 +154,11 @@ impl Candle {
             );
         }
         text += &format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
+        self.encode(&text)
+    }
+
+    /// `text` as token ids, as it is, with no chat wrapping.
+    pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
         let encoding = self
             .tokenizer
             .encode(text, false)
