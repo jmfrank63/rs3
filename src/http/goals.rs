@@ -916,12 +916,12 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn exhausted_replies_end_llm_error_and_a_spent_budget_run_deadline() {
+    async fn exhausted_replies_end_llm_error_even_after_a_reply_cut_at_the_budget() {
         let goal = code_goal(vec![reply(TYPE_ERROR)], code_body(3)).await;
         assert_eq!(goal["outcome"], "llm_error", "{goal}");
         let body = json!({"kind": "code", "task": "t", "max_iterations": 1, "budget": 20});
         let goal = code_goal(vec![reply(PASSING)], body).await;
-        assert_eq!(goal["outcome"], "run_deadline", "{goal}");
+        assert_eq!(goal["outcome"], "llm_error", "{goal}");
         assert_eq!(goal["iterations"][0]["reply"].as_str().unwrap().len(), 20);
     }
 

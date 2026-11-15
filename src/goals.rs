@@ -528,6 +528,12 @@ impl Goals {
         let Some(Engine::Replay { hash, .. }) = self.0.engine.get() else {
             return Err("coding goals need MODEL.REPLIES".into());
         };
+        if spec.budget > CONTEXT {
+            return Err(format!(
+                "budget must fit in {CONTEXT} tokens, got {}",
+                spec.budget
+            ));
+        }
         Ok(Record::CodeStart {
             task: spec.task,
             spec: spec.spec,

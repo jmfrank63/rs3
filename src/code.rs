@@ -22,6 +22,7 @@ Hard rules:
 pub const CORRECTIVE_PROMPT: &str = "respond with ONLY valid JSON";
 pub const FEEDBACK_WINDOW: usize = 3;
 pub const MAX_GUEST_SOURCE_BYTES: usize = 20480;
+const ONE_FILE: &str = "return exactly ONE file (the sandbox executes a single script)";
 const FIX_AGAIN: &str = "fix and return the FULL file(s) again";
 
 /// How a goal ends.
@@ -29,7 +30,6 @@ const FIX_AGAIN: &str = "fix and return the FULL file(s) again";
 pub enum Outcome {
     Success,
     MaxIterations,
-    RunDeadline,
     LlmError,
     LlmMalformed,
 }
@@ -39,7 +39,6 @@ impl Outcome {
         match self {
             Outcome::Success => "success",
             Outcome::MaxIterations => "max_iterations",
-            Outcome::RunDeadline => "run_deadline",
             Outcome::LlmError => "llm_error",
             Outcome::LlmMalformed => "llm_malformed",
         }
@@ -144,6 +143,9 @@ pub fn extract(reply: &str) -> Result<Vec<(String, String)>, Reject> {
             "contract.files must be an object of {name: content}",
         ));
     };
+    if files.len() > 1 {
+        return Err(Reject::Violation(ONE_FILE.into()));
+    }
     let mut out = Vec::new();
     for (name, content) in files {
         let Some(content) = content.as_str() else {
@@ -172,9 +174,7 @@ pub fn extract(reply: &str) -> Result<Vec<(String, String)>, Reject> {
         }
     }
     if out.len() != 1 {
-        return Err(Reject::Violation(
-            "return exactly ONE file (the sandbox executes a single script)".into(),
-        ));
+        return Err(Reject::Violation(ONE_FILE.into()));
     }
     Ok(out)
 }
@@ -196,28 +196,30 @@ pub fn diagnostics_feedback(diagnostics: &[Diagnostic]) -> String {
 const NO_TESTS: &str =
     "no test() calls found; add test(\"name\", () => { expect(...) }) calls per the spec";
 
-/// What the model is told when the tests did not all pass.
+/// What the model is told when the tests did not all pass: failed tests, guest logs, then the
+/// sandbox error, in the order of the prototype's `formatSandboxFeedback`.
 pub fn sandbox_feedback(run: &RunOutput) -> String {
     let crashed = run.status == "error" || run.status == "timeout";
+    if run.tests.is_empty() && !crashed {
+        return format!("{NO_TESTS}, and return the FULL file(s) again");
+    }
     let mut lines = Vec::new();
+    for t in run.tests.iter().filter(|t| !t.passed) {
+        lines.push(match &t.error {
+            Some(e) => format!("FAILED test \"{}\": {e}", t.name),
+            None => format!("FAILED test \"{}\"", t.name),
+        });
+    }
+    lines.extend(run.logs.iter().map(|l| format!("guest {l}")));
     if crashed {
         lines.push(match &run.error {
             Some(e) => format!("sandbox {}: {e}", run.status),
             None => format!("sandbox {}", run.status),
         });
+        // An rs3 addition: the prototype only says a run with no tests found none.
         if run.tests.is_empty() {
             lines.push(NO_TESTS.into());
         }
-    } else if run.tests.is_empty() {
-        return format!("{NO_TESTS}, and return the FULL file(s) again");
-    } else {
-        for t in run.tests.iter().filter(|t| !t.passed) {
-            lines.push(match &t.error {
-                Some(e) => format!("FAILED test \"{}\": {e}", t.name),
-                None => format!("FAILED test \"{}\"", t.name),
-            });
-        }
-        lines.extend(run.logs.iter().map(|l| format!("guest log: {l}")));
     }
     lines.push(FIX_AGAIN.into());
     lines.join("\n")
@@ -276,7 +278,6 @@ pub struct Loop {
     pub calls: usize,
     /// Tokens of the open call.
     pub open: usize,
-    spent: u64,
     pub next: Next,
 }
 
@@ -299,19 +300,12 @@ impl Loop {
         }
     }
 
-    /// Whether the tokens spent have used up `max_iterations` budgets.
-    fn spent_out(&self) -> bool {
-        self.spent >= u64::from(self.max_iterations) * self.budget
-    }
-
     /// After a failed iteration: the next iteration, or the end.
     fn advance(&mut self, feedback: String) {
         self.last().feedback = Some(feedback);
         let done = self.iterations.len() as u32;
         self.next = if done >= self.max_iterations {
             Next::End(Outcome::MaxIterations)
-        } else if self.spent_out() {
-            Next::End(Outcome::RunDeadline)
         } else {
             self.call(done + 1, 0)
         };
@@ -328,9 +322,6 @@ impl Loop {
             }
             Err(Reject::Malformed(_)) if attempt > 0 => {
                 self.next = Next::End(Outcome::LlmMalformed)
-            }
-            Err(Reject::Malformed(_)) if self.spent_out() => {
-                self.next = Next::End(Outcome::RunDeadline);
             }
             Err(Reject::Malformed(_)) => self.next = self.call(iteration, attempt + 1),
             Err(violation) => self.advance(violation.feedback()),
@@ -378,7 +369,6 @@ impl Loop {
             Record::Tokens { tokens, .. } => {
                 self.last().reply.extend(tokens.iter().map(|t| *t as u8));
                 self.open += tokens.len();
-                self.spent += tokens.len() as u64;
             }
             Record::ReplyEnd { .. } => self.reply_ended(),
             Record::Check { diagnostics, .. } => self.checked(diagnostics),
@@ -452,7 +442,6 @@ pub fn fold(records: &[Record]) -> Option<Loop> {
         stray: Iteration::default(),
         calls: 0,
         open: 0,
-        spent: 0,
         next: Next::Done,
     };
     state.next = state.call(1, 0);
@@ -623,7 +612,7 @@ mod tests {
                     error: e.map(Into::into),
                 })
                 .collect(),
-            logs: vec!["hi".into()],
+            logs: vec!["log: hi".into()],
             error: error.map(Into::into),
         }
     }
@@ -651,13 +640,13 @@ mod tests {
         assert_eq!(
             sandbox_feedback(&with_error),
             format!(
-                "sandbox timeout: took too long\n{NO_TESTS}\nfix and return the FULL file(s) again"
+                "guest log: hi\nsandbox timeout: took too long\n{NO_TESTS}\nfix and return the FULL file(s) again"
             )
         );
         let after_tests = run("error", vec![("t", true, None)], None);
         assert_eq!(
             sandbox_feedback(&after_tests),
-            "sandbox error\nfix and return the FULL file(s) again"
+            "guest log: hi\nsandbox error\nfix and return the FULL file(s) again"
         );
     }
 
@@ -689,7 +678,6 @@ mod tests {
         let names: Vec<_> = [
             Outcome::Success,
             Outcome::MaxIterations,
-            Outcome::RunDeadline,
             Outcome::LlmError,
             Outcome::LlmMalformed,
         ]
@@ -697,13 +685,7 @@ mod tests {
         .to_vec();
         assert_eq!(
             names,
-            [
-                "success",
-                "max_iterations",
-                "run_deadline",
-                "llm_error",
-                "llm_malformed"
-            ]
+            ["success", "max_iterations", "llm_error", "llm_malformed"]
         );
     }
 }

@@ -95,15 +95,17 @@ const PRELUDE: &str = r#"(function (g) {
   lock("test", testFn);
   lock("expect", expectFn);
   lock("assert", assertFn);
-  function show(v) { return typeof v === "string" ? v : shown(v); }
-  function log() {
-    var room = CAP - used;
-    if (room <= 0) return;
-    var parts = [];
-    for (var i = 0; i < arguments.length; i++) parts.push(show(arguments[i]));
-    var line = parts.join(" ").slice(0, room - 1);
-    used += line.length + 1;
-    logs.push(line);
+  function show(v) { try { var j = JSON.stringify(v); return j === undefined ? String(v) : j; } catch (e) { return String(v); } }
+  function logger(level) {
+    return function () {
+      var room = CAP - used;
+      if (room <= 0) return;
+      var parts = [];
+      for (var i = 0; i < arguments.length; i++) parts.push(show(arguments[i]));
+      var line = (level + ": " + parts.join(" ")).slice(0, room - 1);
+      used += line.length + 1;
+      logs.push(line);
+    };
   }
   var NativeDate = g.Date, s = __seed >>> 0;
   function FixedDate() {
@@ -123,7 +125,7 @@ const PRELUDE: &str = r#"(function (g) {
   }
   Object.defineProperty(Math, "random", { value: rand, writable: false, enumerable: false, configurable: false });
   var c = {};
-  ["log", "info", "warn", "error", "debug"].forEach(function (l) { c[l] = log; });
+  ["log", "info", "warn", "error", "debug"].forEach(function (l) { c[l] = logger(l); });
   lock("console", c);
   return function () { return JSON.stringify({ tests: records, logs: logs }); };
 })(globalThis)"#;
@@ -357,7 +359,10 @@ mod tests {
     #[test]
     fn console_output_is_captured_in_order() {
         let out = run_js("console.log('a', 1, {x: 2}); console.error('b'); console.warn('c');");
-        assert_eq!(out.logs, ["a 1 {\"x\":2}", "b", "c"]);
+        assert_eq!(
+            out.logs,
+            ["log: \"a\" 1 {\"x\":2}", "error: \"b\"", "warn: \"c\""]
+        );
         assert_eq!(out.status, "passed");
     }
 
@@ -367,11 +372,13 @@ mod tests {
         assert_eq!(out.logs.len(), 1);
         assert_eq!(out.logs[0].len(), 8191);
         let out = run_js("for (let i = 0; i < 5000; i++) console.log('0123456789');");
-        assert_eq!(out.logs.len(), 745);
-        assert_eq!(out.logs[743].len(), 10);
-        assert_eq!(out.logs[744].len(), 7);
-        let out = run_js("console.log('x'.repeat(8190)); console.log('abcdef');");
-        assert_eq!(out.logs[1], "");
+        assert_eq!(out.logs.len(), 456);
+        assert_eq!(out.logs[454].len(), 17);
+        assert_eq!(out.logs[455], "l");
+        let out = run_js("console.log('x'.repeat(8184)); console.log('abcdef');");
+        assert_eq!(out.logs.len(), 1);
+        let out = run_js("console.log('x'.repeat(8180)); console.log('abcdef');");
+        assert_eq!(out.logs[1], "log");
     }
 
     #[test]
@@ -420,7 +427,7 @@ mod tests {
         let src = "console.log(Date.now(), String(new Date().getTime()), new Date(5).getTime(), \
                    typeof performance === 'undefined' ? 0 : performance.now());";
         let first = logs_of(src, 1);
-        assert_eq!(first, ["0 0 5 0"]);
+        assert_eq!(first, ["log: 0 \"0\" 5 0"]);
         assert_eq!(logs_of(src, 2), first);
     }
 
@@ -431,7 +438,9 @@ mod tests {
         assert_eq!(logs_of(src, 7), a);
         assert_ne!(logs_of(src, 8), a);
         assert!(
-            a[0].split(' ')
+            a[0].strip_prefix("log: ")
+                .unwrap()
+                .split(' ')
                 .all(|n| n.parse::<f64>().is_ok_and(|x| (0.0..1.0).contains(&x)))
         );
     }
@@ -441,6 +450,6 @@ mod tests {
         let src = "try { Date.now = () => 9; } catch (e) {} \
                    try { Math.random = () => 0.5; } catch (e) {} \
                    console.log(Date.now(), Math.random() === 0.5);";
-        assert_eq!(logs_of(src, 3), ["0 false"]);
+        assert_eq!(logs_of(src, 3), ["log: 0 false"]);
     }
 }

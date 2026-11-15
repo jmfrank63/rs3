@@ -266,6 +266,23 @@ fn module() -> Result<&'static (Engine, Module), CheckerError> {
         .map_err(|e| CheckerError::Compile(e.clone()))
 }
 
+const WASI_EBADF: i32 = 8;
+const WASI_ENOSYS: i32 = 52;
+/// The WASI calls the shim implements; each only has to succeed here.
+const WASI_WORKING: [&str; 11] = [
+    "args_sizes_get",
+    "args_get",
+    "environ_sizes_get",
+    "environ_get",
+    "clock_time_get",
+    "clock_res_get",
+    "random_get",
+    "fd_write",
+    "fd_fdstat_get",
+    "sched_yield",
+    "poll_oneoff",
+];
+
 fn linker(engine: &Engine, module: &Module) -> wasmtime::Result<Linker<Host>> {
     let mut linker = Linker::new(engine);
     linker.func_wrap("ts_host", "fs", host_fs)?;
@@ -277,19 +294,24 @@ fn linker(engine: &Engine, module: &Module) -> wasmtime::Result<Linker<Host>> {
         let Some(ty) = import.ty().func().cloned() else {
             continue;
         };
-        // Every WASI call the module makes (clock, environment, random bytes) only has to
-        // succeed: it reads zeroed memory afterwards, which keeps a check deterministic.
-        linker.func_new(
-            "wasi_snapshot_preview1",
-            import.name(),
-            ty,
-            |_, _, results| {
-                if let Some(slot) = results.first_mut() {
-                    *slot = Val::I32(0);
-                }
-                Ok(())
-            },
-        )?;
+        // Follows the iso-agents shim: the working subset succeeds, and because clock, random
+        // bytes and environment are left as the zeroed memory they stay fixed, which keeps a
+        // check deterministic. `proc_exit` is the panic-hook exit, so it traps and execution
+        // never continues; `fd_prestat_get` is EBADF; any other import is ENOSYS.
+        let name = import.name();
+        let code = match name {
+            "proc_exit" => None,
+            "fd_prestat_get" => Some(WASI_EBADF),
+            _ if WASI_WORKING.contains(&name) => Some(0),
+            _ => Some(WASI_ENOSYS),
+        };
+        linker.func_new("wasi_snapshot_preview1", name, ty, move |_, _, results| {
+            let code = code.ok_or_else(|| trap("proc_exit"))?;
+            if let Some(slot) = results.first_mut() {
+                *slot = Val::I32(code);
+            }
+            Ok(())
+        })?;
     }
     Ok(linker)
 }

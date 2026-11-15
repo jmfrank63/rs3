@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn a_guest_sees_the_same_clock_and_dice_on_every_node() {
         let first = logs_on_fresh_node("code-det-a", 5);
-        assert!(text(&first[0]).starts_with("0 0 0."), "{first}");
+        assert!(text(&first[0]).starts_with("log: 0 \"0\" 0."), "{first}");
         assert_eq!(logs_on_fresh_node("code-det-b", 5), first);
         assert_ne!(logs_on_fresh_node("code-det-c", 6), first);
     }
@@ -263,13 +263,14 @@ mod tests {
     }
 
     #[test]
-    fn a_spent_token_budget_ends_run_deadline() {
+    fn a_reply_cut_at_the_budget_is_malformed_even_on_the_retry() {
         let dir = TempDir::new("code-deadline");
         let server = start(&dir, "r.json", &[reply(PASSING), reply(PASSING)]);
         let body = json!({"kind": "code", "task": "t", "max_iterations": 1, "budget": 20});
         let id = create(&server, &body);
         let goal = finished(&server, id);
-        assert_eq!(goal["outcome"], "run_deadline", "{goal}");
+        assert_eq!(goal["outcome"], "llm_malformed", "{goal}");
+        assert_eq!(goal["iterations"][0]["attempts"], 2);
         // The reply was cut at the budget, not the whole reply.
         assert_eq!(text(&goal["iterations"][0]["reply"]).len(), 20);
     }
@@ -336,5 +337,49 @@ mod tests {
         assert_eq!(goal["outcome"], "llm_error", "{goal}");
         assert_eq!(goal["iterations"][0]["tests"], json!([]));
         assert!(goal["iterations"][0]["feedback"].is_string());
+    }
+
+    #[test]
+    fn a_malformed_reply_that_used_the_whole_budget_still_gets_its_corrective_retry() {
+        let junk = "x".repeat(400);
+        let run = |name: &str, replies: &[String]| {
+            let dir = TempDir::new(name);
+            let server = start(&dir, "r.json", replies);
+            let mut body = code("t", 1);
+            body["budget"] = json!(400);
+            finished(&server, create(&server, &body))
+        };
+        let healed = run("code-retry-a", &[junk.clone(), reply(PASSING)]);
+        assert_eq!(healed["outcome"], "success", "{healed}");
+        let failed = run("code-retry-b", &[junk.clone(), junk]);
+        assert_eq!(failed["outcome"], "llm_malformed", "{failed}");
+    }
+
+    #[test]
+    fn the_model_is_told_each_guest_log_with_its_level() {
+        let src = "console.warn(\"a\", 1);\ntest(\"t\", () => { expect(1).toEqual(2); });";
+        let dir = TempDir::new("code-warn");
+        let server = start(&dir, "r.json", &[reply(src)]);
+        let goal = finished(&server, create(&server, &code("t", 1)));
+        let feedback = text(&goal["iterations"][0]["feedback"]);
+        assert!(feedback.contains("guest warn: \"a\" 1"), "{feedback}");
+        assert!(
+            feedback.find("FAILED test").unwrap() < feedback.find("guest warn").unwrap(),
+            "{feedback}"
+        );
+    }
+
+    #[test]
+    fn a_budget_beyond_the_model_context_is_refused() {
+        let dir = TempDir::new("code-big-budget");
+        let server = start(&dir, "r.json", &[reply(PASSING)]);
+        let mut body = code("t", 1);
+        body["budget"] = json!(4097);
+        let (status, text) = server.request_status("POST", "/goals", &body.to_string());
+        assert_eq!(status, 422, "{text}");
+        assert!(text.contains("invalid_input"), "{text}");
+        body["budget"] = json!(4096);
+        let (status, text) = server.request_status("POST", "/goals", &body.to_string());
+        assert_eq!(status, 201, "{text}");
     }
 }
