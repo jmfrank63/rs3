@@ -146,8 +146,10 @@ mod tests {
             "session/prompt",
             json!({"sessionId": session, "prompt": blocks}),
         );
+        let end = std::time::Instant::now() + Duration::from_secs(60);
         for iteration in [1, 2] {
             loop {
+                assert!(std::time::Instant::now() < end, "no check update in time");
                 let message = acp.recv();
                 let update = &message["params"]["update"];
                 if kind(update) == "tool_call_update" && id_of(update).ends_with("-check") {

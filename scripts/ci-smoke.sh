@@ -572,27 +572,32 @@ LEADER=$(cleader)
 cwhen 0 POST /goals "$CODEGOAL"
 [[ "$CODE" == 201 ]] || fail "coding cluster POST /goals -> ${CODE} ${BODY}"
 CCID=$(jf "$BODY" id)
-# Wait until the first iteration is committed and the goal is not done, then kill the leader.
+# Wait until the first iteration is committed and the goal is not done, then kill the node running
+# it. Its record of who runs the goal must change, which proves another node finished the loop.
 dl=$((SECONDS + 60))
 while :; do
   cwhen 0 GET "/goals/$CCID"
-  [[ "$(jf "$BODY" status)" != done ]] || fail "coding goal finished before the leader kill: ${BODY}"
+  [[ "$(jf "$BODY" status)" != done ]] || fail "coding goal finished before the kill: ${BODY}"
   [[ "$(jf "$BODY" iterations)" != "[]" ]] && break
   (( SECONDS < dl )) || fail "coding goal committed no iteration after 60s: ${BODY}"
   sleep 0.05
 done
-kill -9 "${CPIDS[$LEADER]}"
-wait "${CPIDS[$LEADER]}" 2>/dev/null || true
-CPIDS[$LEADER]=""
-LIVE=$(( (LEADER + 1) % 3 ))
-NEWLEADER=$(cleader "$LEADER")
+COWNER=$(jf "$BODY" node)
+[[ "$COWNER" =~ ^[1-3]$ ]] || fail "coding goal has no running node: ${BODY}"
+VICTIM=$((COWNER - 1))
+kill -9 "${CPIDS[$VICTIM]}"
+wait "${CPIDS[$VICTIM]}" 2>/dev/null || true
+CPIDS[$VICTIM]=""
+LIVE=$(( (VICTIM + 1) % 3 ))
+NEWLEADER=$(cleader "$VICTIM")
 CCDONE=$(cwait_done "$LIVE" "$CCID")
+[[ "$(jf "$CCDONE" node)" != "$COWNER" ]] || fail "coding goal was not taken over from killed node ${COWNER}: ${CCDONE}"
 # The cluster body also names the serving node; every other byte must match.
 CCSAME=$(python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); d.pop("node", None); print(json.dumps(d))' "$CCDONE")
 [[ "$CCSAME" == "$(python3 -I -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])))' "$CREF")" ]] || fail "coding goal body after the leader kill differs from the single-node run: ${CCDONE} vs ${CREF}"
 [[ "$(jf "$CCDONE" outcome)" == success ]] || fail "coding cluster outcome: ${CCDONE}"
 [[ "$(python3 -I -c 'import json,sys; print(len(json.loads(sys.argv[1])["iterations"]))' "$CCDONE")" == 2 ]] || fail "coding goal should have 2 iterations: ${CCDONE}"
-echo "ci-smoke: ok   coding goal on 3 nodes: leader node $((LEADER + 1)) killed mid-loop, new leader node $((NEWLEADER + 1)), 2 iterations, success, GET body equals the single-node run"
+echo "ci-smoke: ok   coding goal on 3 nodes: its node ${COWNER} killed mid-loop (leader was node $((LEADER + 1)), now node $((NEWLEADER + 1))), finished on node $(jf "$CCDONE" node), 2 iterations, success, GET body equals the single-node run"
 for i in "${!CPIDS[@]}"; do
   [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
 done
