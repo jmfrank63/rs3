@@ -79,6 +79,7 @@ at least 3 nodes at once.
 4. Reed-Solomon sealing and repair. **Done:** `src/seal.rs`, `src/raft/seal.rs`, `src/raft/assign.rs` (shrink to the 3 live voters and RS(2,1) re-encode, after the configurable CLUSTER.SHRINK_AFTER); `tests/sealing.rs` covers acceptance 1-7, and `scripts/ci-smoke.sh` seals a goal on a 5-node release cluster and reads it after two kills.
 5. T3 Code provider adapter. **Done:** `src/acp.rs`, `src/sessions.rs`, `tests/acp.rs`, the `acp_` tests in `tests/cluster.rs`, and the ACP section of `scripts/ci-smoke.sh`. T3 Code is the control surface: `rs3` owns agent state and failover.
 6. Real model. **Done:** `src/model.rs`, `src/goals.rs`, `src/lease.rs` (Decline), `src/acp.rs`, `tests/model.rs`, `tests/restore.rs`, `tests/cluster.rs` (module `cluster_model`), `tests/acp_model.rs` and the real-model section of `scripts/ci-smoke.sh`.
+7. Coding loop as a durable goal. **Done:** `src/code.rs`, `src/checker.rs`, `src/sandbox.rs`, `src/goals.rs` (step_code), `tests/code.rs`, `tests/code_model.rs`, `tests/acp_code.rs`, the coding tests in `tests/cluster.rs` and the coding section of `scripts/ci-smoke.sh`.
 
 JavaScript engine replacement (V8, Boa, Wasmtime) is a separate later decision. Keep it behind a small interface.
 
@@ -99,5 +100,5 @@ type-checks it, a QuickJS sandbox runs it, and the errors go back to the model u
 memory only. `src/typecheck-wasm/ts_rust.wasm` is the only copy of its build of an unpublished tsc-rs fork; see
 `prototypes/iso-agents/docs/ts-rust-wasm.md`.
 
-It is the reference for a later milestone that runs this loop as a durable rs3 goal, with every iteration journaled.
-CI does not build or test it. Once the loop runs in Rust, delete the prototype or keep only its benchmarks.
+rs3 now runs this loop as a durable goal with every iteration journaled (build-order step 7). The prototype stays as a reference.
+CI does not build or test it. Delete the prototype or keep only its benchmarks when it is no longer needed.

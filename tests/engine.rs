@@ -206,3 +206,127 @@ fn history_comes_before_the_prompt_in_the_chat_tokens() {
     let exchange = c.chat_tokens(&[], "Say hi.").unwrap();
     assert_eq!(with[..exchange.len() - 3], exchange[..exchange.len() - 3]);
 }
+
+#[cfg(test)]
+mod coding_goals {
+    use super::load;
+
+    /// Run the next queued goal of `goals` to its end, failing after the deadline.
+    fn run_next(goals: &rs3::goals::Goals, deadline: std::time::Duration) {
+        let goal = goals.next_goal().unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = goals.clone();
+        std::thread::spawn(move || {
+            worker.run(goal);
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(deadline)
+            .expect("the goal did not finish in time");
+    }
+
+    /// A node on the model, with one coding goal of `budget` created and run to its end.
+    fn coding_goal_outcome(
+        name: &str,
+        budget: u64,
+    ) -> (serde_json::Value, Vec<rs3::journal::Record>) {
+        use rs3::goals::{CodeSpec, Goals};
+        use rs3::model::Engine;
+        use std::{num::NonZeroU32, sync::Arc, time::Duration};
+
+        let dir = std::env::temp_dir().join(format!("rs3-engine-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = rs3::storage::open(&dir.join("rs3.redb")).unwrap();
+        let goals = Goals::open(db, NonZeroU32::new(1000).unwrap()).unwrap();
+        goals.set_engine(Engine::Candle(Arc::new(load().unwrap())));
+        let start = goals
+            .code_start(CodeSpec {
+                task: "add".into(),
+                spec: "add(a: number, b: number): number".into(),
+                max_iterations: 1,
+                budget,
+                seed: 4,
+            })
+            .unwrap();
+        let id = goals.create_from(0, budget, &start).unwrap();
+        run_next(&goals, Duration::from_secs(300));
+        let code = goals.status(id).unwrap().unwrap().code.unwrap();
+        let records = goals.journal().read(id).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        (code, records)
+    }
+
+    #[test]
+    fn a_coding_goal_whose_budget_leaves_no_room_for_the_prompt_ends_llm_error() {
+        let (code, _) = coding_goal_outcome("code-overflow", 4096);
+        assert_eq!(code["outcome"], "llm_error", "{code}");
+    }
+
+    #[test]
+    fn a_coding_goal_whose_model_reply_is_cut_off_by_the_budget_ends_llm_malformed() {
+        let (code, records) = coding_goal_outcome("code-sampled", 32);
+        assert_eq!(code["outcome"], "llm_malformed", "{code}");
+        assert_eq!(code["iterations"][0]["attempts"], 2, "{code}");
+        // The reply is the answer after the model's <think> block, here cut off before it.
+        assert_eq!(code["iterations"][0]["reply"], "", "{code}");
+        // Each of the two attempts sampled exactly the budget before it was cut off.
+        let sampled: usize = records
+            .iter()
+            .map(|r| match r {
+                rs3::journal::Record::Tokens { tokens, .. } => tokens.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(sampled, 64, "{code}");
+    }
+
+    #[test]
+    fn a_coding_goal_started_on_another_model_is_left_alone() {
+        use rs3::goals::{CodeSpec, Goals};
+        use rs3::journal::Record;
+        use rs3::model::Engine;
+        use std::{num::NonZeroU32, sync::Arc, time::Duration};
+
+        let dir = std::env::temp_dir().join(format!("rs3-engine-other-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = rs3::storage::open(&dir.join("rs3.redb")).unwrap();
+        let goals = Goals::open(db, NonZeroU32::new(1000).unwrap()).unwrap();
+        goals.set_engine(Engine::Candle(Arc::new(load().unwrap())));
+        let spec = || CodeSpec {
+            task: "add".into(),
+            spec: "add".into(),
+            max_iterations: 1,
+            budget: 4096,
+            seed: 4,
+        };
+        for other in ["", "xyzzy"] {
+            let Record::CodeStart {
+                task,
+                spec,
+                max_iterations,
+                budget,
+                seed,
+                engine,
+                checker_hash,
+                ..
+            } = goals.code_start(spec()).unwrap()
+            else {
+                panic!("not a code start");
+            };
+            let start = Record::CodeStart {
+                task,
+                spec,
+                max_iterations,
+                budget,
+                seed,
+                engine,
+                model_hash: other.into(),
+                checker_hash,
+            };
+            let id = goals.create_from(0, budget, &start).unwrap();
+            run_next(&goals, Duration::from_secs(60));
+            assert_eq!(goals.journal().read(id).unwrap().len(), 1, "{other:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

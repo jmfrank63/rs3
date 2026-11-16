@@ -975,50 +975,58 @@ impl Goals {
                     prompt_tokens,
                 }]))
             }
-            code::Next::Generate => {
-                let live = match generation {
-                    Some(live) => live,
-                    None => {
-                        let open = records.iter().rev().find_map(|r| match r {
-                            Record::ReplyStart { prompt_tokens, .. } => Some(prompt_tokens),
-                            _ => None,
-                        });
-                        let committed = state.iterations.last().map_or(&[][..], |i| &i.reply);
-                        let seed = run_seed(code_seed(records), state.calls as u32);
-                        let made = Generation::new(
-                            candle,
-                            seed,
-                            open.map_or(&[][..], Vec::as_slice),
-                            committed,
-                        )
-                        .map_err(JournalError::Storage)?;
-                        generation.insert(made)
-                    }
-                };
-                let room = (state.budget as usize).saturating_sub(state.open);
-                let mut tokens = Vec::new();
-                let mut eos = false;
-                while tokens.len() < room.min(BATCH as usize) && !eos {
-                    let token = live.next_token().map_err(JournalError::Storage)?;
-                    tokens.push(token);
-                    eos = candle.is_eos(token);
-                }
-                let ends = eos || tokens.len() == room;
-                let reason = if eos { "eos" } else { "budget" };
-                let mut next = vec![Record::Tokens {
-                    tokens,
-                    rng_state: Vec::new(),
-                }];
-                if ends {
-                    *generation = None;
-                    next.push(Record::ReplyEnd {
-                        reason: reason.into(),
-                    });
-                }
-                Ok(Some(next))
-            }
+            code::Next::Generate => self
+                .candle_code_batch(candle, records, state, generation)
+                .map(Some),
             _ => Ok(state.step(&[], 0)),
         }
+    }
+
+    /// The records of the open reply's next batch, sampled from `generation` (opened from the
+    /// committed records when it is not live).
+    fn candle_code_batch<'a>(
+        &'a self,
+        candle: &'a Candle,
+        records: &[Record],
+        state: &code::Loop,
+        generation: &mut Option<Generation<'a>>,
+    ) -> Result<Vec<Record>, JournalError> {
+        let live = match generation {
+            Some(live) => live,
+            None => {
+                let open = records.iter().rev().find_map(|r| match r {
+                    Record::ReplyStart { prompt_tokens, .. } => Some(prompt_tokens),
+                    _ => None,
+                });
+                let committed = state.iterations.last().map_or(&[][..], |i| &i.reply);
+                let seed = run_seed(code_seed(records), state.calls as u32);
+                let made =
+                    Generation::new(candle, seed, open.map_or(&[][..], Vec::as_slice), committed)
+                        .map_err(JournalError::Storage)?;
+                generation.insert(made)
+            }
+        };
+        let room = (state.budget as usize).saturating_sub(state.open);
+        let mut tokens = Vec::new();
+        let mut eos = false;
+        while tokens.len() < room.min(BATCH as usize) && !eos {
+            let token = live.next_token().map_err(JournalError::Storage)?;
+            tokens.push(token);
+            eos = candle.is_eos(token);
+        }
+        let ends = eos || tokens.len() == room;
+        let reason = if eos { "eos" } else { "budget" };
+        let mut next = vec![Record::Tokens {
+            tokens,
+            rng_state: Vec::new(),
+        }];
+        if ends {
+            *generation = None;
+            next.push(Record::ReplyEnd {
+                reason: reason.into(),
+            });
+        }
+        Ok(next)
     }
 
     /// The next batch of a fake-model goal, after the time the model needs for it.
