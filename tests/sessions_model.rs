@@ -73,6 +73,30 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_turn_after_a_code_turn_answers_and_remembers_the_plain_turns() {
+        let dir = TempDir::new("sessions-code-between");
+        let server = serve(&dir);
+        let session = new_session(&server);
+        answer(&server, session, 0, "Hello! My name is Ada. /no_think");
+        let (status, text) = turn(
+            &server,
+            session,
+            1,
+            "/code add two numbers\nexport function add",
+        );
+        assert_eq!(status, 201, "{text}");
+        let code = json(&text)["goal"].as_u64().unwrap();
+        server.request("DELETE", &format!("/goals/{code}"), "");
+        let got = answer(
+            &server,
+            session,
+            2,
+            "What is my name? Answer with one word. /no_think",
+        );
+        assert!(got["output"].as_str().unwrap().contains("Ada"), "{got}");
+    }
+
+    #[test]
     fn a_prompt_that_leaves_no_room_for_the_budget_is_refused() {
         let (gguf, tokenizer) = model_files();
         let candle = rs3::model::Candle::load(&gguf, &tokenizer, 2).unwrap();

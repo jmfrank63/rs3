@@ -244,6 +244,18 @@ mod tests {
         out
     }
 
+    /// `replayed` equals `live` as sent: tool calls and their updates compare raw, in order, and
+    /// message chunks compare in place, joined where adjacent, because a live batch of text may be
+    /// split differently from the replayed reply.
+    fn assert_replay_matches_live(replayed: &[Value], live: &[Value]) {
+        let tools = |updates: &[Value]| {
+            let own = updates.iter().filter(|u| kind(u) != "agent_message_chunk");
+            own.cloned().collect::<Vec<_>>()
+        };
+        assert_eq!(tools(replayed), tools(live));
+        assert_eq!(merged(replayed), merged(live));
+    }
+
     fn updates_of(lines: &[String]) -> Vec<Value> {
         let parse = |l: &String| serde_json::from_str::<Value>(l).unwrap();
         lines
@@ -272,7 +284,7 @@ mod tests {
         let replayed = updates_of(&one);
         assert_eq!(kind(&replayed[0]), "user_message_chunk");
         assert_eq!(replayed[0]["content"]["text"], TASK);
-        assert_eq!(merged(&replayed[1..]), merged(&live));
+        assert_replay_matches_live(&replayed[1..], &live);
         assert!(replayed.iter().any(|u| kind(u) == "tool_call_update"));
     }
 
@@ -289,7 +301,7 @@ mod tests {
         let text = said(&replayed, 0, replayed.len());
         let both = format!("not json at all{}", reply(PASSING));
         assert!(text.contains(&both), "{text}");
-        assert_eq!(merged(&replayed[1..]), merged(&live));
+        assert_replay_matches_live(&replayed[1..], &live);
     }
 
     #[test]

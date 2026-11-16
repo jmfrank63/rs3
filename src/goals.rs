@@ -682,7 +682,11 @@ impl Goals {
             return Ok(Ok(None));
         }
         let mut history = Vec::new();
-        for earlier in &turns {
+        // A coding turn has no chat reply, so later plain turns do not see it.
+        for earlier in turns
+            .iter()
+            .filter(|t| sessions::code_prompt(&t.prompt).is_none())
+        {
             let output = self
                 .status(earlier.goal)?
                 .and_then(|status| status.output)

@@ -345,7 +345,7 @@ mid-turn does not repeat or lose work. When no node answers, the adapter waits u
 With the real model, text inside `<think>...</think>` goes out as `agent_thought_chunk` and the rest as
 `agent_message_chunk`. Add `/no_think` to a prompt to make Qwen3 skip thinking. A turn that ends with the model's
 end token stops with `end_turn`; one that uses its whole budget stops with `max_tokens`. Later turns see earlier
-ones as ChatML history with the think text removed.
+ones as ChatML history with the think text removed. A `/code` turn is left out of that history.
 
 A prompt that starts with `/run <key>` runs the script stored under `<key>` as one turn, with each write applied
 once. The adapter advertises `/run` as a command.
