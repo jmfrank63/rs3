@@ -318,7 +318,7 @@ like any other goal.
 
 With `MODEL.REPLIES` the goal runs on canned replies. With the real model (see above), the recorded seed 4,
 5 iterations and budget 1024 take `add(a: number, b: number): number` to `success`, with the same GET body on two
-fresh nodes (`tests/code_model.rs`):
+fresh nodes (the real-model coding section of `scripts/ci-smoke.sh`, on the release binary; a debug build needs minutes):
 
 ```
 curl -X POST localhost:5000/goals -d '{"kind":"code","task":"Implement the function add.","spec":"add(a: number, b: number): number returns the sum of a and b","max_iterations":5,"seed":4,"budget":1024}'

@@ -1,4 +1,5 @@
-//! Coding goals on the real Qwen3-0.6B model, through the real binary.
+//! Coding goals on the real Qwen3-0.6B model, through the real binary. The goal that reaches
+//! `success` takes minutes on a debug build, so `scripts/ci-smoke.sh` runs it on the release binary.
 #[cfg(test)]
 mod common;
 #[cfg(test)]
@@ -13,13 +14,6 @@ mod tests {
 
     use crate::common::{Server, TempDir};
     use crate::model::model_files;
-
-    // Found by scanning seeds 1..7 at budget 1024 and 5 iterations on the release binary: seed 4
-    // reaches "success" in 2 iterations (the last one's single test passes), 2 to 7 minutes
-    // depending on the build and the machine load. Seeds 1, 2, 3, 5, 6 and 7 end max_iterations or llm_malformed.
-    const SEED: u64 = 4;
-    const MAX_ITERATIONS: u64 = 5;
-    const BUDGET: u64 = 1024;
 
     fn serve(dir: &TempDir) -> Server {
         let (gguf, tokenizer) = model_files();
@@ -49,7 +43,7 @@ mod tests {
         let id = serde_json::from_str::<Value>(&text).unwrap()["id"]
             .as_u64()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(900);
+        let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             let got: Value =
                 serde_json::from_str(&server.request("GET", &format!("/goals/{id}"), "")).unwrap();
@@ -59,29 +53,6 @@ mod tests {
             assert!(Instant::now() < deadline, "goal {id} never finished: {got}");
             std::thread::sleep(Duration::from_millis(200));
         }
-    }
-
-    #[test]
-    fn a_coding_goal_runs_on_the_model_and_is_the_same_on_two_fresh_nodes() {
-        // The nodes run side by side: the debug build needs minutes per goal.
-        let bodies: Vec<Value> = std::thread::scope(|scope| {
-            let nodes: Vec<_> = ["code-model-a", "code-model-b"]
-                .map(|name| {
-                    scope.spawn(move || {
-                        solve_add(&serve(&TempDir::new(name)), MAX_ITERATIONS, SEED, BUDGET)
-                    })
-                })
-                .into();
-            nodes.into_iter().map(|n| n.join().unwrap()).collect()
-        });
-        assert_eq!(bodies[0]["outcome"], "success", "{}", bodies[0]);
-        let last = bodies[0]["iterations"].as_array().unwrap().last().unwrap();
-        let tests = last["tests"].as_array().unwrap();
-        assert!(
-            !tests.is_empty() && tests.iter().all(|t| t["passed"] == true),
-            "{last}"
-        );
-        assert_eq!(bodies[0], bodies[1]);
     }
 
     #[test]

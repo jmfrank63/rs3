@@ -720,4 +720,44 @@ for i in "${!CPIDS[@]}"; do
 done
 CPIDS=()
 
+# ---- real-model coding goal: two fresh single nodes, side by side ----
+# Seed 4 with 5 iterations and a 1024-token budget was found by scanning seeds 1..7: Qwen3-0.6B
+# writes add(a, b) with a passing test in 2 iterations. The debug build needs minutes for this, so
+# it runs here on the release binary and not in cargo test.
+KGOAL='{"kind":"code","task":"Implement the function add.","spec":"add(a: number, b: number): number returns the sum of a and b","max_iterations":5,"seed":4,"budget":1024}'
+KSTART=$SECONDS
+cnodes 2
+for i in 0 1; do
+  env -i PATH="$PATH" SERVER.HOST=127.0.0.1 SERVER.PORT="${CPORTS[$i]}" STORAGE.PATH="$DIR/code-model-$i.db" \
+    "${MENV[@]}" "$BIN" >>"$LOG" 2>&1 &
+  CPIDS[$i]=$!
+done
+KIDS=()
+for i in 0 1; do
+  cwhen "$i" POST /goals "$KGOAL"
+  [[ "$CODE" == 201 ]] || fail "real-model coding POST /goals on node $i -> ${CODE} ${BODY}"
+  KIDS[$i]=$(jf "$BODY" id)
+done
+KBODY=()
+dl=$((SECONDS + 600))
+for i in 0 1; do
+  while :; do
+    creq "$i" GET "/goals/${KIDS[$i]}"
+    [[ "$(jf "$BODY" status)" != failed ]] || fail "real-model coding goal failed on node $i: ${BODY}"
+    [[ "$(jf "$BODY" status)" != done ]] || break
+    (( SECONDS < dl )) || fail "real-model coding goal not done after 600s on node $i: ${BODY}"
+    sleep 1
+  done
+  KBODY[$i]=$BODY
+done
+[[ "${KBODY[0]}" == "${KBODY[1]}" ]] || fail "real-model coding goal differs between two fresh nodes: ${KBODY[0]} vs ${KBODY[1]}"
+[[ "$(jf "${KBODY[0]}" outcome)" == success ]] || fail "real-model coding goal outcome: ${KBODY[0]}"
+KTESTS=$(python3 -I -c 'import json,sys; t=json.loads(sys.argv[1])["iterations"][-1]["tests"]; print(len(t) if t and all(x["passed"] for x in t) else 0)' "${KBODY[0]}")
+(( KTESTS > 0 )) || fail "real-model coding goal's last iteration has no passing tests: ${KBODY[0]}"
+echo "ci-smoke: ok   real-model coding goal: success with ${KTESTS} passing test(s), identical GET body on two fresh nodes ($((SECONDS - KSTART)) s)"
+for i in "${!CPIDS[@]}"; do
+  [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
+done
+CPIDS=()
+
 echo "ci-smoke: OK (${BIN}, port ${PORT})"
