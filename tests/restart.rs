@@ -18,7 +18,7 @@ mod tests {
             .arg(format!("echo $$ > {}; exec sleep 60", pidfile.display()));
         let started = std::time::Instant::now();
         let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Server::spawn(silent, 0, std::time::Duration::from_secs(1));
+            Server::spawn(silent, 0, std::time::Duration::from_secs(1), None);
         }));
         assert!(failed.is_err());
         assert!(started.elapsed() < std::time::Duration::from_secs(10));

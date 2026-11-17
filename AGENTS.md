@@ -36,12 +36,16 @@ loops, pipes, redirects, semicolons or parentheses, which GSD refuses to run. Ki
 remove the code it shows to be unnecessary. An agent's foreground command is capped at 10 minutes, so split a
 long run with `--file`. The maintainer runs the full gate
 (`bash scripts/quality.sh full <base>`) at the end of each slice. `--in-place` edits source files while it runs,
-so never run anything else in this checkout at the same time.
+so never run anything else in this checkout at the same time. Never wrap it in `timeout` or kill it: a
+run that is cut off leaves a mutant in the source. If one is left, `git checkout` that file before anything else.
 
 ## Machine and commands
 
 - Linux x64, Rust 1.99.1 pinned by `rust-toolchain.toml`. Always pass `--locked` once `Cargo.lock` is updated.
 - `scripts/ci-smoke.sh` tests the release binary end to end, and needs `cargo build --release --locked` first.
+- Never kill processes by name: no `pkill`, `killall` or `pgrep | xargs kill`. Other checkouts on this machine run
+  `rs3`, `cargo test` and `cargo-mutants` at the same time, and a kill by name stops their gates. Kill only PIDs you
+  started yourself.
 - Long-running work stays in the foreground. A background task dies with the session and leaves the task incomplete.
 - Do not push, and do not edit `.github/workflows/ci.yml`: `scripts/ci-guards.sh` pins its contents.
 - `.planning/` is the finished v0.2 record. Do not edit it.

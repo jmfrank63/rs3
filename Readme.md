@@ -70,6 +70,15 @@ of the built-in deterministic fake model), `MODEL.PATH`, `MODEL.TOKENIZER` and `
 (default 4). `MODEL.PATH` (a GGUF file) and `MODEL.TOKENIZER` (a `tokenizer.json`) must be set
 together, or startup fails with `MODEL.PATH and MODEL.TOKENIZER must be set together`; without them the
 fake model stays the default. The numeric settings must be positive integers. See Real model below.
+`CHECKER.RECYCLE_AFTER` (default 50) is how many checks one TypeScript checker instance serves
+before a fresh one replaces it. `CHECKER.CACHE` is the directory where the compiled checker is kept
+(default: wasmtime's per-user cache directory), so only the first start on a machine pays the
+seconds of compiling; a missing, damaged or stale cache is compiled again and never stops the node.
+`CHECKER.PATH` names an alternative checker module (a file) that replaces the embedded one; its hash
+differs, so nodes with different modules decline each other's coding goals, and an unreadable file stops
+startup. `MODEL.REPLIES` is a JSON file holding a list of strings: the k-th model call gets reply k, and
+running out ends a coding goal `llm_error`. It stands in for the model and is refused together with
+`MODEL.PATH`.
 The names are
 case-insensitive (`SERVER.HOST`, `server.host` and `Server.Port` all work), but
 the dot is required: underscore names such as `SERVER_HOST` and `SERVER_PORT`
@@ -214,6 +223,10 @@ A goal is a job that rs3 runs in the background and that survives a crash. It ne
 `{"error":"goals_unavailable","message":"goals need a database; set STORAGE.PATH"}`.
 Up to `SCHEDULER.WORKERS` goals run at once, the highest `priority` first.
 
+**`GET /goals/checker`** answers 200 `{"instances":n,"checks":m}`: the TypeScript checker instances
+this node has created and the checks it has run since it started. Recycling (`CHECKER.RECYCLE_AFTER`)
+and a trapped check each add an instance.
+
 **`POST /goals`** answers 201 `{"id":1}` once the goal is durable. There are two kinds of body:
 
 ```sh
@@ -285,6 +298,36 @@ that node is left, the goal stays queued. `scripts/ci-smoke.sh` runs a real-mode
 the leader, and compares with a one-node run. It downloads into `RS3_MODEL_DIR` (default `~/.cache/rs3/models`),
 or reuses the files there.
 
+## Coding goals
+
+A coding goal runs the write, type-check, run, fix loop as a durable goal, with every iteration journaled.
+POST `/goals` with `{"kind":"code","task":"...","spec":"...","max_iterations":5,"seed":0,"budget":2048}`.
+Only `kind` and `task` are required (`task` must not be empty); `spec` defaults to empty, `max_iterations` to 5,
+`seed` to 0, `budget` (tokens per model call) to 2048, and `priority` to 0. `max_iterations` and `budget` must be at
+least 1, or the answer is 422 `invalid_input`.
+
+`GET /goals/{id}` returns `status`, `outcome` once the goal is done, and `iterations[]`. Each iteration has `prompt`,
+`reply`, `replies`, `files`, `diagnostics` (type errors), `checked`, `tests`, `logs`, `run` (`status` and `error`) and
+`feedback` (what the model is told next). The outcome is `success`, `max_iterations`, `llm_malformed` (a reply that
+is not usable JSON files, after one corrective retry) or `llm_error` (no reply available, for example the
+`MODEL.REPLIES` list ran out, or the context overflowed).
+
+The code runs in a deterministic sandbox: a fixed clock, a `Math.random` seeded from the goal's `seed`, and a
+5 second timeout. A node whose checker hash differs from the goal's declines it. The loop survives a failover
+like any other goal.
+
+With `MODEL.REPLIES` the goal runs on canned replies. With the real model (see above), the recorded seed 4,
+5 iterations and budget 1024 take `add(a: number, b: number): number` to `success`, with the same GET body on two
+fresh nodes (the real-model coding section of `scripts/ci-smoke.sh`, on the release binary; a debug build needs minutes):
+
+```
+curl -X POST localhost:5000/goals -d '{"kind":"code","task":"Implement the function add.","spec":"add(a: number, b: number): number returns the sum of a and b","max_iterations":5,"seed":4,"budget":1024}'
+```
+
+In T3 Code (ACP), `/code <task>` followed by a newline and the spec starts a coding goal. This works on nodes
+that run `MODEL.REPLIES`. `scripts/ci-smoke.sh` runs a replayed coding goal on a 3-node release cluster, kills the leader
+mid-loop and matches a single-node run.
+
 ## T3 Code (ACP)
 
 `rs3 acp <url> [<url> ...]` is an Agent Client Protocol adapter that speaks JSON-RPC over stdin and stdout.
@@ -302,7 +345,7 @@ mid-turn does not repeat or lose work. When no node answers, the adapter waits u
 With the real model, text inside `<think>...</think>` goes out as `agent_thought_chunk` and the rest as
 `agent_message_chunk`. Add `/no_think` to a prompt to make Qwen3 skip thinking. A turn that ends with the model's
 end token stops with `end_turn`; one that uses its whole budget stops with `max_tokens`. Later turns see earlier
-ones as ChatML history with the think text removed.
+ones as ChatML history with the think text removed. A `/code` turn is left out of that history.
 
 A prompt that starts with `/run <key>` runs the script stored under `<key>` as one turn, with each write applied
 once. The adapter advertises `/run` as a command.

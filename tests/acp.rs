@@ -1484,7 +1484,7 @@ mod tests {
         let port = crate::common::free_port();
         let mut command = crate::common::rs3(port, &dir.0, None);
         command.arg("serve");
-        let _server = Server::spawn(command, port, Duration::from_secs(30));
+        let _server = Server::spawn(command, port, Duration::from_secs(30), None);
     }
 
     fn post_turn(server: &Server, session: &str, turn: u64, prompt: &str) {

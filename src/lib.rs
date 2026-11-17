@@ -3,6 +3,8 @@
 //! embedded JavaScript runtime that can call back into the store.
 
 pub mod acp;
+pub mod checker;
+pub mod code;
 pub mod config;
 pub mod goals;
 pub mod http;
@@ -11,6 +13,7 @@ pub mod js;
 pub mod lease;
 pub mod model;
 pub mod raft;
+pub mod sandbox;
 pub mod seal;
 pub mod sessions;
 pub mod state;

@@ -52,12 +52,8 @@ fn fail_named(out: &Out, id: &Value, code: i64, name: &str) {
     send(out, json!({"jsonrpc": "2.0", "id": id, "error": error}));
 }
 
-/// A `session/update` carrying `text`; `kind` is `user_message_chunk`, `agent_message_chunk` or `agent_thought_chunk`.
-fn chunk(out: &Out, session: &str, kind: &str, text: &str) {
-    let update = json!({
-        "sessionUpdate": kind,
-        "content": {"type": "text", "text": text},
-    });
+/// A `session/update` notification carrying `update`.
+fn notify(out: &Out, session: &str, update: Value) {
     let params = json!({"sessionId": session, "update": update});
     send(
         out,
@@ -65,16 +61,25 @@ fn chunk(out: &Out, session: &str, kind: &str, text: &str) {
     );
 }
 
+/// A `session/update` carrying `text`; `kind` is `user_message_chunk`, `agent_message_chunk` or `agent_thought_chunk`.
+fn chunk(out: &Out, session: &str, kind: &str, text: &str) {
+    let content = json!({"type": "text", "text": text});
+    notify(
+        out,
+        session,
+        json!({"sessionUpdate": kind, "content": content}),
+    );
+}
+
 /// Tell the client which commands session `session` understands.
 fn advertise(out: &Out, session: &str) {
     let run =
         json!({"name": "run", "description": "Run a stored script", "input": {"hint": "<key>"}});
-    let update = json!({"sessionUpdate": "available_commands_update", "availableCommands": [run]});
-    let params = json!({"sessionId": session, "update": update});
-    send(
-        out,
-        json!({"jsonrpc": "2.0", "method": "session/update", "params": params}),
-    );
+    let code =
+        json!({"name": "code", "description": "Write and test code", "input": {"hint": "<task>"}});
+    let update =
+        json!({"sessionUpdate": "available_commands_update", "availableCommands": [run, code]});
+    notify(out, session, update);
 }
 
 fn spawn_writer(lines: std::sync::mpsc::Receiver<String>) -> std::thread::JoinHandle<()> {
@@ -282,16 +287,141 @@ fn split_think(text: &str, mut thinking: bool, last: bool) -> (Vec<(&'static str
     (chunks, text.len() - rest.len())
 }
 
-/// Follow goal `id` from byte `offset` of its output, handing the whole output, the offset
-/// already delivered and whether the goal is done to `emit`. `emit`
-/// returns the offset the client has now received up to. While `cancelled` is true each round
+/// How much of a goal the client has received: whole items (replies, checks, runs) and the byte
+/// offset into the current reply, or into the output of a text goal.
+#[derive(Clone, Copy, Default)]
+struct Progress {
+    item: usize,
+    offset: usize,
+}
+
+/// A `tool_call` and its closing `tool_call_update` for one committed step of a coding goal.
+fn tool_call(id: &str, title: &str, kind: &str, failed: bool, lines: &[String]) -> [Value; 2] {
+    let status = if failed { "failed" } else { "completed" };
+    let text = json!({"type": "content", "content": {"type": "text", "text": lines.join("\n")}});
+    [
+        json!({"sessionUpdate": "tool_call", "toolCallId": id, "title": title, "kind": kind, "status": "in_progress"}),
+        json!({"sessionUpdate": "tool_call_update", "toolCallId": id, "status": status, "content": [text]}),
+    ]
+}
+
+/// The type check of iteration `n` of goal `goal`.
+fn check_calls(goal: u64, n: usize, iteration: &Value) -> [Value; 2] {
+    let found = iteration["diagnostics"].as_array().into_iter().flatten();
+    let mut lines: Vec<String> = found
+        .map(|d| {
+            let (file, code) = (d["file"].as_str().unwrap_or_default(), &d["code"]);
+            let at = format!("{}:{}", d["line"], d["column"]);
+            let message = d["message"].as_str().unwrap_or_default();
+            format!("{file}:{at} TS{code}: {message}")
+        })
+        .collect();
+    let failed = !lines.is_empty();
+    if !failed {
+        lines.push("no type errors".into());
+    }
+    tool_call(
+        &format!("goal-{goal}-{n}-check"),
+        "Type check",
+        "other",
+        failed,
+        &lines,
+    )
+}
+
+/// The test run of iteration `n` of goal `goal`.
+fn run_calls(goal: u64, n: usize, run: &Value, iteration: &Value) -> [Value; 2] {
+    let mut lines = Vec::new();
+    for t in iteration["tests"].as_array().into_iter().flatten() {
+        let name = t["name"].as_str().unwrap_or_default();
+        lines.push(match (t["passed"].as_bool(), t["error"].as_str()) {
+            (Some(true), _) => format!("PASS {name}"),
+            (_, Some(error)) => format!("FAIL {name}: {error}"),
+            _ => format!("FAIL {name}"),
+        });
+    }
+    let logs = iteration["logs"].as_array().into_iter().flatten();
+    lines.extend(logs.filter_map(|l| l.as_str().map(str::to_owned)));
+    let status = run["status"].as_str().unwrap_or_default();
+    if matches!(status, "error" | "timeout") {
+        lines.push(match run["error"].as_str() {
+            Some(error) => format!("sandbox {status}: {error}"),
+            None => format!("sandbox {status}"),
+        });
+    }
+    let title = "Run tests";
+    tool_call(
+        &format!("goal-{goal}-{n}-run"),
+        title,
+        "execute",
+        status != "passed",
+        &lines,
+    )
+}
+
+/// What the client has not yet seen of coding goal `goal`, as `session/update` payloads, and the
+/// progress after it: each attempt's reply as message chunks, then the type check and the test
+/// run as tool calls once committed. `ended` is true once the goal is done. A reply still being
+/// written holds back a trailing U+FFFD, which may be half a character.
+fn code_updates(goal: &Value, id: u64, from: Progress, ended: bool) -> (Vec<Value>, Progress) {
+    let iterations = goal["iterations"].as_array().map_or(&[][..], Vec::as_slice);
+    // Only the last reply of a running goal's unchecked last iteration can still grow.
+    let running = !ended && iterations.last().is_some_and(|i| i["checked"] != true);
+    let mut items = Vec::new();
+    for (at, iteration) in iterations.iter().enumerate() {
+        let replies = iteration["replies"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        for (k, reply) in replies.iter().enumerate() {
+            let text = reply.as_str().unwrap_or_default();
+            let growing = running && at + 1 == iterations.len() && k + 1 == replies.len();
+            items.push((vec![], Some((text, !growing))));
+        }
+        let mut calls = Vec::new();
+        if iteration["checked"] == true {
+            calls.extend(check_calls(id, at + 1, iteration));
+        }
+        if iteration["run"].is_object() {
+            calls.extend(run_calls(id, at + 1, &iteration["run"], iteration));
+        }
+        items.extend(calls.chunks(2).map(|pair| (pair.to_vec(), None)));
+    }
+    let (mut updates, mut now) = (Vec::new(), from);
+    for (calls, reply) in items.into_iter().skip(from.item) {
+        if let Some((text, complete)) = reply {
+            let tail = text.get(now.offset..).unwrap_or_default();
+            let tail = if complete {
+                tail
+            } else {
+                tail.strip_suffix('\u{FFFD}').unwrap_or(tail)
+            };
+            if !tail.is_empty() {
+                let content = json!({"type": "text", "text": tail});
+                updates.push(json!({"sessionUpdate": "agent_message_chunk", "content": content}));
+                now.offset += tail.len();
+            }
+            if !complete {
+                break;
+            }
+        }
+        updates.extend(calls);
+        now = Progress {
+            item: now.item + 1,
+            offset: 0,
+        };
+    }
+    (updates, now)
+}
+
+/// Follow goal `id` from `progress`, handing the goal, the progress already delivered and whether
+/// the goal is done to `emit`. `emit` returns the progress the client has now received up to. While `cancelled` is true each round
 /// is a DELETE, which is idempotent and answers like a GET; a goal that ends then, or is
 /// cancelled by anyone, ends the stream as `Cancelled`.
 async fn stream_goal(
     nodes: &Nodes,
     id: u64,
-    mut offset: usize,
-    emit: impl Fn(&str, usize, bool) -> usize,
+    mut progress: Progress,
+    emit: impl Fn(&Value, Progress, bool) -> Progress,
     cancelled: impl Fn() -> bool,
 ) -> Result<Option<String>, CallError> {
     let path = format!("/goals/{id}");
@@ -303,13 +433,17 @@ async fn stream_goal(
         };
         let goal = nodes.call(method, &path, None).await?;
         let status = goal["status"].as_str();
-        let output = goal["output"].as_str().unwrap_or_default();
-        offset = emit(output, offset, status == Some("done"));
+        progress = emit(&goal, progress, status == Some("done"));
         match status {
             Some("done" | "failed" | "cancelled") if cancelled() => {
                 return Err(CallError::Cancelled);
             }
-            Some("done") => return Ok(goal["reason"].as_str().map(str::to_owned)),
+            Some("done") => {
+                // A coding goal that did not succeed stops like a goal that ran out of budget.
+                let unmet = goal["outcome"].as_str().filter(|o| *o != "success");
+                let reason = goal["reason"].as_str().or(unmet.map(|_| "budget"));
+                return Ok(reason.map(str::to_owned));
+            }
             Some("cancelled") => return Err(CallError::Cancelled),
             Some("failed") => {
                 let error = goal["error"].as_str().unwrap_or_default();
@@ -325,7 +459,7 @@ async fn stream_goal(
 struct Session {
     next_turn: u64,
     /// A goal whose output the client has only received up to the given byte.
-    unfinished: Option<(u64, usize)>,
+    unfinished: Option<(u64, Progress)>,
     /// A prompt is being answered; a second one is refused.
     in_flight: bool,
     /// `session/cancel` arrived while the prompt was in flight.
@@ -371,22 +505,34 @@ impl Turn {
 
     /// Follow `goal` from `offset`, keeping the session's record of how far the client has
     /// read. Only a final answer clears it; an unavailable cluster keeps it for the next prompt.
-    async fn follow(&self, goal: u64, offset: usize) -> Result<Option<String>, CallError> {
-        let emit = |output: &str, from: usize, last: bool| {
-            let Some(text) = output.get(from..) else {
-                return from;
+    async fn follow(&self, goal: u64, from: Progress) -> Result<Option<String>, CallError> {
+        let emit = |status: &Value, from: Progress, last: bool| {
+            let read = if status["iterations"].is_array() {
+                let (updates, read) = code_updates(status, goal, from, last);
+                for update in updates {
+                    notify(&self.out, &self.session, update);
+                }
+                read
+            } else {
+                let output = status["output"].as_str().unwrap_or_default();
+                let Some(text) = output.get(from.offset..) else {
+                    return from;
+                };
+                let (chunks, used) = split_think(text, in_think(output, from.offset), last);
+                for (kind, piece) in chunks {
+                    chunk(&self.out, &self.session, kind, piece);
+                }
+                Progress {
+                    offset: from.offset + used,
+                    ..from
+                }
             };
-            let (chunks, used) = split_think(text, in_think(output, from), last);
-            for (kind, piece) in chunks {
-                chunk(&self.out, &self.session, kind, piece);
-            }
-            let read = from + used;
             self.sessions
                 .update(&self.session, |s| s.unfinished = Some((goal, read)));
             read
         };
         let cancelled = || self.cancel_asked();
-        let result = stream_goal(&self.nodes, goal, offset, emit, cancelled).await;
+        let result = stream_goal(&self.nodes, goal, from, emit, cancelled).await;
         if !matches!(result, Err(CallError::Unavailable(_))) {
             self.sessions.update(&self.session, |s| s.unfinished = None);
         }
@@ -398,8 +544,8 @@ impl Turn {
     /// so a failed call is resent as the same turn.
     async fn stream(&self) -> Result<Option<String>, CallError> {
         let state = self.sessions.get(&self.session).unwrap_or_default();
-        if let Some((goal, offset)) = state.unfinished {
-            self.finish_earlier(goal, offset).await?;
+        if let Some((goal, progress)) = state.unfinished {
+            self.finish_earlier(goal, progress).await?;
         }
         let mut number = state.next_turn;
         let path = format!("/sessions/{}/turns", self.session);
@@ -419,12 +565,12 @@ impl Turn {
         let goal = started["goal"]
             .as_u64()
             .ok_or_else(|| CallError::Final(format!("POST {path}: no goal id")))?;
-        let unfinished = Some((goal, 0));
+        let unfinished = Some((goal, Progress::default()));
         self.sessions.update(&self.session, |s| {
             s.next_turn = number + 1;
             s.unfinished = unfinished;
         });
-        self.follow(goal, 0).await
+        self.follow(goal, Progress::default()).await
     }
 
     /// Turn `number` is already committed by someone else: stream its goal and move past it.
@@ -436,15 +582,15 @@ impl Turn {
             .ok_or_else(|| CallError::Final(format!("GET {path}: no turn {number}")))?;
         self.sessions.update(&self.session, |s| {
             s.next_turn = number + 1;
-            s.unfinished = Some((goal, 0));
+            s.unfinished = Some((goal, Progress::default()));
         });
-        self.finish_earlier(goal, 0).await
+        self.finish_earlier(goal, Progress::default()).await
     }
 
     /// Deliver the rest of an earlier turn. How that turn ended is its own result, so only an
     /// outage or a cancel of this prompt keeps this prompt from running.
-    async fn finish_earlier(&self, goal: u64, offset: usize) -> Result<(), CallError> {
-        match self.follow(goal, offset).await {
+    async fn finish_earlier(&self, goal: u64, from: Progress) -> Result<(), CallError> {
+        match self.follow(goal, from).await {
             Err(CallError::Final(_) | CallError::Named(..) | CallError::Cancelled)
                 if !self.cancel_asked() =>
             {
@@ -487,9 +633,9 @@ fn prompt_text(params: &Value) -> String {
         .collect()
 }
 
-/// The (prompt, output, goal while still running) of every turn of session `number`, read goal
+/// The (prompt, goal, goal id, whether it is still running) of every turn of session `number`, read goal
 /// by goal; None when the node does not know the session.
-type Loaded = Vec<(String, String, Option<u64>)>;
+type Loaded = Vec<(String, Value, u64, bool)>;
 
 async fn load_turns(nodes: &Nodes, number: u64) -> Result<Option<Loaded>, CallError> {
     let path = format!("/sessions/{number}");
@@ -507,12 +653,11 @@ async fn load_turns(nodes: &Nodes, number: u64) -> Result<Option<Loaded>, CallEr
             .call(Method::GET, &format!("/goals/{id}"), None)
             .await?;
         let prompt = turn["prompt"].as_str().unwrap_or_default();
-        let output = goal["output"].as_str().unwrap_or_default();
         let ended = matches!(
             goal["status"].as_str(),
             Some("done" | "failed" | "cancelled")
         );
-        turns.push((prompt.to_owned(), output.to_owned(), (!ended).then_some(id)));
+        turns.push((prompt.to_owned(), goal, id, !ended));
     }
     Ok(Some(turns))
 }
@@ -522,13 +667,26 @@ async fn load_turns(nodes: &Nodes, number: u64) -> Result<Option<Loaded>, CallEr
 fn adopt(out: &Out, sessions: &Sessions, id: &Value, number: u64, turns: &Loaded) {
     let session = number.to_string();
     let mut unfinished = None;
-    for (prompt, output, running) in turns {
+    for (prompt, goal, id, running) in turns {
         chunk(out, &session, "user_message_chunk", prompt);
-        let (chunks, used) = split_think(output, false, running.is_none());
-        for (kind, piece) in chunks {
-            chunk(out, &session, kind, piece);
-        }
-        unfinished = running.map(|goal| (goal, used)).or(unfinished);
+        let at = if goal["iterations"].is_array() {
+            let (updates, at) = code_updates(goal, *id, Progress::default(), !running);
+            for update in updates {
+                notify(out, &session, update);
+            }
+            at
+        } else {
+            let output = goal["output"].as_str().unwrap_or_default();
+            let (chunks, used) = split_think(output, false, !running);
+            for (kind, piece) in chunks {
+                chunk(out, &session, kind, piece);
+            }
+            Progress {
+                offset: used,
+                ..Progress::default()
+            }
+        };
+        unfinished = running.then_some((*id, at)).or(unfinished);
     }
     let next_turn = turns.len() as u64;
     sessions.set(

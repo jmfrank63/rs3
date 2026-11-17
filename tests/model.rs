@@ -53,6 +53,48 @@ mod tests {
     }
 
     #[test]
+    fn a_replies_file_that_is_not_a_list_of_strings_is_refused() {
+        let dir = TempDir::new("replies-bad");
+        let bad = dir.0.join("replies.json");
+        std::fs::write(&bad, r#"{"not":"a list"}"#).unwrap();
+        let stderr = refused(&dir, &[("MODEL.REPLIES", bad.to_str().unwrap())]);
+        assert!(stderr.contains("MODEL.REPLIES"), "{stderr}");
+        let missing = dir.0.join("missing.json");
+        let stderr = refused(&dir, &[("MODEL.REPLIES", missing.to_str().unwrap())]);
+        assert!(stderr.contains("MODEL.REPLIES"), "{stderr}");
+    }
+
+    #[test]
+    fn replies_together_with_a_model_are_refused() {
+        let dir = TempDir::new("replies-and-model");
+        let (gguf, tokenizer) = model_files();
+        let stderr = refused(
+            &dir,
+            &[
+                ("MODEL.REPLIES", "/replies.json"),
+                ("MODEL.PATH", gguf.to_str().unwrap()),
+                ("MODEL.TOKENIZER", tokenizer.to_str().unwrap()),
+            ],
+        );
+        assert!(stderr.contains("MODEL.REPLIES"), "{stderr}");
+    }
+
+    #[test]
+    fn a_node_with_a_valid_replies_file_serves() {
+        let dir = TempDir::new("replies-ok");
+        let ok = dir.0.join("replies.json");
+        std::fs::write(&ok, r#"["hello"]"#).unwrap();
+        let db = dir.0.join("rs3.redb");
+        let server = Server::start(
+            &dir.0,
+            Some(&db),
+            &[("MODEL.REPLIES", ok.to_str().unwrap())],
+        );
+        let body = r#"{"priority":0,"budget":5,"seed":1,"prompt":"p"}"#;
+        assert_eq!(server.request_status("POST", "/goals", body).0, 201);
+    }
+
+    #[test]
     fn a_model_file_that_is_not_a_model_is_refused() {
         let dir = TempDir::new("model-bad");
         let (_, tokenizer) = model_files();

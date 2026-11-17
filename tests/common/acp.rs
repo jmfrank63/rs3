@@ -174,19 +174,30 @@ impl Acp {
         session: &str,
         wait: Duration,
     ) -> (Value, Vec<(String, String)>) {
+        let (response, lines) = self.load_lines(id, session, wait);
+        let updates = lines.iter().map(|line| {
+            let message: Value = serde_json::from_str(line).unwrap();
+            let update = &message["params"]["update"];
+            let kind = update["sessionUpdate"].as_str().unwrap().to_owned();
+            (kind, update["content"]["text"].as_str().unwrap().to_owned())
+        });
+        (response, updates.collect())
+    }
+
+    /// Send `session/load` and read to its response: the response and the replayed
+    /// `session/update` lines exactly as written.
+    pub fn load_lines(&mut self, id: u64, session: &str, wait: Duration) -> (Value, Vec<String>) {
         let params = json!({"sessionId": session, "cwd": "/", "mcpServers": []});
         self.request(id, "session/load", params);
-        let mut updates = Vec::new();
+        let mut lines = Vec::new();
         loop {
             let message = self
                 .recv_within(wait)
                 .unwrap_or_else(|| self.fail("no line from rs3 acp during session/load"));
             if message["id"] == id {
-                return (message, updates);
+                return (message, lines);
             }
-            let update = &message["params"]["update"];
-            let kind = update["sessionUpdate"].as_str().unwrap().to_owned();
-            updates.push((kind, update["content"]["text"].as_str().unwrap().to_owned()));
+            lines.push(self.seen.last().unwrap().clone());
         }
     }
 

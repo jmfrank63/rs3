@@ -62,22 +62,41 @@ async fn start_cluster(
     .map_err(|e| format!("cannot start cluster node: {e}"))
 }
 
+/// The model the settings ask for: the real one, the canned replies, or none.
+fn load_engine(settings: &Settings) -> Result<Option<Engine>, String> {
+    let model = &settings.model;
+    if let Some(path) = &model.replies {
+        let refused = |e: String| format!("invalid configuration: MODEL.REPLIES: {e}");
+        // Coding goals type-check every reply: a checker that cannot load stops the node here.
+        rs3::checker::check(&[]).map_err(|e| refused(e.to_string()))?;
+        return Engine::replay(path).map(Some).map_err(refused);
+    }
+    let (Some(path), Some(tokenizer)) = (&model.path, &model.tokenizer) else {
+        return Ok(None);
+    };
+    Candle::load(path, tokenizer, model.threads.get())
+        .map(|candle| Some(Engine::Candle(Arc::new(candle))))
+        .map_err(|e| format!("invalid configuration: cannot load model: {e}"))
+}
+
 /// Start everything and serve until shutdown. The error is the startup or
 /// server failure to report, without the `error: ` prefix.
 async fn run() -> Result<(), String> {
     let settings = Settings::load().map_err(|e| format!("invalid configuration: {e}"))?;
+    rs3::checker::configure(
+        settings.checker.recycle_after.get(),
+        settings.checker.cache.clone(),
+        settings.checker.path.clone(),
+    )
+    .map_err(|e| format!("invalid configuration: CHECKER.PATH: {e}"))?;
     let (store, goals, cluster_db) =
         open_storage(&settings).map_err(|e| format!("cannot open storage: {e}"))?;
     // V8 is initialised once on the main thread before any other thread (JS pool, actix workers) spawns.
     rs3::js::init_platform();
     let js = rs3::js::executor::JsExecutor::start(&rs3::js::JsSettings::default())
         .map_err(|e| format!("cannot start JS runtime: {e}"))?;
-    if let (Some(goals), Some(path), Some(tokenizer)) =
-        (&goals, &settings.model.path, &settings.model.tokenizer)
-    {
-        let candle = Candle::load(path, tokenizer, settings.model.threads.get())
-            .map_err(|e| format!("invalid configuration: cannot load model: {e}"))?;
-        goals.set_engine(Engine::Candle(Arc::new(candle)));
+    if let (Some(goals), Some(engine)) = (&goals, load_engine(&settings)?) {
+        goals.set_engine(engine);
     }
     if let Some(goals) = &goals {
         goals.enable_scripts(store.clone(), js.clone());

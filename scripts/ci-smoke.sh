@@ -34,6 +34,9 @@
 #   while the leader is kill -9'd after the first chunk: JSON-RPC 2.0 lines only, at least one chunk
 #   after the kill, stopReason max_tokens, one turn in GET /sessions/{id}, and the streamed text equals
 #   that turn's goal output byte for byte.
+#   coding goal (replayed type-error then fix reply): on one node it ends success; on a fresh
+#     3-node cluster the leader is killed after the first iteration commits, and the GET body
+#     after failover equals the single-node body byte for byte (success, 2 iterations).
 # The release binary uses the default JS limits: nesting depth 4 and a 5000 ms timeout. Both are
 # set in code; there is no environment knob, so the timeout check waits about 5 s. This smoke is
 # the only place where the timeout watchdog terminates a script under the protected V8 platform
@@ -531,6 +534,75 @@ for i in "${!CPIDS[@]}"; do
 done
 CPIDS=()
 
+# ---- coding goal on a fresh 3-node cluster, leader killed mid-loop, equals a single-node run ----
+# Replay replies: a type error first, then a correct add with a passing test (as tests/code.rs).
+CODEREPLIES="$DIR/code-replies.json"
+python3 -I - "$CODEREPLIES" <<'PY'
+import json, sys
+def reply(src): return json.dumps({"explanation": "x", "files": {"a.ts": src}})
+bad = 'const n: number = "s";\ntest("t", () => { expect(1).toEqual(1); });'
+good = 'function add(a: number, b: number): number { return a + b; }\ntest("adds", () => { expect(add(1, 2)).toEqual(3); });'
+open(sys.argv[1], "w").write(json.dumps([reply(bad), reply(good)]))
+PY
+CODEGOAL='{"kind":"code","task":"write add","spec":"add two numbers","max_iterations":3}'
+# Slow replay so the kill lands inside the loop.
+CODEENV=(MODEL.REPLIES="$CODEREPLIES" MODEL.TOKENS_PER_SECOND=20)
+
+# Reference: one node, uninterrupted.
+start_server STORAGE.PATH="$DIR/code-ref.db" "${CODEENV[@]}"
+req POST /goals "$CODEGOAL"
+[[ "$CODE" == 201 ]] || fail "coding reference POST /goals -> ${CODE} ${BODY}"
+CRID=$(jf "$BODY" id)
+dl=$((SECONDS + 60))
+while :; do
+  CREF=$(goal "$CRID")
+  [[ "$(jf "$CREF" status)" != done ]] || break
+  (( SECONDS < dl )) || fail "coding reference goal not done after 60s: ${CREF}"
+  sleep 0.2
+done
+[[ "$(jf "$CREF" outcome)" == success ]] || fail "coding reference outcome: ${CREF}"
+stop_server
+echo "ci-smoke: ok   coding goal on one node: success after a type error and a fix"
+
+CDIR="$DIR/code"
+mkdir -p "$CDIR"
+cnodes 3
+for i in "${!CPORTS[@]}"; do cstart "$i" "${CODEENV[@]}"; done
+LEADER=$(cleader)
+cwhen 0 POST /goals "$CODEGOAL"
+[[ "$CODE" == 201 ]] || fail "coding cluster POST /goals -> ${CODE} ${BODY}"
+CCID=$(jf "$BODY" id)
+# Wait until the first iteration is committed and the goal is not done, then kill the node running
+# it. Its record of who runs the goal must change, which proves another node finished the loop.
+dl=$((SECONDS + 60))
+while :; do
+  cwhen 0 GET "/goals/$CCID"
+  [[ "$(jf "$BODY" status)" != done ]] || fail "coding goal finished before the kill: ${BODY}"
+  [[ "$(jf "$BODY" iterations)" != "[]" ]] && break
+  (( SECONDS < dl )) || fail "coding goal committed no iteration after 60s: ${BODY}"
+  sleep 0.05
+done
+COWNER=$(jf "$BODY" node)
+[[ "$COWNER" =~ ^[1-3]$ ]] || fail "coding goal has no running node: ${BODY}"
+VICTIM=$((COWNER - 1))
+kill -9 "${CPIDS[$VICTIM]}"
+wait "${CPIDS[$VICTIM]}" 2>/dev/null || true
+CPIDS[$VICTIM]=""
+LIVE=$(( (VICTIM + 1) % 3 ))
+NEWLEADER=$(cleader "$VICTIM")
+CCDONE=$(cwait_done "$LIVE" "$CCID")
+[[ "$(jf "$CCDONE" node)" != "$COWNER" ]] || fail "coding goal was not taken over from killed node ${COWNER}: ${CCDONE}"
+# The cluster body also names the serving node; every other byte must match.
+CCSAME=$(python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); d.pop("node", None); print(json.dumps(d))' "$CCDONE")
+[[ "$CCSAME" == "$(python3 -I -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])))' "$CREF")" ]] || fail "coding goal body after the leader kill differs from the single-node run: ${CCDONE} vs ${CREF}"
+[[ "$(jf "$CCDONE" outcome)" == success ]] || fail "coding cluster outcome: ${CCDONE}"
+[[ "$(python3 -I -c 'import json,sys; print(len(json.loads(sys.argv[1])["iterations"]))' "$CCDONE")" == 2 ]] || fail "coding goal should have 2 iterations: ${CCDONE}"
+echo "ci-smoke: ok   coding goal on 3 nodes: its node ${COWNER} killed mid-loop (leader was node $((LEADER + 1)), now node $((NEWLEADER + 1))), finished on node $(jf "$CCDONE" node), 2 iterations, success, GET body equals the single-node run"
+for i in "${!CPIDS[@]}"; do
+  [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
+done
+CPIDS=()
+
 # ---- 5-node release cluster: seal, kill two, read ----
 CDIR="$DIR/five"
 mkdir -p "$CDIR"
@@ -643,6 +715,46 @@ echo "ci-smoke: ok   real-model goal running; killed leader node $((LEADER + 1))
 MOUT=$(jf "$(cwait_done "$LIVE" "$MCID" 240)" output)
 [[ "$MOUT" == "$MREF" ]] || fail "real-model cluster output differs from the single-node reference: cluster ${MOUT} / reference ${MREF}"
 echo "ci-smoke: ok   real-model cluster output equals the single-node reference byte for byte ($((SECONDS - MSTART)) s for the model section)"
+for i in "${!CPIDS[@]}"; do
+  [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
+done
+CPIDS=()
+
+# ---- real-model coding goal: two fresh single nodes, side by side ----
+# Seed 4 with 5 iterations and a 1024-token budget was found by scanning seeds 1..7: Qwen3-0.6B
+# writes add(a, b) with a passing test in 2 iterations. The debug build needs minutes for this, so
+# it runs here on the release binary and not in cargo test.
+KGOAL='{"kind":"code","task":"Implement the function add.","spec":"add(a: number, b: number): number returns the sum of a and b","max_iterations":5,"seed":4,"budget":1024}'
+KSTART=$SECONDS
+cnodes 2
+for i in 0 1; do
+  env -i PATH="$PATH" SERVER.HOST=127.0.0.1 SERVER.PORT="${CPORTS[$i]}" STORAGE.PATH="$DIR/code-model-$i.db" \
+    "${MENV[@]}" "$BIN" >>"$LOG" 2>&1 &
+  CPIDS[$i]=$!
+done
+KIDS=()
+for i in 0 1; do
+  cwhen "$i" POST /goals "$KGOAL"
+  [[ "$CODE" == 201 ]] || fail "real-model coding POST /goals on node $i -> ${CODE} ${BODY}"
+  KIDS[$i]=$(jf "$BODY" id)
+done
+KBODY=()
+dl=$((SECONDS + 600))
+for i in 0 1; do
+  while :; do
+    creq "$i" GET "/goals/${KIDS[$i]}"
+    [[ "$(jf "$BODY" status)" != failed ]] || fail "real-model coding goal failed on node $i: ${BODY}"
+    [[ "$(jf "$BODY" status)" != done ]] || break
+    (( SECONDS < dl )) || fail "real-model coding goal not done after 600s on node $i: ${BODY}"
+    sleep 1
+  done
+  KBODY[$i]=$BODY
+done
+[[ "${KBODY[0]}" == "${KBODY[1]}" ]] || fail "real-model coding goal differs between two fresh nodes: ${KBODY[0]} vs ${KBODY[1]}"
+[[ "$(jf "${KBODY[0]}" outcome)" == success ]] || fail "real-model coding goal outcome: ${KBODY[0]}"
+KTESTS=$(python3 -I -c 'import json,sys; t=json.loads(sys.argv[1])["iterations"][-1]["tests"]; print(len(t) if t and all(x["passed"] for x in t) else 0)' "${KBODY[0]}")
+(( KTESTS > 0 )) || fail "real-model coding goal's last iteration has no passing tests: ${KBODY[0]}"
+echo "ci-smoke: ok   real-model coding goal: success with ${KTESTS} passing test(s), identical GET body on two fresh nodes ($((SECONDS - KSTART)) s)"
 for i in "${!CPIDS[@]}"; do
   [[ -z "${CPIDS[$i]}" ]] || { kill -9 "${CPIDS[$i]}" 2>/dev/null || true; wait "${CPIDS[$i]}" 2>/dev/null || true; }
 done

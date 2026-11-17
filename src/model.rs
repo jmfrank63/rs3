@@ -46,6 +46,34 @@ impl Model for FakeModel {
 pub enum Engine {
     Fake,
     Candle(Arc<Candle>),
+    /// Canned replies from `MODEL.REPLIES`: the k-th model call of a stream gets reply k.
+    Replay {
+        replies: Arc<Vec<String>>,
+        hash: String,
+    },
+}
+
+impl Engine {
+    /// The replay engine for a JSON file holding a list of strings.
+    pub fn replay(path: &Path) -> Result<Self, String> {
+        let bytes = read(path)?;
+        let replies: Vec<String> =
+            serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self::Replay {
+            replies: Arc::new(replies),
+            hash: hex(&bytes),
+        })
+    }
+}
+
+/// Up to `count` tokens of `reply` from token `from` on (its UTF-8 bytes), and whether that
+/// reaches the end of the reply.
+pub fn replay_batch(reply: &str, from: usize, count: usize) -> (Vec<u32>, bool) {
+    let bytes = reply.as_bytes();
+    let start = from.min(bytes.len());
+    let end = bytes.len().min(start.saturating_add(count));
+    let tokens = bytes[start..end].iter().map(|b| u32::from(*b)).collect();
+    (tokens, end == bytes.len())
 }
 
 /// Qwen3 on candle's CPU path, loaded once and cloned cheaply per generation.
@@ -126,6 +154,11 @@ impl Candle {
             );
         }
         text += &format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
+        self.encode(&text)
+    }
+
+    /// `text` as token ids, as it is, with no chat wrapping.
+    pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
         let encoding = self
             .tokenizer
             .encode(text, false)
@@ -275,6 +308,31 @@ mod tests {
 
     fn tokens(seed: u64, prompt: &str, n: usize) -> Vec<u32> {
         run(&FakeModel, FakeModel.start_state(seed, prompt), n).0
+    }
+
+    #[test]
+    fn replay_batches_cover_a_reply_byte_by_byte() {
+        assert_eq!(replay_batch("héy", 0, 2), (vec![104, 195], false));
+        assert_eq!(replay_batch("héy", 2, 8), (vec![169, 121], true));
+        assert_eq!(replay_batch("abc", 0, 3), (vec![97, 98, 99], true));
+        assert_eq!(replay_batch("abc", 5, 3), (vec![], true));
+        assert_eq!(replay_batch("", 0, 8), (vec![], true));
+    }
+
+    #[test]
+    fn replay_engine_loads_a_list_of_strings_and_hashes_the_file() {
+        let dir = crate::storage::TempDir::new();
+        let ok = dir.path().join("r.json");
+        std::fs::write(&ok, r#"["a","b"]"#).unwrap();
+        let Ok(Engine::Replay { replies, hash }) = Engine::replay(&ok) else {
+            panic!("replies did not load");
+        };
+        assert_eq!(*replies, ["a", "b"]);
+        assert_eq!(hash, hex(br#"["a","b"]"#));
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, r#"{"a":1}"#).unwrap();
+        assert!(matches!(Engine::replay(&bad), Err(e) if e.contains("bad.json")));
+        assert!(Engine::replay(&dir.path().join("none")).is_err());
     }
 
     #[test]

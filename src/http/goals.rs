@@ -9,7 +9,9 @@ use serde::Deserialize;
 
 use super::error::ApiError;
 use super::kv::{blocking_failed, read_barrier};
-use crate::goals::{GoalSpec, GoalStatus, Goals, Holds};
+use crate::goals::{
+    CodeSpec, DEFAULT_CODE_BUDGET, DEFAULT_ITERATIONS, GoalSpec, GoalStatus, Goals, Holds,
+};
 use crate::journal::JournalError;
 use crate::state::AppState;
 use crate::store::StoreError;
@@ -18,6 +20,7 @@ use crate::store::StoreError;
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(create)
         .service(generated)
+        .service(checker_stats)
         .service(get_goal)
         .service(cancel_goal)
         .service(storage);
@@ -27,8 +30,61 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum NewGoal {
+    Code(CodeGoal),
     Generation(Generation),
     Script(ScriptGoal),
+}
+
+/// A coding goal: the ported write, check, run, fix loop on the node's canned replies.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeGoal {
+    #[serde(rename = "kind")]
+    _kind: CodeKind,
+    #[serde(default)]
+    priority: i64,
+    task: String,
+    #[serde(default)]
+    spec: String,
+    #[serde(default = "default_iterations")]
+    max_iterations: u32,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default = "default_code_budget")]
+    budget: u64,
+}
+
+impl CodeGoal {
+    /// The goal's priority and spec, or why the request is invalid.
+    fn spec(self) -> Result<(i64, CodeSpec), StoreError> {
+        if self.task.is_empty() || self.max_iterations < 1 || self.budget < 1 {
+            return Err(StoreError::InvalidInput(
+                "task must not be empty; max_iterations and budget must be at least 1".into(),
+            ));
+        }
+        let spec = CodeSpec {
+            task: self.task,
+            spec: self.spec,
+            max_iterations: self.max_iterations,
+            budget: self.budget,
+            seed: self.seed,
+        };
+        Ok((self.priority, spec))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CodeKind {
+    Code,
+}
+
+fn default_iterations() -> u32 {
+    DEFAULT_ITERATIONS
+}
+
+fn default_code_budget() -> u64 {
+    DEFAULT_CODE_BUDGET
 }
 
 #[derive(Deserialize)]
@@ -73,6 +129,15 @@ async fn create(state: web::Data<AppState>, body: web::Bytes) -> Result<HttpResp
     let goals = goals(&state)?;
     let new: NewGoal = parse_body(&body, "goal")?;
     let id = match new {
+        NewGoal::Code(g) => {
+            let (priority, spec) = g.spec()?;
+            let budget = spec.budget;
+            web::block(move || {
+                let start = goals.code_start(spec).map_err(StoreError::InvalidInput)?;
+                Ok::<_, ApiError>(goals.create_from(priority, budget, &start)?)
+            })
+            .await
+        }
         NewGoal::Generation(g) => {
             let budget = u64::try_from(g.budget)
                 .ok()
@@ -126,6 +191,9 @@ async fn goal_status(
         "output": status.output,
         "error": status.error,
     });
+    if let (Some(code), Some(body)) = (status.code, body.as_object_mut()) {
+        body.extend(code.as_object().cloned().unwrap_or_default());
+    }
     if let Some(reason) = status.reason {
         body["reason"] = reason.into();
     }
@@ -133,6 +201,14 @@ async fn goal_status(
         body["node"] = status.node.into();
     }
     Ok(HttpResponse::Ok().json(body))
+}
+
+/// `GET /goals/checker` answers 200 `{"instances":n,"checks":m}`: the checker instances this node
+/// has created and the checks it has run since it started.
+#[get("/goals/checker")]
+async fn checker_stats() -> HttpResponse {
+    let (instances, checks) = crate::checker::stats();
+    HttpResponse::Ok().json(serde_json::json!({ "instances": instances, "checks": checks }))
 }
 
 /// `GET /goals/generated` answers 200 `{"generated":n}`: the tokens this node sampled since it started.
@@ -205,6 +281,7 @@ mod tests {
 
     use crate::goals::Goals;
     use crate::http::tests::assert_json_error;
+    use crate::model::Engine;
     use crate::state::{AppState, test_state};
     use crate::storage::{TempDir, open};
     use crate::store::Store;
@@ -220,11 +297,18 @@ mod tests {
 
     /// A durable state; `workers` of `None` leaves goals queued.
     fn fixture(rate: u32, workers: Option<usize>) -> Fixture {
+        fixture_on(rate, workers, None)
+    }
+
+    fn fixture_on(rate: u32, workers: Option<usize>, engine: Option<Engine>) -> Fixture {
         let dir = TempDir::new();
         let db = open(&dir.path().join("db")).unwrap();
         let goals = Goals::open(db.clone(), NonZeroU32::new(rate).unwrap()).unwrap();
         let store = Store::durable(db.clone()).unwrap();
         goals.enable_scripts(store.clone(), crate::js::test_executor());
+        if let Some(engine) = engine {
+            goals.set_engine(engine);
+        }
         if let Some(n) = workers {
             goals.start_workers(NonZeroUsize::new(n).unwrap());
         }
@@ -745,5 +829,146 @@ mod tests {
             assert_eq!((status, &err["error"]), (503, &json!("no_quorum")));
             cluster.stop().await;
         }
+    }
+
+    const PASSING: &str = "function add(a: number, b: number): number { return a + b; }\n\
+        test(\"adds\", () => { expect(add(1, 2)).toEqual(3); });";
+    const TYPE_ERROR: &str = "const n: number = \"s\";\ntest(\"t\", () => {});";
+    const CORRECTIVE: &str = "respond with ONLY valid JSON";
+    const FAILING: &str = "test(\"adds\", () => { expect(1).toEqual(2); });";
+
+    fn reply(source: &str) -> String {
+        json!({"explanation": "x", "files": {"a.ts": source}}).to_string()
+    }
+
+    fn code_fixture(replies: Vec<String>) -> Fixture {
+        let engine = Engine::Replay {
+            replies: std::sync::Arc::new(replies),
+            hash: "h".into(),
+        };
+        fixture_on(1_000_000, Some(1), Some(engine))
+    }
+
+    fn code_body(max_iterations: u32) -> Value {
+        json!({"kind": "code", "task": "add", "spec": "s", "max_iterations": max_iterations})
+    }
+
+    /// Run a coding goal on `replies` to its end.
+    async fn code_goal(replies: Vec<String>, body: Value) -> Value {
+        let f = code_fixture(replies);
+        let id = create(&f.state, &body).await;
+        wait_for(&f.state, id, "done").await
+    }
+
+    #[actix_web::test]
+    async fn a_type_error_is_fed_back_and_the_fix_succeeds() {
+        let goal = code_goal(vec![reply(TYPE_ERROR), reply(PASSING)], code_body(3)).await;
+        assert_eq!(goal["outcome"], "success", "{goal}");
+        let its = goal["iterations"].as_array().unwrap();
+        assert_eq!(its.len(), 2);
+        assert_eq!(its[0]["tests"], json!([]));
+        assert!(its[0]["feedback"].as_str().unwrap().contains("TS2322:"));
+        assert!(its[1]["prompt"].as_str().unwrap().contains("TS2322:"));
+        assert_eq!(its[1]["tests"][0]["name"], "adds");
+        assert_eq!(its[1]["files"]["a.ts"], PASSING);
+        // Only a retry after a malformed reply carries the corrective turn.
+        assert!(
+            its.iter()
+                .all(|i| !i["prompt"].as_str().unwrap().contains(CORRECTIVE))
+        );
+        assert!(!its[0]["prompt"].as_str().unwrap().contains("TS2322"));
+    }
+
+    #[actix_web::test]
+    async fn the_defaults_allow_a_fix_and_a_minimal_budget_is_accepted() {
+        let body = json!({"kind": "code", "task": "add"});
+        let goal = code_goal(vec![reply(TYPE_ERROR), reply(PASSING)], body).await;
+        assert_eq!(goal["outcome"], "success", "{goal}");
+        let f = code_fixture(vec![]);
+        let tight = json!({"kind": "code", "task": "t", "max_iterations": 1, "budget": 1});
+        create(&f.state, &tight).await;
+    }
+
+    #[actix_web::test]
+    async fn a_failing_test_is_fed_back_until_the_iterations_run_out() {
+        let goal = code_goal(vec![reply(FAILING), reply(PASSING)], code_body(1)).await;
+        assert_eq!(goal["outcome"], "max_iterations", "{goal}");
+        let feedback = goal["iterations"][0]["feedback"].as_str().unwrap();
+        assert!(feedback.contains("FAILED test \"adds\""), "{feedback}");
+    }
+
+    #[actix_web::test]
+    async fn a_malformed_reply_gets_one_corrective_retry() {
+        let goal = code_goal(vec!["oops".into(), reply(PASSING)], code_body(1)).await;
+        assert_eq!(goal["outcome"], "success", "{goal}");
+        assert_eq!(goal["iterations"][0]["attempts"], 2);
+        assert!(
+            goal["iterations"][0]["prompt"]
+                .as_str()
+                .unwrap()
+                .contains(CORRECTIVE)
+        );
+        let twice = vec!["oops".into(), "no".into(), reply(PASSING)];
+        let goal = code_goal(twice, code_body(3)).await;
+        assert_eq!(goal["outcome"], "llm_malformed", "{goal}");
+    }
+
+    #[actix_web::test]
+    async fn a_rule_breaking_reply_heals_through_feedback() {
+        let replies = vec![reply("import x from 'y';"), reply(PASSING)];
+        let goal = code_goal(replies, code_body(3)).await;
+        assert_eq!(goal["outcome"], "success", "{goal}");
+        assert!(
+            goal["iterations"][0]["feedback"]
+                .as_str()
+                .unwrap()
+                .contains("import")
+        );
+    }
+
+    #[actix_web::test]
+    async fn exhausted_replies_end_llm_error_even_after_a_reply_cut_at_the_budget() {
+        let goal = code_goal(vec![reply(TYPE_ERROR)], code_body(3)).await;
+        assert_eq!(goal["outcome"], "llm_error", "{goal}");
+        let body = json!({"kind": "code", "task": "t", "max_iterations": 1, "budget": 20});
+        let goal = code_goal(vec![reply(PASSING)], body).await;
+        assert_eq!(goal["outcome"], "llm_error", "{goal}");
+        assert_eq!(goal["iterations"][0]["reply"].as_str().unwrap().len(), 20);
+    }
+
+    #[actix_web::test]
+    async fn a_cancelled_coding_goal_shows_no_outcome() {
+        let f = fixture_on(
+            1_000_000,
+            None,
+            Some(Engine::Replay {
+                replies: std::sync::Arc::new(vec![]),
+                hash: "h".into(),
+            }),
+        );
+        let id = create(&f.state, &code_body(2)).await;
+        let goal = delete(&f.state, id).await;
+        assert_eq!(goal["status"], "cancelled");
+        assert_eq!(goal["outcome"], Value::Null);
+        assert_eq!(goal["iterations"], json!([]));
+    }
+
+    #[actix_web::test]
+    async fn invalid_coding_goals_are_refused_and_need_replies() {
+        let f = code_fixture(vec![]);
+        for body in [
+            json!({"kind": "code", "max_iterations": 2}),
+            json!({"kind": "code", "task": "", "max_iterations": 2}),
+            json!({"kind": "code", "task": "t", "max_iterations": 0}),
+            json!({"kind": "code", "task": "t", "budget": 0}),
+            json!({"kind": "text", "task": "t"}),
+        ] {
+            let resp = call(&f.state, post(body.to_string())).await;
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_json_error(resp, StatusCode::UNPROCESSABLE_ENTITY, "invalid_input").await;
+        }
+        let plain = fixture(1_000_000, None);
+        let resp = call(&plain.state, post(code_body(2).to_string())).await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
+use crate::code;
 use crate::journal::ThinkingState;
 use crate::journal::{
     Journal, JournalError, Record, ScriptFailure, dump_table, rows_in, seal_in, storage,
@@ -26,11 +27,15 @@ use crate::model::{Candle, Engine, FakeModel, Generation, Model, TEMPERATURE, TO
 use crate::raft::{Node, seal as sealing};
 use crate::sessions::{self, SESSIONS, Turn, TurnOutcome};
 use crate::store::{Command, GoalEvent, Response, Store};
+use crate::{checker, sandbox};
 
 const GOALS: TableDefinition<u64, (i64, u64)> = TableDefinition::new("goals");
 
 /// Tokens committed per transaction.
 const BATCH: u64 = 8;
+
+/// How long a coding goal's tests may run.
+const SANDBOX_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The most tokens a candle goal's prompt and output may hold together.
 const CONTEXT: u64 = 4096;
@@ -60,12 +65,35 @@ fn candle_start(
     })
 }
 
+/// One hash for a model and its tokenizer, each length-framed.
+fn combined_hash(candle: &Candle) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in [&candle.model_hash, &candle.tokenizer_hash] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 /// What a client asks for.
 pub struct GoalSpec {
     pub priority: i64,
     pub budget: u64,
     pub seed: u64,
     pub prompt: String,
+}
+
+/// Fix attempts and token budget of a coding goal that does not say.
+pub const DEFAULT_ITERATIONS: u32 = 5;
+pub const DEFAULT_CODE_BUDGET: u64 = 2048;
+
+/// What a client asks for when it wants a coding goal.
+pub struct CodeSpec {
+    pub task: String,
+    pub spec: String,
+    pub max_iterations: u32,
+    pub budget: u64,
+    pub seed: u64,
 }
 
 /// A goal that is queued or running.
@@ -86,6 +114,8 @@ pub struct GoalStatus {
     pub reason: Option<String>,
     /// The node the goal is assigned to; `None` on a single node or while unassigned.
     pub node: Option<u64>,
+    /// For a coding goal: its `outcome` and `iterations`, derived from committed records only.
+    pub code: Option<serde_json::Value>,
 }
 
 /// How long a worker waits before it tries a cluster command again.
@@ -139,6 +169,23 @@ struct Inner {
     fragments: OnceLock<PathBuf>,
     /// Tokens this node has generated, including any it generated again.
     generated: AtomicU64,
+}
+
+/// The seed of one iteration's sandbox run: the goal's seed and the iteration, hashed.
+fn run_seed(goal_seed: u64, iteration: u32) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&goal_seed.to_le_bytes());
+    hasher.update(&iteration.to_le_bytes());
+    let hash = hasher.finalize();
+    u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap_or_default())
+}
+
+/// The seed a coding goal's start record carries.
+fn code_seed(records: &[Record]) -> u64 {
+    match records.first() {
+        Some(Record::CodeStart { seed, .. }) => *seed,
+        _ => 0,
+    }
 }
 
 /// The start record of a fake-model generation from `seed` and `prompt`.
@@ -498,6 +545,49 @@ impl Goals {
         candle_start(candle, spec.seed, prompt_tokens, spec.budget)
     }
 
+    /// The engine name and model hash a coding goal on this node records; `None` for a node with
+    /// neither replies nor a model.
+    fn code_engine(&self) -> Option<(&'static str, String)> {
+        match self.0.engine.get() {
+            Some(Engine::Replay { hash, .. }) => Some(("replay", hash.clone())),
+            Some(Engine::Candle(c)) => Some(("candle", combined_hash(c))),
+            _ => None,
+        }
+    }
+
+    /// The text of a coding reply's tokens on this node's engine: UTF-8 bytes for replies, and for
+    /// the model the answer after any `<think>` block.
+    fn decode_reply(&self, tokens: &[u32]) -> String {
+        match self.0.engine.get() {
+            Some(Engine::Candle(c)) => final_text(&c.render(tokens, true)).to_string(),
+            _ => String::from_utf8_lossy(&tokens.iter().map(|t| *t as u8).collect::<Vec<_>>())
+                .into_owned(),
+        }
+    }
+
+    /// The start record of a coding goal on this node's engine. `Err` says why it cannot run.
+    pub fn code_start(&self, spec: CodeSpec) -> Result<Record, String> {
+        let Some((engine, model_hash)) = self.code_engine() else {
+            return Err("coding goals need MODEL.REPLIES or MODEL.PATH".into());
+        };
+        if spec.budget > CONTEXT {
+            return Err(format!(
+                "budget must fit in {CONTEXT} tokens, got {}",
+                spec.budget
+            ));
+        }
+        Ok(Record::CodeStart {
+            task: spec.task,
+            spec: spec.spec,
+            max_iterations: spec.max_iterations,
+            budget: spec.budget,
+            seed: spec.seed,
+            engine: engine.into(),
+            model_hash,
+            checker_hash: checker::hash(),
+        })
+    }
+
     /// Create a goal that runs `source` as the script `name`, and queue it.
     pub fn create_script(
         &self,
@@ -565,6 +655,20 @@ impl Goals {
         turn: u64,
         prompt: &str,
     ) -> Result<Result<Option<Record>, String>, JournalError> {
+        if let Some((task, spec)) = sessions::code_prompt(prompt) {
+            if task.is_empty() {
+                return Ok(Err("task must not be empty".into()));
+            }
+            return Ok(self
+                .code_start(CodeSpec {
+                    task: task.into(),
+                    spec: spec.into(),
+                    max_iterations: DEFAULT_ITERATIONS,
+                    budget: DEFAULT_CODE_BUDGET,
+                    seed: sessions::seed(session, turn),
+                })
+                .map(Some));
+        }
         let Some(Engine::Candle(candle)) = self.0.engine.get() else {
             return Ok(Ok(None));
         };
@@ -578,7 +682,11 @@ impl Goals {
             return Ok(Ok(None));
         }
         let mut history = Vec::new();
-        for earlier in &turns {
+        // A coding turn has no chat reply, so later plain turns do not see it.
+        for earlier in turns
+            .iter()
+            .filter(|t| sessions::code_prompt(&t.prompt).is_none())
+        {
             let output = self
                 .status(earlier.goal)?
                 .and_then(|status| status.output)
@@ -688,13 +796,20 @@ impl Goals {
                     error: Some("journal_corrupt"),
                     reason: None,
                     node,
+                    code: None,
                 }));
             }
             Err(e) => return Err(e),
         };
         let progress = records.len() > 1;
         let cancelled = matches!(records.last(), Some(Record::Cancelled));
+        let code = code::view(&records, &|t| self.decode_reply(t));
         let (status, error, output, reason) = match records.last() {
+            Some(Record::CodeEnd { .. }) => ("done", None, None, None),
+            _ if code.is_some() => {
+                let (status, error) = flags(cancelled, running, failed, false, progress);
+                (status, error, None, None)
+            }
             Some(Record::ScriptEnd { outcome: Ok(value) }) => {
                 ("done", None, Some(value.clone()), None)
             }
@@ -719,6 +834,7 @@ impl Goals {
             error,
             reason,
             node,
+            code,
         }))
     }
 
@@ -763,10 +879,15 @@ impl Goals {
         fence: &Fence,
         generation: &mut Option<Generation<'a>>,
     ) -> Result<bool, JournalError> {
-        let state = self
-            .0
-            .journal
-            .restore(goal.id)?
+        let records = self.0.journal.read(goal.id)?;
+        if matches!(records.first(), Some(Record::CodeStart { .. })) {
+            let result = self.step_code(goal, fence, &records, generation);
+            if result.is_err() {
+                *generation = None;
+            }
+            return result;
+        }
+        let state = Journal::rebuild(goal.id, records)?
             .ok_or_else(|| JournalError::Storage(format!("goal {} has no stream", goal.id)))?;
         if state.ended.is_some() {
             return Ok(true);
@@ -780,6 +901,136 @@ impl Goals {
             *generation = None;
         }
         result
+    }
+
+    /// The next step of a coding goal, derived from its committed records and committed in one
+    /// write: a model call, a batch of its reply, a check, a run, or the end.
+    fn step_code<'a>(
+        &'a self,
+        goal: &Goal,
+        fence: &Fence,
+        records: &[Record],
+        generation: &mut Option<Generation<'a>>,
+    ) -> Result<bool, JournalError> {
+        let state = code::fold(records, &|t| self.decode_reply(t))
+            .ok_or_else(|| JournalError::Storage("not a code goal".into()))?;
+        let modelled = match self.0.engine.get() {
+            Some(Engine::Replay { replies, .. }) => state.step(replies, BATCH as usize),
+            Some(Engine::Candle(candle)) => {
+                self.candle_code_step(candle, records, &state, generation)?
+            }
+            _ => return Err(JournalError::Storage("this node has no model".into())),
+        };
+        let next = match (modelled, &state.next) {
+            (Some(next), _) => next,
+            (None, code::Next::Check(files)) => {
+                let found =
+                    checker::check(files).map_err(|e| JournalError::Storage(e.to_string()))?;
+                vec![Record::Check {
+                    diagnostics: found.diagnostics,
+                    js: found.js,
+                }]
+            }
+            (None, code::Next::Run(js)) => {
+                let seed = run_seed(code_seed(records), state.iterations.len() as u32);
+                vec![Record::Run(sandbox::run(js, seed, SANDBOX_TIMEOUT))]
+            }
+            (None, _) => return Ok(true),
+        };
+        let count: u64 = next
+            .iter()
+            .map(|r| match r {
+                Record::Tokens { tokens, .. } => tokens.len() as u64,
+                _ => 0,
+            })
+            .sum();
+        std::thread::sleep(Duration::from_secs_f64(count as f64 * self.0.token_secs));
+        let more = self.commit_records(goal.id, fence, records.len() as u64, next)?;
+        self.0.generated.fetch_add(count, Ordering::Relaxed);
+        Ok(more)
+    }
+
+    /// The records of a coding goal's next model step on the candle engine: a model call with its
+    /// prompt tokens, a batch of the open reply sampled from `generation`, or the end. `None`
+    /// for a check, a run or a finished stream.
+    fn candle_code_step<'a>(
+        &'a self,
+        candle: &'a Candle,
+        records: &[Record],
+        state: &code::Loop,
+        generation: &mut Option<Generation<'a>>,
+    ) -> Result<Option<Vec<Record>>, JournalError> {
+        match &state.next {
+            code::Next::Call {
+                iteration,
+                attempt,
+                prompt,
+            } => {
+                *generation = None;
+                let prompt_tokens = candle.encode(prompt).map_err(JournalError::Storage)?;
+                if prompt_tokens.len() as u64 + state.budget > CONTEXT {
+                    // With no canned replies, a call is the end of the goal: llm_error.
+                    return Ok(state.step(&[], 0));
+                }
+                Ok(Some(vec![Record::ReplyStart {
+                    iteration: *iteration,
+                    attempt: *attempt,
+                    prompt: prompt.clone(),
+                    prompt_tokens,
+                }]))
+            }
+            code::Next::Generate => self
+                .candle_code_batch(candle, records, state, generation)
+                .map(Some),
+            _ => Ok(state.step(&[], 0)),
+        }
+    }
+
+    /// The records of the open reply's next batch, sampled from `generation` (opened from the
+    /// committed records when it is not live).
+    fn candle_code_batch<'a>(
+        &'a self,
+        candle: &'a Candle,
+        records: &[Record],
+        state: &code::Loop,
+        generation: &mut Option<Generation<'a>>,
+    ) -> Result<Vec<Record>, JournalError> {
+        let live = match generation {
+            Some(live) => live,
+            None => {
+                let open = records.iter().rev().find_map(|r| match r {
+                    Record::ReplyStart { prompt_tokens, .. } => Some(prompt_tokens),
+                    _ => None,
+                });
+                let committed = state.iterations.last().map_or(&[][..], |i| &i.reply);
+                let seed = run_seed(code_seed(records), state.calls as u32);
+                let made =
+                    Generation::new(candle, seed, open.map_or(&[][..], Vec::as_slice), committed)
+                        .map_err(JournalError::Storage)?;
+                generation.insert(made)
+            }
+        };
+        let room = (state.budget as usize).saturating_sub(state.open);
+        let mut tokens = Vec::new();
+        let mut eos = false;
+        while tokens.len() < room.min(BATCH as usize) && !eos {
+            let token = live.next_token().map_err(JournalError::Storage)?;
+            tokens.push(token);
+            eos = candle.is_eos(token);
+        }
+        let ends = eos || tokens.len() == room;
+        let reason = if eos { "eos" } else { "budget" };
+        let mut next = vec![Record::Tokens {
+            tokens,
+            rng_state: Vec::new(),
+        }];
+        if ends {
+            *generation = None;
+            next.push(Record::ReplyEnd {
+                reason: reason.into(),
+            });
+        }
+        Ok(next)
     }
 
     /// The next batch of a fake-model goal, after the time the model needs for it.
@@ -856,16 +1107,28 @@ impl Goals {
         records.extend(end.map(|reason| Record::InferenceEnd {
             reason: reason.into(),
         }));
+        self.commit_records(goal.id, fence, state.next_seq, records)
+    }
+
+    /// Commit `records` from `seq` on in one write under `fence`; returns whether the stream has
+    /// ended.
+    fn commit_records(
+        &self,
+        id: u64,
+        fence: &Fence,
+        seq: u64,
+        records: Vec<Record>,
+    ) -> Result<bool, JournalError> {
         if self.0.me.is_some() {
-            return self.append(goal.id, fence, state.next_seq, records);
+            return self.append(id, fence, seq, records);
         }
         let txn = self.0.db.begin_write().map_err(storage)?;
         lease::check_in(&txn, fence)?;
-        for (seq, record) in (state.next_seq..).zip(&records) {
-            self.0.journal.append_in(&txn, goal.id, seq, record)?;
+        for (seq, record) in (seq..).zip(&records) {
+            self.0.journal.append_in(&txn, id, seq, record)?;
         }
         txn.commit().map_err(storage)?;
-        Ok(end.is_some())
+        Ok(records.last().is_some_and(Record::ends_stream))
     }
 
     /// Append `records` through Raft under `fence`; returns whether the goal had ended or now has.
@@ -1113,6 +1376,17 @@ impl Goals {
                 Some(Engine::Candle(c))
                     if c.model_hash == *model_hash && c.tokenizer_hash == *tokenizer_hash
             ),
+            Some(Record::CodeStart {
+                engine,
+                model_hash,
+                checker_hash,
+                ..
+            }) => {
+                *checker_hash == checker::hash()
+                    && self
+                        .code_engine()
+                        .is_some_and(|(name, hash)| name == engine && hash == *model_hash)
+            }
             _ => true,
         })
     }
@@ -1431,7 +1705,8 @@ mod tests {
                 output: Some(String::new()),
                 error: None,
                 reason: None,
-                node: None
+                node: None,
+                code: None
             }
         );
         assert_eq!(
@@ -1755,6 +2030,7 @@ mod tests {
             error: Some("journal_corrupt"),
             reason: None,
             node: None,
+            code: None,
         };
         assert_eq!(status(&goals, bad), failed);
         wait_for("good done", || status(&goals, good).status == "done");
@@ -1873,6 +2149,38 @@ mod tests {
     }
 
     #[test]
+    fn an_ended_or_cancelled_coding_goal_is_stepped_no_further() {
+        let dir = TempDir::new();
+        let goals = goals_at(&dir.path().join("db"));
+        goals.set_engine(Engine::Replay {
+            replies: Arc::new(vec![]),
+            hash: "h".into(),
+        });
+        let code = || CodeSpec {
+            task: "t".into(),
+            spec: String::new(),
+            max_iterations: 2,
+            budget: 10,
+            seed: 0,
+        };
+        let new = || {
+            let start = goals.code_start(code()).unwrap();
+            let id = goals.create_from(0, 10, &start).unwrap();
+            (id, goals.next_goal().unwrap())
+        };
+        let (ended, goal) = new();
+        run(&goals, goal.clone());
+        let (cancelled, other) = new();
+        goals.cancel(cancelled).unwrap();
+        for (id, goal) in [(ended, goal), (cancelled, other)] {
+            let before = status(&goals, id);
+            let fence = lease::claim(&goals.0.db, id).unwrap();
+            assert_eq!(step(&goals, &goal, &fence), Ok(true));
+            assert_eq!(status(&goals, id), before);
+        }
+    }
+
+    #[test]
     fn a_stale_fence_commits_nothing_even_on_the_final_batch() {
         let dir = TempDir::new();
         let db = open(&dir.path().join("db")).unwrap();
@@ -1918,7 +2226,8 @@ mod tests {
                 output: None,
                 error: Some("journal_corrupt"),
                 reason: None,
-                node: None
+                node: None,
+                code: None
             }
         );
         drop((goals, db));
@@ -1945,7 +2254,8 @@ mod tests {
                 output: Some(String::new()),
                 error: Some("storage_failure"),
                 reason: None,
-                node: None
+                node: None,
+                code: None
             }
         );
         assert_eq!(goals.next_goal(), None);
@@ -2050,6 +2360,7 @@ mod tests {
             error,
             reason: None,
             node: None,
+            code: None,
         }
     }
 
@@ -2475,7 +2786,8 @@ mod tests {
                 output: None,
                 error: None,
                 reason: None,
-                node: None
+                node: None,
+                code: None
             }
         );
         assert_eq!(goals.records(id).unwrap().len(), 1);
